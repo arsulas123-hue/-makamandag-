@@ -1,26 +1,27 @@
 
 import os
 import sqlite3
-
-from flask_sqlalchemy import SQLAlchemy
 import datetime
 import hashlib
 import secrets
 from functools import wraps
 from flask import Flask, request, jsonify, session, send_from_directory
+from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 import numpy as np
 from sklearn.linear_model import LinearRegression
 import json
 
+# 1. Create the app FIRST
+app = Flask(__name__, static_folder='static')
+CORS(app)
 
-
-# This tells the app to use Render's database if available, 
-# otherwise use a local test file
+# 2. NOW you can configure it (this was line 20)
+app.config['SECRET_KEY'] = 'your-very-secret-key'
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///test.db')
+
+# 3. Then initialize the database
 db = SQLAlchemy(app)
-
-
 # -------------------- Database Setup --------------------
 DB_PATH = 'smartspend.db'
 
