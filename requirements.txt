@@ -1,5 +1,6 @@
 setuptools
 wheel
-flask
+Flask
+Flask-Cors
 gunicorn
-psycopg2-binary
+numpy
