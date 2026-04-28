@@ -472,6 +472,8 @@ def admin_toggle(uid):
 
 @app.route('/api/admin/users/<int:uid>/role', methods=['POST'])
 @admin_required
+@app.route('/api/admin/users/<int:uid>/role', methods=['POST'])
+@admin_required
 def admin_role(uid):
     data = request.json
     new_role = data.get('role')
@@ -481,8 +483,6 @@ def admin_role(uid):
         conn.execute("UPDATE users SET role = ? WHERE id = ?", (new_role, uid))
         log_audit(session['user_id'], 'admin_role_change', request.remote_addr, f'Changed role to {new_role}')
     return jsonify({'message': 'Role updated'})
-
-
         'content': '<h3>Terms & Conditions</h3><p>Use responsibly. Your data is private.</p>'
     })
 
