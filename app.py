@@ -1,4 +1,3 @@
-
 import os
 import sqlite3
 import datetime
@@ -6,23 +5,15 @@ import hashlib
 import secrets
 from functools import wraps
 from flask import Flask, request, jsonify, session, send_from_directory
-from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 import numpy as np
 from sklearn.linear_model import LinearRegression
-import json
 
-# 1. Create the app FIRST
 app = Flask(__name__, static_folder='static')
-CORS(app)
+CORS(app, supports_credentials=True)  # Allow cookies
 
-# 2. NOW you can configure it (this was line 20)
-app.config['SECRET_KEY'] = 'your-very-secret-key'
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///test.db')
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', secrets.token_hex(32))
 
-# 3. Then initialize the database
-db = SQLAlchemy(app)
-# -------------------- Database Setup --------------------
 DB_PATH = 'smartspend.db'
 
 def get_db():
@@ -32,7 +23,6 @@ def get_db():
 
 def init_db():
     with get_db() as conn:
-        # Users table
         conn.execute('''CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
@@ -47,7 +37,6 @@ def init_db():
             terms_version TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )''')
-        # Transactions table
         conn.execute('''CREATE TABLE IF NOT EXISTS transactions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
@@ -58,7 +47,6 @@ def init_db():
             tx_date TEXT DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         )''')
-        # Budgets table
         conn.execute('''CREATE TABLE IF NOT EXISTS budgets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
@@ -67,7 +55,6 @@ def init_db():
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(user_id, category)
         )''')
-        # Audit logs
         conn.execute('''CREATE TABLE IF NOT EXISTS audit_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
@@ -76,7 +63,6 @@ def init_db():
             detail TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )''')
-        # Create default admin if no users exist
         admin_exists = conn.execute("SELECT * FROM users WHERE role='admin'").fetchone()
         if not admin_exists:
             hashed = hashlib.sha256('admin123'.encode()).hexdigest()
@@ -85,7 +71,6 @@ def init_db():
 
 init_db()
 
-# -------------------- Helper Functions --------------------
 def hash_password(pwd):
     return hashlib.sha256(pwd.encode()).hexdigest()
 
@@ -114,22 +99,16 @@ def admin_required(f):
         return f(*args, **kwargs)
     return decorated
 
-# -------------------- ML Module --------------------
+# -------------------- ML Functions (keep as in your code) --------------------
 def calculate_health_score(user_id, transactions, budgets):
-    """Calculate financial health score (0-100) using ML-like logic"""
-    # Filter expenses
+    # (keep your existing implementation)
     expenses = [t for t in transactions if t['tx_type'] == 'expense']
     income = sum(t['amount'] for t in transactions if t['tx_type'] == 'income')
     total_expense = sum(e['amount'] for e in expenses)
-    
-    score = 70  # base
-    
-    # Savings rate contribution (max +20)
+    score = 70
     if income > 0:
         savings_rate = (income - total_expense) / income
         score += min(20, max(0, savings_rate * 40))
-    
-    # Budget compliance (max +10)
     compliance_score = 0
     budget_count = 0
     for cat, limit in budgets.items():
@@ -142,31 +121,23 @@ def calculate_health_score(user_id, transactions, budgets):
                 compliance_score += 0.5
     if budget_count > 0:
         score += (compliance_score / budget_count) * 10
-    
-    # Spending volatility penalty (max -10)
     if len(expenses) > 3:
         amounts = [e['amount'] for e in expenses[-12:]]
         if len(amounts) > 1:
             volatility = np.std(amounts) / (np.mean(amounts) + 0.01)
             penalty = min(10, volatility * 2)
             score -= penalty
-    
     return max(0, min(100, round(score)))
 
 def forecast_spending(transactions, weeks=4):
-    """Use linear regression to forecast future weekly spending"""
-    # Prepare data: group expenses by week
+    # (keep your existing implementation)
     expenses = [t for t in transactions if t['tx_type'] == 'expense']
     if len(expenses) < 3:
-        # Fallback: moving average + random
         avg = np.mean([t['amount'] for t in expenses]) if expenses else 2000
         return {f'Week {i+1}': round(avg * (0.9 + 0.2 * np.random.random())) for i in range(weeks)}
-    
-    # Sort by date and compute weekly totals
     expenses_sorted = sorted(expenses, key=lambda x: x['tx_date'])
     start_date = datetime.datetime.strptime(expenses_sorted[0]['tx_date'][:10], '%Y-%m-%d')
     weekly_totals = []
-    week_labels = []
     current_week = start_date.isocalendar()[1]
     current_total = 0
     for tx in expenses_sorted:
@@ -174,36 +145,30 @@ def forecast_spending(transactions, weeks=4):
         week_num = tx_date.isocalendar()[1]
         if week_num != current_week:
             weekly_totals.append(current_total)
-            week_labels.append(current_week)
             current_total = tx['amount']
             current_week = week_num
         else:
             current_total += tx['amount']
     if current_total > 0:
         weekly_totals.append(current_total)
-        week_labels.append(current_week)
-    
     if len(weekly_totals) < 2:
         avg = np.mean(weekly_totals) if weekly_totals else 2000
         return {f'Week {i+1}': round(avg * (0.9 + 0.2 * np.random.random())) for i in range(weeks)}
-    
-    # Linear regression on week indices
     X = np.array(range(len(weekly_totals))).reshape(-1, 1)
     y = np.array(weekly_totals)
     model = LinearRegression()
     model.fit(X, y)
     future_weeks = np.array(range(len(weekly_totals), len(weekly_totals) + weeks)).reshape(-1, 1)
     predictions = model.predict(future_weeks)
-    predictions = np.maximum(predictions, 0)  # no negative spending
+    predictions = np.maximum(predictions, 0)
     return {f'Week {i+1}': round(predictions[i]) for i in range(weeks)}
 
 def generate_advice(user_id, transactions, budgets):
-    """Generate personalized budget advice"""
+    # (keep your existing implementation)
     expenses = [t for t in transactions if t['tx_type'] == 'expense']
     cat_spending = {}
     for exp in expenses:
         cat_spending[exp['category']] = cat_spending.get(exp['category'], 0) + exp['amount']
-    
     advice = []
     for cat, spent in cat_spending.items():
         limit = budgets.get(cat, 0)
@@ -221,10 +186,6 @@ def generate_advice(user_id, transactions, budgets):
     return advice
 
 # -------------------- API Routes --------------------
-@app.route('/')
-def serve_frontend():
-    return send_from_directory('static', 'index.html')
-
 @app.route('/api/register', methods=['POST'])
 def register():
     data = request.json
@@ -261,7 +222,6 @@ def login():
     password = data.get('password')
     if not email or not password:
         return jsonify({'error': 'Email and password required'}), 400
-    
     with get_db() as conn:
         user = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
         if not user or user['password'] != hash_password(password):
@@ -269,7 +229,6 @@ def login():
             return jsonify({'error': 'Invalid credentials'}), 401
         if not user['is_active']:
             return jsonify({'error': 'Account disabled'}), 401
-        
         session['user_id'] = user['id']
         conn.execute("UPDATE users SET login_count = login_count + 1, last_login = CURRENT_TIMESTAMP, last_ip = ? WHERE id = ?",
                      (request.remote_addr, user['id']))
@@ -331,7 +290,6 @@ def add_transaction():
     note = data.get('note', '')
     if not amount or amount <= 0 or not category or tx_type not in ('income', 'expense'):
         return jsonify({'error': 'Invalid transaction data'}), 400
-    
     with get_db() as conn:
         conn.execute("INSERT INTO transactions (user_id, amount, category, tx_type, note) VALUES (?, ?, ?, ?, ?)",
                      (user_id, amount, category, tx_type, note))
@@ -366,7 +324,6 @@ def summary(user_id):
                 COUNT(*) as tx_count
             FROM transactions WHERE user_id = ?
         ''', (user_id,)).fetchone()
-        # Monthly breakdown
         months = conn.execute('''
             SELECT strftime('%Y-%m', tx_date) as month,
                 SUM(CASE WHEN tx_type = 'income' THEN amount ELSE 0 END) as income,
@@ -393,8 +350,6 @@ def predict(user_id):
         transactions = [dict(t) for t in txns]
         budgets_rows = conn.execute("SELECT category, limit_amount FROM budgets WHERE user_id = ?", (user_id,)).fetchall()
         budgets = {b['category']: b['limit_amount'] for b in budgets_rows}
-    
-    # ML functions
     score = calculate_health_score(user_id, transactions, budgets)
     forecast = forecast_spending(transactions)
     categories = {}
@@ -402,7 +357,6 @@ def predict(user_id):
         if t['tx_type'] == 'expense':
             categories[t['category']] = categories.get(t['category'], 0) + t['amount']
     advice = generate_advice(user_id, transactions, budgets)
-    
     return jsonify({
         'score': score,
         'predictions': {'weekly': forecast, 'categories': categories},
@@ -434,7 +388,6 @@ def set_budget(user_id):
                      (user_id, category, limit, limit))
         return jsonify({'message': 'Budget saved'})
 
-# -------------------- Admin Routes --------------------
 @app.route('/api/admin/stats')
 @admin_required
 def admin_stats():
@@ -462,6 +415,7 @@ def admin_logs():
     with get_db() as conn:
         logs = conn.execute("SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 200").fetchall()
         return jsonify([dict(l) for l in logs])
+
 @app.route('/api/admin/users/<int:uid>/toggle', methods=['POST'])
 @admin_required
 def admin_toggle(uid):
@@ -477,14 +431,16 @@ def terms():
         'content': '<h3>Terms & Conditions</h3><p>Use responsibly. Your data is private.</p>'
     })
 
-# --- ADD THIS BLOCK TO FIX THE "REGISTER" AND "DASHBOARD" OUTPUT ---
+# -------------------- Serve frontend (catch-all) --------------------
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def serve_index(path):
-    # This tells Flask: if you don't recognize the URL (like /register), 
-    # just serve index.html and let the JavaScript handle it.
+    # If the path starts with "api/", then it's an API call that wasn't matched (404)
+    if path.startswith('api/'):
+        return jsonify({'error': 'API endpoint not found'}), 404
+    # Otherwise serve index.html (for client-side routing)
     return send_from_directory(app.static_folder, 'index.html')
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
