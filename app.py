@@ -473,12 +473,12 @@ def admin_toggle(uid):
 @app.route('/api/admin/users/<int:uid>/role', methods=['POST'])
 @admin_required
 def admin_role(uid):
-    data = request.json
-    new_role = data.get('role')
-    if new_role not in ('admin', 'user'):
-        return jsonify({'error': 'Invalid role'}), 400
-    with get_db() as conn:
-        conn.execute("UPDATE users SET role = ? WHERE id = ?", (new_role, uid))
+        data = request.json
+        new_role = data.get('role')
+        if new_role not in ('admin', 'user'):
+            return jsonify({'error': 'Invalid role'}), 400
+     with get_db() as conn:
+         conn.execute("UPDATE users SET role = ? WHERE id = ?", (new_role, uid))
 
     return jsonify({'message': 'Role updated'})
         'content': '<h3>Terms & Conditions</h3><p>Use responsibly. Your data is private.</p>'
