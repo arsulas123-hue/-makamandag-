@@ -462,7 +462,6 @@ def admin_logs():
     with get_db() as conn:
         logs = conn.execute("SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 200").fetchall()
         return jsonify([dict(l) for l in logs])
-
 @app.route('/api/admin/users/<int:uid>/toggle', methods=['POST'])
 @admin_required
 def admin_toggle(uid):
@@ -471,9 +470,6 @@ def admin_toggle(uid):
         log_audit(session['user_id'], 'admin_toggle', request.remote_addr, f'Toggled user {uid}')
         return jsonify({'message': 'Toggled'})
 
-        conn.execute("UPDATE users SET role = ? WHERE id = ?", (new_role, uid))
-        log_audit(session['user_id'], 'admin_role_change', request.remote_addr, f'Changed role to {new_role}')
-    return jsonify({'message': 'Role updated'})
 @app.route('/api/terms')
 def terms():
     return jsonify({
@@ -482,8 +478,5 @@ def terms():
     })
 
 
-
-
-if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
