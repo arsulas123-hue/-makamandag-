@@ -481,7 +481,7 @@ def admin_role(uid):
     with get_db() as conn:
         conn.execute("UPDATE users SET role = ? WHERE id = ?", (new_role, uid))
 log_audit(session['user_id'], 'admin_role_change', request.remote_addr, f'Changed user {uid} role to {new_role}')
-        return jsonify({'message': 'Role updated'})
+    return jsonify({'message': 'Role updated'})
 
 # -------------------- Terms --------------------
 @app.route('/api/terms')
