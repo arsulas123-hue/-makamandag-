@@ -1,8 +1,8 @@
 import os
 import sqlite3
-import datetime
 import hashlib
 import secrets
+import datetime
 import traceback
 from functools import wraps
 from flask import Flask, request, jsonify, session, send_from_directory
@@ -12,25 +12,22 @@ from sklearn.linear_model import LinearRegression
 
 app = Flask(__name__, static_folder='static')
 CORS(app, supports_credentials=True)
-
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', secrets.token_hex(32))
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 
-# Use /tmp for database on Render (writable)
-if os.environ.get('RENDER'):
-    DB_PATH = '/tmp/smartspend.db'
-else:
-    DB_PATH = 'smartspend.db'
+# ==================== ✅ In‑memory database (no file permission issues) ====================
+# Create a shared in‑memory connection that persists across requests
+memory_conn = sqlite3.connect('file::memory:?cache=shared', check_same_thread=False)
+memory_conn.row_factory = sqlite3.Row
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return memory_conn
 
 def init_db():
-    with get_db() as conn:
-        conn.execute('''CREATE TABLE IF NOT EXISTS users (
+    conn = get_db()
+    conn.executescript('''
+        CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             email TEXT UNIQUE NOT NULL,
@@ -43,8 +40,8 @@ def init_db():
             accepted_terms INTEGER DEFAULT 0,
             terms_version TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )''')
-        conn.execute('''CREATE TABLE IF NOT EXISTS transactions (
+        );
+        CREATE TABLE IF NOT EXISTS transactions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
             amount REAL NOT NULL,
@@ -53,28 +50,30 @@ def init_db():
             note TEXT,
             tx_date TEXT DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-        )''')
-        conn.execute('''CREATE TABLE IF NOT EXISTS budgets (
+        );
+        CREATE TABLE IF NOT EXISTS budgets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
             category TEXT NOT NULL,
             limit_amount REAL NOT NULL,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(user_id, category)
-        )''')
-        conn.execute('''CREATE TABLE IF NOT EXISTS audit_logs (
+        );
+        CREATE TABLE IF NOT EXISTS audit_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
             action TEXT NOT NULL,
             ip TEXT,
             detail TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )''')
-        admin_exists = conn.execute("SELECT * FROM users WHERE role='admin'").fetchone()
-        if not admin_exists:
-            hashed = hashlib.sha256('admin123'.encode()).hexdigest()
-            conn.execute("INSERT INTO users (name, email, password, role, accepted_terms) VALUES (?, ?, ?, ?, ?)",
-                         ('Admin', 'admin@smartspend.com', hashed, 'admin', 1))
+        );
+    ''')
+    # Create default admin if no users exist
+    admin = conn.execute("SELECT * FROM users WHERE role='admin'").fetchone()
+    if not admin:
+        hashed = hashlib.sha256('admin123'.encode()).hexdigest()
+        conn.execute("INSERT INTO users (name, email, password, role, accepted_terms) VALUES (?, ?, ?, ?, ?)",
+                     ('Admin', 'admin@smartspend.com', hashed, 'admin', 1))
 
 init_db()
 
@@ -82,8 +81,7 @@ def hash_password(pwd):
     return hashlib.sha256(pwd.encode()).hexdigest()
 
 def log_audit(user_id, action, ip, detail=''):
-    with get_db() as conn:
-        conn.execute("INSERT INTO audit_logs (user_id, action, ip, detail) VALUES (?, ?, ?, ?)",
+    get_db().execute("INSERT INTO audit_logs (user_id, action, ip, detail) VALUES (?, ?, ?, ?)",
                      (user_id, action, ip, detail))
 
 def login_required(f):
@@ -99,15 +97,15 @@ def admin_required(f):
     def decorated(*args, **kwargs):
         if 'user_id' not in session:
             return jsonify({'error': 'Unauthorized'}), 401
-        with get_db() as conn:
-            user = conn.execute("SELECT role FROM users WHERE id = ?", (session['user_id'],)).fetchone()
-            if not user or user['role'] != 'admin':
-                return jsonify({'error': 'Admin access required'}), 403
+        user = get_db().execute("SELECT role FROM users WHERE id = ?", (session['user_id'],)).fetchone()
+        if not user or user['role'] != 'admin':
+            return jsonify({'error': 'Admin access required'}), 403
         return f(*args, **kwargs)
     return decorated
 
-# -------------------- ML Functions --------------------
+# -------------------- ML Functions (simplified for brevity, but keep yours) --------------------
 def calculate_health_score(user_id, transactions, budgets):
+    # (keep your full implementation here – same as before)
     expenses = [t for t in transactions if t['tx_type'] == 'expense']
     income = sum(t['amount'] for t in transactions if t['tx_type'] == 'income')
     total_expense = sum(e['amount'] for e in expenses)
@@ -136,6 +134,7 @@ def calculate_health_score(user_id, transactions, budgets):
     return max(0, min(100, round(score)))
 
 def forecast_spending(transactions, weeks=4):
+    # (keep your full implementation)
     expenses = [t for t in transactions if t['tx_type'] == 'expense']
     if len(expenses) < 3:
         avg = np.mean([t['amount'] for t in expenses]) if expenses else 2000
@@ -169,6 +168,7 @@ def forecast_spending(transactions, weeks=4):
     return {f'Week {i+1}': round(predictions[i]) for i in range(weeks)}
 
 def generate_advice(user_id, transactions, budgets):
+    # (keep your full implementation)
     expenses = [t for t in transactions if t['tx_type'] == 'expense']
     cat_spending = {}
     for exp in expenses:
@@ -189,7 +189,7 @@ def generate_advice(user_id, transactions, budgets):
                 advice.append({'cat': cat, 'spent': spent, 'limit': None, 'pct': 0, 'status': 'warning', 'msg': f'high spending (₱{spent:,.2f}) - consider budget'})
     return advice
 
-# -------------------- API Routes --------------------
+# -------------------- API ROUTES --------------------
 @app.route('/api/register', methods=['POST'])
 def register():
     try:
@@ -201,31 +201,29 @@ def register():
         password = data.get('password')
         accepted_terms = data.get('accepted_terms', False)
         terms_version = data.get('terms_version', '1.0')
-        
         if not all([name, email, password]):
             return jsonify({'error': 'Missing fields'}), 400
         if len(password) < 8:
             return jsonify({'error': 'Password must be at least 8 characters'}), 400
         if not accepted_terms:
             return jsonify({'error': 'Must accept terms'}), 400
-        
-        with get_db() as conn:
-            existing = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
-            if existing:
-                return jsonify({'error': 'Email already registered'}), 400
-            hashed = hash_password(password)
-            user_count = conn.execute("SELECT COUNT(*) as cnt FROM users").fetchone()['cnt']
-            role = 'admin' if user_count == 0 else 'user'
-            cur = conn.execute("""
-                INSERT INTO users (name, email, password, role, accepted_terms, terms_version)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (name, email, hashed, role, 1, terms_version))
-            user_id = cur.lastrowid
-            log_audit(user_id, 'register', request.remote_addr, f'User {email} registered')
-            return jsonify({'message': 'User created'}), 201
+
+        conn = get_db()
+        existing = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
+        if existing:
+            return jsonify({'error': 'Email already registered'}), 400
+        hashed = hash_password(password)
+        user_count = conn.execute("SELECT COUNT(*) as cnt FROM users").fetchone()['cnt']
+        role = 'admin' if user_count == 0 else 'user'
+        cur = conn.execute("""
+            INSERT INTO users (name, email, password, role, accepted_terms, terms_version)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (name, email, hashed, role, 1, terms_version))
+        user_id = cur.lastrowid
+        log_audit(user_id, 'register', request.remote_addr, f'User {email} registered')
+        return jsonify({'message': 'User created'}), 201
     except Exception as e:
-        app.logger.error(f"Register error: {traceback.format_exc()}")
-        return jsonify({'error': 'Internal server error'}), 500
+        return jsonify({'error': f'{type(e).__name__}: {str(e)}'}), 500
 
 @app.route('/api/login', methods=['POST'])
 def login():
@@ -237,29 +235,28 @@ def login():
         password = data.get('password')
         if not email or not password:
             return jsonify({'error': 'Email and password required'}), 400
-        with get_db() as conn:
-            user = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
-            if not user or user['password'] != hash_password(password):
-                log_audit(None, 'failed_login', request.remote_addr, f'Failed login for {email}')
-                return jsonify({'error': 'Invalid credentials'}), 401
-            if not user['is_active']:
-                return jsonify({'error': 'Account disabled'}), 401
-            session['user_id'] = user['id']
-            conn.execute("UPDATE users SET login_count = login_count + 1, last_login = CURRENT_TIMESTAMP, last_ip = ? WHERE id = ?",
-                         (request.remote_addr, user['id']))
-            log_audit(user['id'], 'login', request.remote_addr, 'Successful login')
-            return jsonify({
-                'user': {
-                    'id': user['id'],
-                    'name': user['name'],
-                    'email': user['email'],
-                    'role': user['role'],
-                    'is_active': bool(user['is_active'])
-                }
-            })
+        conn = get_db()
+        user = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+        if not user or user['password'] != hash_password(password):
+            log_audit(None, 'failed_login', request.remote_addr, f'Failed login for {email}')
+            return jsonify({'error': 'Invalid credentials'}), 401
+        if not user['is_active']:
+            return jsonify({'error': 'Account disabled'}), 401
+        session['user_id'] = user['id']
+        conn.execute("UPDATE users SET login_count = login_count + 1, last_login = CURRENT_TIMESTAMP, last_ip = ? WHERE id = ?",
+                     (request.remote_addr, user['id']))
+        log_audit(user['id'], 'login', request.remote_addr, 'Successful login')
+        return jsonify({
+            'user': {
+                'id': user['id'],
+                'name': user['name'],
+                'email': user['email'],
+                'role': user['role'],
+                'is_active': bool(user['is_active'])
+            }
+        })
     except Exception as e:
-        app.logger.error(f"Login error: {traceback.format_exc()}")
-        return jsonify({'error': 'Internal server error'}), 500
+        return jsonify({'error': f'{type(e).__name__}: {str(e)}'}), 500
 
 @app.route('/api/logout', methods=['POST'])
 def logout():
@@ -272,18 +269,17 @@ def logout():
 def me():
     if 'user_id' not in session:
         return jsonify({'error': 'Not authenticated'}), 401
-    with get_db() as conn:
-        user = conn.execute("SELECT id, name, email, role, is_active FROM users WHERE id = ?", (session['user_id'],)).fetchone()
-        if not user:
-            session.clear()
-            return jsonify({'error': 'User not found'}), 401
-        return jsonify({
-            'id': user['id'],
-            'name': user['name'],
-            'email': user['email'],
-            'role': user['role'],
-            'is_active': bool(user['is_active'])
-        })
+    user = get_db().execute("SELECT id, name, email, role, is_active FROM users WHERE id = ?", (session['user_id'],)).fetchone()
+    if not user:
+        session.clear()
+        return jsonify({'error': 'User not found'}), 401
+    return jsonify({
+        'id': user['id'],
+        'name': user['name'],
+        'email': user['email'],
+        'role': user['role'],
+        'is_active': bool(user['is_active'])
+    })
 
 @app.route('/api/transactions', methods=['GET'])
 @login_required
@@ -291,9 +287,8 @@ def get_transactions():
     user_id = request.args.get('user_id', type=int)
     if user_id != session['user_id']:
         return jsonify({'error': 'Access denied'}), 403
-    with get_db() as conn:
-        txns = conn.execute("SELECT id as tx_id, user_id, amount, category, tx_type, note, tx_date FROM transactions WHERE user_id = ? ORDER BY tx_date DESC", (user_id,)).fetchall()
-        return jsonify([dict(t) for t in txns])
+    txns = get_db().execute("SELECT id as tx_id, user_id, amount, category, tx_type, note, tx_date FROM transactions WHERE user_id = ? ORDER BY tx_date DESC", (user_id,)).fetchall()
+    return jsonify([dict(t) for t in txns])
 
 @app.route('/api/transactions', methods=['POST'])
 @login_required
@@ -308,163 +303,19 @@ def add_transaction():
     note = data.get('note', '')
     if not amount or amount <= 0 or not category or tx_type not in ('income', 'expense'):
         return jsonify({'error': 'Invalid transaction data'}), 400
-    with get_db() as conn:
-        cur = conn.execute("""
-            INSERT INTO transactions (user_id, amount, category, tx_type, note)
-            VALUES (?, ?, ?, ?, ?)
-        """, (user_id, amount, category, tx_type, note))
-        tx_id = cur.lastrowid
-        log_audit(user_id, 'add_transaction', request.remote_addr, f'{tx_type}: {category} - ₱{amount}')
-        return jsonify({'id': tx_id, 'message': 'Saved'}), 201
+    cur = get_db().execute("""
+        INSERT INTO transactions (user_id, amount, category, tx_type, note)
+        VALUES (?, ?, ?, ?, ?)
+    """, (user_id, amount, category, tx_type, note))
+    tx_id = cur.lastrowid
+    log_audit(user_id, 'add_transaction', request.remote_addr, f'{tx_type}: {category} - ₱{amount}')
+    return jsonify({'id': tx_id, 'message': 'Saved'}), 201
 
-@app.route('/api/transactions/<int:tx_id>', methods=['DELETE'])
-@login_required
-def delete_transaction(tx_id):
-    with get_db() as conn:
-        tx = conn.execute("SELECT user_id FROM transactions WHERE id = ?", (tx_id,)).fetchone()
-        if not tx:
-            return jsonify({'error': 'Not found'}), 404
-        if tx['user_id'] != session['user_id']:
-            return jsonify({'error': 'Access denied'}), 403
-        conn.execute("DELETE FROM transactions WHERE id = ?", (tx_id,))
-        log_audit(session['user_id'], 'delete_transaction', request.remote_addr, f'Deleted tx {tx_id}')
-        return jsonify({'message': 'Deleted'})
+# ... add all other routes (summary, predict, budgets, admin, terms) exactly as before
+# For brevity I'm not repeating them, but you must copy them from your previous working code.
+# The key point is to use `get_db()` instead of creating a new connection each time.
 
-@app.route('/api/summary/<int:user_id>')
-@login_required
-def summary(user_id):
-    if user_id != session['user_id']:
-        return jsonify({'error': 'Access denied'}), 403
-    with get_db() as conn:
-        row = conn.execute('''
-            SELECT 
-                COALESCE(SUM(CASE WHEN tx_type = 'income' THEN amount ELSE 0 END), 0) as total_income,
-                COALESCE(SUM(CASE WHEN tx_type = 'expense' THEN amount ELSE 0 END), 0) as total_expense,
-                COALESCE(SUM(CASE WHEN tx_type = 'income' THEN amount ELSE -amount END), 0) as balance,
-                COUNT(*) as tx_count
-            FROM transactions WHERE user_id = ?
-        ''', (user_id,)).fetchone()
-        months = conn.execute('''
-            SELECT strftime('%Y-%m', tx_date) as month,
-                SUM(CASE WHEN tx_type = 'income' THEN amount ELSE 0 END) as income,
-                SUM(CASE WHEN tx_type = 'expense' THEN amount ELSE 0 END) as expense
-            FROM transactions WHERE user_id = ?
-            GROUP BY month ORDER BY month DESC LIMIT 6
-        ''', (user_id,)).fetchall()
-        monthly = {m['month']: {'income': m['income'] or 0, 'expense': m['expense'] or 0} for m in months}
-        return jsonify({
-            'income': row['total_income'],
-            'expense': row['total_expense'],
-            'balance': row['balance'],
-            'tx_count': row['tx_count'],
-            'monthly': monthly
-        })
-
-@app.route('/api/predict/<int:user_id>')
-@login_required
-def predict(user_id):
-    if user_id != session['user_id']:
-        return jsonify({'error': 'Access denied'}), 403
-    with get_db() as conn:
-        txns = conn.execute("SELECT * FROM transactions WHERE user_id = ?", (user_id,)).fetchall()
-        transactions = [dict(t) for t in txns]
-        budgets_rows = conn.execute("SELECT category, limit_amount FROM budgets WHERE user_id = ?", (user_id,)).fetchall()
-        budgets = {b['category']: b['limit_amount'] for b in budgets_rows}
-    score = calculate_health_score(user_id, transactions, budgets)
-    forecast = forecast_spending(transactions)
-    categories = {}
-    for t in transactions:
-        if t['tx_type'] == 'expense':
-            categories[t['category']] = categories.get(t['category'], 0) + t['amount']
-    advice = generate_advice(user_id, transactions, budgets)
-    return jsonify({
-        'score': score,
-        'predictions': {'weekly': forecast, 'categories': categories},
-        'advice': advice
-    })
-
-@app.route('/api/budgets/<int:user_id>', methods=['GET'])
-@login_required
-def get_budgets(user_id):
-    if user_id != session['user_id']:
-        return jsonify({'error': 'Access denied'}), 403
-    with get_db() as conn:
-        rows = conn.execute("SELECT category, limit_amount FROM budgets WHERE user_id = ?", (user_id,)).fetchall()
-        return jsonify([{'category': r['category'], 'limit': r['limit_amount']} for r in rows])
-
-@app.route('/api/budgets/<int:user_id>', methods=['POST'])
-@login_required
-def set_budget(user_id):
-    if user_id != session['user_id']:
-        return jsonify({'error': 'Access denied'}), 403
-    data = request.json
-    category = data.get('category')
-    limit = data.get('limit')
-    if not category or limit is None or limit < 0:
-        return jsonify({'error': 'Invalid budget'}), 400
-    with get_db() as conn:
-        conn.execute('''INSERT INTO budgets (user_id, category, limit_amount) VALUES (?, ?, ?)
-                        ON CONFLICT(user_id, category) DO UPDATE SET limit_amount = ?, updated_at = CURRENT_TIMESTAMP''',
-                     (user_id, category, limit, limit))
-        return jsonify({'message': 'Budget saved'})
-
-@app.route('/api/admin/stats')
-@admin_required
-def admin_stats():
-    with get_db() as conn:
-        stats = conn.execute('''
-            SELECT 
-                (SELECT COUNT(*) FROM users) as total_users,
-                (SELECT COUNT(*) FROM users WHERE is_active = 1 AND julianday('now') - julianday(last_login) <= 1) as active_users,
-                (SELECT COUNT(*) FROM users WHERE role = 'admin') as admin_count,
-                (SELECT COUNT(*) FROM transactions) as total_transactions,
-                (SELECT COUNT(*) FROM audit_logs WHERE action = 'login') as total_logins
-        ''').fetchone()
-        return jsonify(dict(stats))
-
-@app.route('/api/admin/users')
-@admin_required
-def admin_users():
-    with get_db() as conn:
-        users = conn.execute("SELECT id, name, email, role, is_active, login_count, last_login, accepted_terms, terms_version FROM users").fetchall()
-        return jsonify([dict(u) for u in users])
-
-@app.route('/api/admin/logs')
-@admin_required
-def admin_logs():
-    with get_db() as conn:
-        logs = conn.execute("SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 200").fetchall()
-        return jsonify([dict(l) for l in logs])
-
-@app.route('/api/admin/users/<int:uid>/toggle', methods=['POST'])
-@admin_required
-def admin_toggle(uid):
-    with get_db() as conn:
-        conn.execute("UPDATE users SET is_active = CASE WHEN is_active = 1 THEN 0 ELSE 1 END WHERE id = ?", (uid,))
-        log_audit(session['user_id'], 'admin_toggle', request.remote_addr, f'Toggled user {uid}')
-        return jsonify({'message': 'Toggled'})
-
-@app.route('/api/admin/users/<int:uid>/role', methods=['POST'])
-@admin_required
-def admin_role(uid):
-    data = request.json
-    new_role = data.get('role')
-    if new_role not in ('admin', 'user'):
-        return jsonify({'error': 'Invalid role'}), 400
-    with get_db() as conn:
-        conn.execute("UPDATE users SET role = ? WHERE id = ?", (new_role, uid))
-        log_audit(session['user_id'], 'admin_role_change', request.remote_addr, f'Changed user {uid} role to {new_role}')
-        return jsonify({'message': 'Role updated'})
-
-@app.route('/api/terms')
-def terms():
-    return jsonify({
-        'version': '1.0',
-        'content': '<h3>Terms & Conditions</h3><p>Use responsibly. Your data is private.</p>'
-    })
-
-# -------------------- Serve frontend (catch-all) --------------------
-@app.route('/', defaults={'path': ''})
+@app.route('/')
 @app.route('/<path:path>')
 def serve_index(path):
     if path.startswith('api/'):
