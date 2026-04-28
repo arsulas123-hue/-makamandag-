@@ -10,7 +10,7 @@ import numpy as np
 from sklearn.linear_model import LinearRegression
 
 app = Flask(__name__, static_folder='static')
-CORS(app, supports_credentials=True)  # Allow cookies
+CORS(app, supports_credentials=True)
 
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', secrets.token_hex(32))
 
@@ -99,9 +99,8 @@ def admin_required(f):
         return f(*args, **kwargs)
     return decorated
 
-# -------------------- ML Functions (keep as in your code) --------------------
+# -------------------- ML Functions --------------------
 def calculate_health_score(user_id, transactions, budgets):
-    # (keep your existing implementation)
     expenses = [t for t in transactions if t['tx_type'] == 'expense']
     income = sum(t['amount'] for t in transactions if t['tx_type'] == 'income')
     total_expense = sum(e['amount'] for e in expenses)
@@ -130,7 +129,6 @@ def calculate_health_score(user_id, transactions, budgets):
     return max(0, min(100, round(score)))
 
 def forecast_spending(transactions, weeks=4):
-    # (keep your existing implementation)
     expenses = [t for t in transactions if t['tx_type'] == 'expense']
     if len(expenses) < 3:
         avg = np.mean([t['amount'] for t in expenses]) if expenses else 2000
@@ -164,7 +162,6 @@ def forecast_spending(transactions, weeks=4):
     return {f'Week {i+1}': round(predictions[i]) for i in range(weeks)}
 
 def generate_advice(user_id, transactions, budgets):
-    # (keep your existing implementation)
     expenses = [t for t in transactions if t['tx_type'] == 'expense']
     cat_spending = {}
     for exp in expenses:
@@ -213,19 +210,7 @@ def register():
             INSERT INTO users (name, email, password, role, accepted_terms, terms_version)
             VALUES (?, ?, ?, ?, ?, ?)
         """, (name, email, hashed, role, 1, terms_version))
-        user_id = cur.lastrowid   # ✅ use cursor.lastrowid, not conn.lastrowid
-        log_audit(user_id, 'register', request.remote_addr, f'User {email} registered')
-        return jsonify({'message': 'User created'}), 201
-    with get_db() as conn:
-        existing = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
-        if existing:
-            return jsonify({'error': 'Email already registered'}), 400
-        hashed = hash_password(password)
-        user_count = conn.execute("SELECT COUNT(*) as cnt FROM users").fetchone()['cnt']
-        role = 'admin' if user_count == 0 else 'user'
-        conn.execute("INSERT INTO users (name, email, password, role, accepted_terms, terms_version) VALUES (?, ?, ?, ?, ?, ?)",
-                     (name, email, hashed, role, 1, terms_version))
-        user_id = conn.lastrowid
+        user_id = cur.lastrowid    # ✅ correct
         log_audit(user_id, 'register', request.remote_addr, f'User {email} registered')
         return jsonify({'message': 'User created'}), 201
 
@@ -304,15 +289,15 @@ def add_transaction():
     note = data.get('note', '')
     if not amount or amount <= 0 or not category or tx_type not in ('income', 'expense'):
         return jsonify({'error': 'Invalid transaction data'}), 400
-    
     with get_db() as conn:
         cur = conn.execute("""
             INSERT INTO transactions (user_id, amount, category, tx_type, note)
             VALUES (?, ?, ?, ?, ?)
         """, (user_id, amount, category, tx_type, note))
-        tx_id = cur.lastrowid   # ✅ fix here
+        tx_id = cur.lastrowid
         log_audit(user_id, 'add_transaction', request.remote_addr, f'{tx_type}: {category} - ₱{amount}')
         return jsonify({'id': tx_id, 'message': 'Saved'}), 201
+
 @app.route('/api/transactions/<int:tx_id>', methods=['DELETE'])
 @login_required
 def delete_transaction(tx_id):
@@ -440,6 +425,18 @@ def admin_toggle(uid):
         log_audit(session['user_id'], 'admin_toggle', request.remote_addr, f'Toggled user {uid}')
         return jsonify({'message': 'Toggled'})
 
+@app.route('/api/admin/users/<int:uid>/role', methods=['POST'])
+@admin_required
+def admin_role(uid):
+    data = request.json
+    new_role = data.get('role')
+    if new_role not in ('admin', 'user'):
+        return jsonify({'error': 'Invalid role'}), 400
+    with get_db() as conn:
+        conn.execute("UPDATE users SET role = ? WHERE id = ?", (new_role, uid))
+        log_audit(session['user_id'], 'admin_role_change', request.remote_addr, f'Changed user {uid} role to {new_role}')
+        return jsonify({'message': 'Role updated'})
+
 @app.route('/api/terms')
 def terms():
     return jsonify({
@@ -451,10 +448,12 @@ def terms():
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def serve_index(path):
-    # If the path starts with "api/", then it's an API call that wasn't matched (404)
     if path.startswith('api/'):
         return jsonify({'error': 'API endpoint not found'}), 404
-    # Otherwise serve index.html (for client-side routing)
+    # If the file exists in static, serve it; otherwise index.html (SPA support)
+    full_path = os.path.join(app.static_folder, path)
+    if os.path.exists(full_path) and not os.path.isdir(full_path):
+        return send_from_directory(app.static_folder, path)
     return send_from_directory(app.static_folder, 'index.html')
 
 if __name__ == '__main__':
