@@ -12,11 +12,6 @@ from flask_cors import CORS
 import numpy as np
 from sklearn.linear_model import LinearRegression
 import json
-app = Flask(__name__, static_folder='static')
-CORS(app) # Don't forget to enable CORS if you're using it
-app.config['SECRET_KEY'] = 'your-very-secret-key' # Needed for sessions
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///test.db')
-db = SQLAlchemy(app)
 
 
 
@@ -481,17 +476,10 @@ def admin_role(uid):
     data = request.json
     new_role = data.get('role')
     if new_role not in ('admin', 'user'):
-    @app.route('/api/admin/users/<int:uid>/role', methods=['POST'])
-@admin_required
-def admin_role(uid):
-    data = request.json
-    new_role = data.get('role')
-    if new_role not in ('admin', 'user'):
         return jsonify({'error': 'Invalid role'}), 400
     with get_db() as conn:
         conn.execute("UPDATE users SET role = ? WHERE id = ?", (new_role, uid))
-        # This line below was the one causing the crash:
-        log_audit(session['user_id'], 'admin_role_change', request.remote_addr, f'Changed user {uid} role to {new_role}')
+log_audit(session['user_id'], 'admin_role_change', request.remote_addr, f'Changed user {uid} role to {new_role}')
     return jsonify({'message': 'Role updated'})
 # -------------------- Terms --------------------
 @app.route('/api/terms')
