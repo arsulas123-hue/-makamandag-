@@ -3,6 +3,7 @@ import sqlite3
 import datetime
 import hashlib
 import secrets
+import traceback
 from functools import wraps
 from flask import Flask, request, jsonify, session, send_from_directory
 from flask_cors import CORS
@@ -16,7 +17,11 @@ app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', secrets.token_hex(32))
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 
-DB_PATH = 'smartspend.db'
+# Use /tmp for database on Render (writable)
+if os.environ.get('RENDER'):
+    DB_PATH = '/tmp/smartspend.db'
+else:
+    DB_PATH = 'smartspend.db'
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)
@@ -101,7 +106,7 @@ def admin_required(f):
         return f(*args, **kwargs)
     return decorated
 
-# ===================== ML Functions =====================
+# -------------------- ML Functions --------------------
 def calculate_health_score(user_id, transactions, budgets):
     expenses = [t for t in transactions if t['tx_type'] == 'expense']
     income = sum(t['amount'] for t in transactions if t['tx_type'] == 'income')
@@ -184,7 +189,7 @@ def generate_advice(user_id, transactions, budgets):
                 advice.append({'cat': cat, 'spent': spent, 'limit': None, 'pct': 0, 'status': 'warning', 'msg': f'high spending (₱{spent:,.2f}) - consider budget'})
     return advice
 
-# ===================== API Routes =====================
+# -------------------- API Routes --------------------
 @app.route('/api/register', methods=['POST'])
 def register():
     try:
@@ -196,12 +201,14 @@ def register():
         password = data.get('password')
         accepted_terms = data.get('accepted_terms', False)
         terms_version = data.get('terms_version', '1.0')
+        
         if not all([name, email, password]):
             return jsonify({'error': 'Missing fields'}), 400
         if len(password) < 8:
             return jsonify({'error': 'Password must be at least 8 characters'}), 400
         if not accepted_terms:
             return jsonify({'error': 'Must accept terms'}), 400
+        
         with get_db() as conn:
             existing = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
             if existing:
@@ -217,7 +224,7 @@ def register():
             log_audit(user_id, 'register', request.remote_addr, f'User {email} registered')
             return jsonify({'message': 'User created'}), 201
     except Exception as e:
-        app.logger.error(f"Register error: {str(e)}")
+        app.logger.error(f"Register error: {traceback.format_exc()}")
         return jsonify({'error': 'Internal server error'}), 500
 
 @app.route('/api/login', methods=['POST'])
@@ -251,7 +258,7 @@ def login():
                 }
             })
     except Exception as e:
-        app.logger.error(f"Login error: {str(e)}")
+        app.logger.error(f"Login error: {traceback.format_exc()}")
         return jsonify({'error': 'Internal server error'}), 500
 
 @app.route('/api/logout', methods=['POST'])
