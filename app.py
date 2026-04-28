@@ -477,6 +477,14 @@ def terms():
         'content': '<h3>Terms & Conditions</h3><p>Use responsibly. Your data is private.</p>'
     })
 
+# --- ADD THIS BLOCK TO FIX THE "REGISTER" AND "DASHBOARD" OUTPUT ---
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def serve_index(path):
+    # This tells Flask: if you don't recognize the URL (like /register), 
+    # just serve index.html and let the JavaScript handle it.
+    return send_from_directory(app.static_folder, 'index.html')
 
+if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
