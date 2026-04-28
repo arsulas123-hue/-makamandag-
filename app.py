@@ -1,12 +1,11 @@
 import os
-import sqlite3
 import datetime
 import hashlib
 import secrets
-import traceback
 from functools import wraps
 from flask import Flask, request, jsonify, session, send_from_directory
 from flask_cors import CORS
+from flask_sqlalchemy import SQLAlchemy
 import numpy as np
 from sklearn.linear_model import LinearRegression
 
@@ -17,73 +16,75 @@ app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', secrets.token_hex(32))
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 
-# ==================== Use in‑memory database (no disk permission issues) ====================
-# Single connection that lives for the lifetime of the app
-db_conn = sqlite3.connect('file::memory:?cache=shared', check_same_thread=False)
-db_conn.row_factory = sqlite3.Row
+# ---------- Database Setup ----------
+# Use the exact PostgreSQL URL you provided
+DATABASE_URL = "postgresql://makamandag_db_user:zcDibuXdlpEpcZNGEYLc9nqpgWwuTTfO@dpg-d7od7md7vvec739acfj0-a/makamandag_db"
+app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+db = SQLAlchemy(app)
 
-def get_db():
-    return db_conn
+# ---------- Models ----------
+class User(db.Model):
+    __tablename__ = 'users'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=False)
+    email = db.Column(db.String(100), unique=True, nullable=False)
+    password = db.Column(db.String(200), nullable=False)
+    role = db.Column(db.String(20), default='user')
+    is_active = db.Column(db.Boolean, default=True)
+    login_count = db.Column(db.Integer, default=0)
+    last_login = db.Column(db.DateTime)
+    last_ip = db.Column(db.String(50))
+    accepted_terms = db.Column(db.Boolean, default=False)
+    terms_version = db.Column(db.String(10))
+    created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
 
-def init_db():
-    conn = get_db()
-    conn.executescript('''
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            email TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL,
-            role TEXT DEFAULT 'user',
-            is_active INTEGER DEFAULT 1,
-            login_count INTEGER DEFAULT 0,
-            last_login TEXT,
-            last_ip TEXT,
-            accepted_terms INTEGER DEFAULT 0,
-            terms_version TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE TABLE IF NOT EXISTS transactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            amount REAL NOT NULL,
-            category TEXT NOT NULL,
-            tx_type TEXT CHECK(tx_type IN ('income','expense')) NOT NULL,
-            note TEXT,
-            tx_date TEXT DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-        );
-        CREATE TABLE IF NOT EXISTS budgets (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            category TEXT NOT NULL,
-            limit_amount REAL NOT NULL,
-            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(user_id, category)
-        );
-        CREATE TABLE IF NOT EXISTS audit_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            action TEXT NOT NULL,
-            ip TEXT,
-            detail TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        );
-    ''')
-    # Create admin if no users exist
-    admin = conn.execute("SELECT * FROM users WHERE role='admin'").fetchone()
-    if not admin:
+class Transaction(db.Model):
+    __tablename__ = 'transactions'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    amount = db.Column(db.Float, nullable=False)
+    category = db.Column(db.String(50), nullable=False)
+    tx_type = db.Column(db.String(10), nullable=False)
+    note = db.Column(db.String(200))
+    tx_date = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+
+class Budget(db.Model):
+    __tablename__ = 'budgets'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    category = db.Column(db.String(50), nullable=False)
+    limit_amount = db.Column(db.Float, nullable=False)
+    updated_at = db.Column(db.DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+    __table_args__ = (db.UniqueConstraint('user_id', 'category'),)
+
+class AuditLog(db.Model):
+    __tablename__ = 'audit_logs'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    action = db.Column(db.String(50), nullable=False)
+    ip = db.Column(db.String(50))
+    detail = db.Column(db.String(500))
+    created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+
+# Create tables
+with app.app_context():
+    db.create_all()
+    # Create default admin if no users exist
+    if User.query.filter_by(role='admin').first() is None:
         hashed = hashlib.sha256('admin123'.encode()).hexdigest()
-        conn.execute("INSERT INTO users (name, email, password, role, accepted_terms) VALUES (?, ?, ?, ?, ?)",
-                     ('Admin', 'admin@smartspend.com', hashed, 'admin', 1))
+        admin = User(name='Admin', email='admin@smartspend.com', password=hashed, role='admin', accepted_terms=True)
+        db.session.add(admin)
+        db.session.commit()
 
-init_db()
-
+# ---------- Helper Functions ----------
 def hash_password(pwd):
     return hashlib.sha256(pwd.encode()).hexdigest()
 
 def log_audit(user_id, action, ip, detail=''):
-    get_db().execute("INSERT INTO audit_logs (user_id, action, ip, detail) VALUES (?, ?, ?, ?)",
-                     (user_id, action, ip, detail))
+    log = AuditLog(user_id=user_id, action=action, ip=ip, detail=detail)
+    db.session.add(log)
+    db.session.commit()
 
 def login_required(f):
     @wraps(f)
@@ -98,17 +99,17 @@ def admin_required(f):
     def decorated(*args, **kwargs):
         if 'user_id' not in session:
             return jsonify({'error': 'Unauthorized'}), 401
-        user = get_db().execute("SELECT role FROM users WHERE id = ?", (session['user_id'],)).fetchone()
-        if not user or user['role'] != 'admin':
+        user = User.query.get(session['user_id'])
+        if not user or user.role != 'admin':
             return jsonify({'error': 'Admin access required'}), 403
         return f(*args, **kwargs)
     return decorated
 
-# -------------------- ML Functions (your existing implementations) --------------------
+# ---------- ML Functions (unchanged - keep your full logic) ----------
 def calculate_health_score(user_id, transactions, budgets):
-    expenses = [t for t in transactions if t['tx_type'] == 'expense']
-    income = sum(t['amount'] for t in transactions if t['tx_type'] == 'income')
-    total_expense = sum(e['amount'] for e in expenses)
+    expenses = [t for t in transactions if t.tx_type == 'expense']
+    income = sum(t.amount for t in transactions if t.tx_type == 'income')
+    total_expense = sum(e.amount for e in expenses)
     score = 70
     if income > 0:
         savings_rate = (income - total_expense) / income
@@ -116,7 +117,7 @@ def calculate_health_score(user_id, transactions, budgets):
     compliance_score = 0
     budget_count = 0
     for cat, limit in budgets.items():
-        spent = sum(e['amount'] for e in expenses if e['category'] == cat)
+        spent = sum(e.amount for e in expenses if e.category == cat)
         if limit > 0:
             budget_count += 1
             if spent <= limit:
@@ -126,7 +127,7 @@ def calculate_health_score(user_id, transactions, budgets):
     if budget_count > 0:
         score += (compliance_score / budget_count) * 10
     if len(expenses) > 3:
-        amounts = [e['amount'] for e in expenses[-12:]]
+        amounts = [e.amount for e in expenses[-12:]]
         if len(amounts) > 1:
             volatility = np.std(amounts) / (np.mean(amounts) + 0.01)
             penalty = min(10, volatility * 2)
@@ -134,24 +135,23 @@ def calculate_health_score(user_id, transactions, budgets):
     return max(0, min(100, round(score)))
 
 def forecast_spending(transactions, weeks=4):
-    expenses = [t for t in transactions if t['tx_type'] == 'expense']
+    expenses = [t for t in transactions if t.tx_type == 'expense']
     if len(expenses) < 3:
-        avg = np.mean([t['amount'] for t in expenses]) if expenses else 2000
+        avg = np.mean([t.amount for t in expenses]) if expenses else 2000
         return {f'Week {i+1}': round(avg * (0.9 + 0.2 * np.random.random())) for i in range(weeks)}
-    expenses_sorted = sorted(expenses, key=lambda x: x['tx_date'])
-    start_date = datetime.datetime.strptime(expenses_sorted[0]['tx_date'][:10], '%Y-%m-%d')
+    expenses_sorted = sorted(expenses, key=lambda x: x.tx_date)
+    start_date = expenses_sorted[0].tx_date
     weekly_totals = []
     current_week = start_date.isocalendar()[1]
     current_total = 0
     for tx in expenses_sorted:
-        tx_date = datetime.datetime.strptime(tx['tx_date'][:10], '%Y-%m-%d')
-        week_num = tx_date.isocalendar()[1]
+        week_num = tx.tx_date.isocalendar()[1]
         if week_num != current_week:
             weekly_totals.append(current_total)
-            current_total = tx['amount']
+            current_total = tx.amount
             current_week = week_num
         else:
-            current_total += tx['amount']
+            current_total += tx.amount
     if current_total > 0:
         weekly_totals.append(current_total)
     if len(weekly_totals) < 2:
@@ -167,10 +167,10 @@ def forecast_spending(transactions, weeks=4):
     return {f'Week {i+1}': round(predictions[i]) for i in range(weeks)}
 
 def generate_advice(user_id, transactions, budgets):
-    expenses = [t for t in transactions if t['tx_type'] == 'expense']
+    expenses = [t for t in transactions if t.tx_type == 'expense']
     cat_spending = {}
     for exp in expenses:
-        cat_spending[exp['category']] = cat_spending.get(exp['category'], 0) + exp['amount']
+        cat_spending[exp.category] = cat_spending.get(exp.category, 0) + exp.amount
     advice = []
     for cat, spent in cat_spending.items():
         limit = budgets.get(cat, 0)
@@ -187,7 +187,7 @@ def generate_advice(user_id, transactions, budgets):
                 advice.append({'cat': cat, 'spent': spent, 'limit': None, 'pct': 0, 'status': 'warning', 'msg': f'high spending (₱{spent:,.2f}) - consider budget'})
     return advice
 
-# -------------------- API Routes --------------------
+# ---------- API Routes (same as previous working version) ----------
 @app.route('/api/register', methods=['POST'])
 def register():
     try:
@@ -199,6 +199,7 @@ def register():
         password = data.get('password')
         accepted_terms = data.get('accepted_terms', False)
         terms_version = data.get('terms_version', '1.0')
+
         if not all([name, email, password]):
             return jsonify({'error': 'Missing fields'}), 400
         if len(password) < 8:
@@ -206,19 +207,16 @@ def register():
         if not accepted_terms:
             return jsonify({'error': 'Must accept terms'}), 400
 
-        conn = get_db()
-        existing = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
-        if existing:
+        if User.query.filter_by(email=email).first():
             return jsonify({'error': 'Email already registered'}), 400
+
         hashed = hash_password(password)
-        user_count = conn.execute("SELECT COUNT(*) as cnt FROM users").fetchone()['cnt']
+        user_count = User.query.count()
         role = 'admin' if user_count == 0 else 'user'
-        cur = conn.execute("""
-            INSERT INTO users (name, email, password, role, accepted_terms, terms_version)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (name, email, hashed, role, 1, terms_version))
-        user_id = cur.lastrowid
-        log_audit(user_id, 'register', request.remote_addr, f'User {email} registered')
+        new_user = User(name=name, email=email, password=hashed, role=role, accepted_terms=True, terms_version=terms_version)
+        db.session.add(new_user)
+        db.session.commit()
+        log_audit(new_user.id, 'register', request.remote_addr, f'User {email} registered')
         return jsonify({'message': 'User created'}), 201
     except Exception as e:
         return jsonify({'error': f'{type(e).__name__}: {str(e)}'}), 500
@@ -233,24 +231,27 @@ def login():
         password = data.get('password')
         if not email or not password:
             return jsonify({'error': 'Email and password required'}), 400
-        conn = get_db()
-        user = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
-        if not user or user['password'] != hash_password(password):
+
+        user = User.query.filter_by(email=email).first()
+        if not user or user.password != hash_password(password):
             log_audit(None, 'failed_login', request.remote_addr, f'Failed login for {email}')
             return jsonify({'error': 'Invalid credentials'}), 401
-        if not user['is_active']:
+        if not user.is_active:
             return jsonify({'error': 'Account disabled'}), 401
-        session['user_id'] = user['id']
-        conn.execute("UPDATE users SET login_count = login_count + 1, last_login = CURRENT_TIMESTAMP, last_ip = ? WHERE id = ?",
-                     (request.remote_addr, user['id']))
-        log_audit(user['id'], 'login', request.remote_addr, 'Successful login')
+
+        session['user_id'] = user.id
+        user.login_count += 1
+        user.last_login = datetime.datetime.utcnow()
+        user.last_ip = request.remote_addr
+        db.session.commit()
+        log_audit(user.id, 'login', request.remote_addr, 'Successful login')
         return jsonify({
             'user': {
-                'id': user['id'],
-                'name': user['name'],
-                'email': user['email'],
-                'role': user['role'],
-                'is_active': bool(user['is_active'])
+                'id': user.id,
+                'name': user.name,
+                'email': user.email,
+                'role': user.role,
+                'is_active': user.is_active
             }
         })
     except Exception as e:
@@ -267,16 +268,16 @@ def logout():
 def me():
     if 'user_id' not in session:
         return jsonify({'error': 'Not authenticated'}), 401
-    user = get_db().execute("SELECT id, name, email, role, is_active FROM users WHERE id = ?", (session['user_id'],)).fetchone()
+    user = User.query.get(session['user_id'])
     if not user:
         session.clear()
         return jsonify({'error': 'User not found'}), 401
     return jsonify({
-        'id': user['id'],
-        'name': user['name'],
-        'email': user['email'],
-        'role': user['role'],
-        'is_active': bool(user['is_active'])
+        'id': user.id,
+        'name': user.name,
+        'email': user.email,
+        'role': user.role,
+        'is_active': user.is_active
     })
 
 @app.route('/api/transactions', methods=['GET'])
@@ -285,8 +286,17 @@ def get_transactions():
     user_id = request.args.get('user_id', type=int)
     if user_id != session['user_id']:
         return jsonify({'error': 'Access denied'}), 403
-    txns = get_db().execute("SELECT id as tx_id, user_id, amount, category, tx_type, note, tx_date FROM transactions WHERE user_id = ? ORDER BY tx_date DESC", (user_id,)).fetchall()
-    return jsonify([dict(t) for t in txns])
+    txns = Transaction.query.filter_by(user_id=user_id).order_by(Transaction.tx_date.desc()).all()
+    result = [{
+        'tx_id': t.id,
+        'user_id': t.user_id,
+        'amount': t.amount,
+        'category': t.category,
+        'tx_type': t.tx_type,
+        'note': t.note,
+        'tx_date': t.tx_date.isoformat() if t.tx_date else None
+    } for t in txns]
+    return jsonify(result)
 
 @app.route('/api/transactions', methods=['POST'])
 @login_required
@@ -301,24 +311,23 @@ def add_transaction():
     note = data.get('note', '')
     if not amount or amount <= 0 or not category or tx_type not in ('income', 'expense'):
         return jsonify({'error': 'Invalid transaction data'}), 400
-    cur = get_db().execute("""
-        INSERT INTO transactions (user_id, amount, category, tx_type, note)
-        VALUES (?, ?, ?, ?, ?)
-    """, (user_id, amount, category, tx_type, note))
-    tx_id = cur.lastrowid
+
+    new_tx = Transaction(user_id=user_id, amount=amount, category=category, tx_type=tx_type, note=note)
+    db.session.add(new_tx)
+    db.session.commit()
     log_audit(user_id, 'add_transaction', request.remote_addr, f'{tx_type}: {category} - ₱{amount}')
-    return jsonify({'id': tx_id, 'message': 'Saved'}), 201
+    return jsonify({'id': new_tx.id, 'message': 'Saved'}), 201
 
 @app.route('/api/transactions/<int:tx_id>', methods=['DELETE'])
 @login_required
 def delete_transaction(tx_id):
-    conn = get_db()
-    tx = conn.execute("SELECT user_id FROM transactions WHERE id = ?", (tx_id,)).fetchone()
+    tx = Transaction.query.get(tx_id)
     if not tx:
         return jsonify({'error': 'Not found'}), 404
-    if tx['user_id'] != session['user_id']:
+    if tx.user_id != session['user_id']:
         return jsonify({'error': 'Access denied'}), 403
-    conn.execute("DELETE FROM transactions WHERE id = ?", (tx_id,))
+    db.session.delete(tx)
+    db.session.commit()
     log_audit(session['user_id'], 'delete_transaction', request.remote_addr, f'Deleted tx {tx_id}')
     return jsonify({'message': 'Deleted'})
 
@@ -327,29 +336,28 @@ def delete_transaction(tx_id):
 def summary(user_id):
     if user_id != session['user_id']:
         return jsonify({'error': 'Access denied'}), 403
-    conn = get_db()
-    row = conn.execute('''
-        SELECT 
-            COALESCE(SUM(CASE WHEN tx_type = 'income' THEN amount ELSE 0 END), 0) as total_income,
-            COALESCE(SUM(CASE WHEN tx_type = 'expense' THEN amount ELSE 0 END), 0) as total_expense,
-            COALESCE(SUM(CASE WHEN tx_type = 'income' THEN amount ELSE -amount END), 0) as balance,
-            COUNT(*) as tx_count
-        FROM transactions WHERE user_id = ?
-    ''', (user_id,)).fetchone()
-    months = conn.execute('''
-        SELECT strftime('%Y-%m', tx_date) as month,
-            SUM(CASE WHEN tx_type = 'income' THEN amount ELSE 0 END) as income,
-            SUM(CASE WHEN tx_type = 'expense' THEN amount ELSE 0 END) as expense
-        FROM transactions WHERE user_id = ?
-        GROUP BY month ORDER BY month DESC LIMIT 6
-    ''', (user_id,)).fetchall()
-    monthly = {m['month']: {'income': m['income'] or 0, 'expense': m['expense'] or 0} for m in months}
+    txns = Transaction.query.filter_by(user_id=user_id).all()
+    total_income = sum(t.amount for t in txns if t.tx_type == 'income')
+    total_expense = sum(t.amount for t in txns if t.tx_type == 'expense')
+    balance = total_income - total_expense
+    tx_count = len(txns)
+
+    from collections import defaultdict
+    monthly = defaultdict(lambda: {'income': 0, 'expense': 0})
+    for t in txns:
+        month_key = t.tx_date.strftime('%Y-%m')
+        if t.tx_type == 'income':
+            monthly[month_key]['income'] += t.amount
+        else:
+            monthly[month_key]['expense'] += t.amount
+    sorted_months = sorted(monthly.items(), reverse=True)[:6]
+    monthly_result = {k: v for k, v in sorted_months}
     return jsonify({
-        'income': row['total_income'],
-        'expense': row['total_expense'],
-        'balance': row['balance'],
-        'tx_count': row['tx_count'],
-        'monthly': monthly
+        'income': total_income,
+        'expense': total_expense,
+        'balance': balance,
+        'tx_count': tx_count,
+        'monthly': monthly_result
     })
 
 @app.route('/api/predict/<int:user_id>')
@@ -357,17 +365,14 @@ def summary(user_id):
 def predict(user_id):
     if user_id != session['user_id']:
         return jsonify({'error': 'Access denied'}), 403
-    conn = get_db()
-    txns = conn.execute("SELECT * FROM transactions WHERE user_id = ?", (user_id,)).fetchall()
-    transactions = [dict(t) for t in txns]
-    budgets_rows = conn.execute("SELECT category, limit_amount FROM budgets WHERE user_id = ?", (user_id,)).fetchall()
-    budgets = {b['category']: b['limit_amount'] for b in budgets_rows}
+    transactions = Transaction.query.filter_by(user_id=user_id).all()
+    budgets = {b.category: b.limit_amount for b in Budget.query.filter_by(user_id=user_id).all()}
     score = calculate_health_score(user_id, transactions, budgets)
     forecast = forecast_spending(transactions)
     categories = {}
     for t in transactions:
-        if t['tx_type'] == 'expense':
-            categories[t['category']] = categories.get(t['category'], 0) + t['amount']
+        if t.tx_type == 'expense':
+            categories[t.category] = categories.get(t.category, 0) + t.amount
     advice = generate_advice(user_id, transactions, budgets)
     return jsonify({
         'score': score,
@@ -380,8 +385,8 @@ def predict(user_id):
 def get_budgets(user_id):
     if user_id != session['user_id']:
         return jsonify({'error': 'Access denied'}), 403
-    rows = get_db().execute("SELECT category, limit_amount FROM budgets WHERE user_id = ?", (user_id,)).fetchall()
-    return jsonify([{'category': r['category'], 'limit': r['limit_amount']} for r in rows])
+    budgets = Budget.query.filter_by(user_id=user_id).all()
+    return jsonify([{'category': b.category, 'limit': b.limit_amount} for b in budgets])
 
 @app.route('/api/budgets/<int:user_id>', methods=['POST'])
 @login_required
@@ -393,42 +398,71 @@ def set_budget(user_id):
     limit = data.get('limit')
     if not category or limit is None or limit < 0:
         return jsonify({'error': 'Invalid budget'}), 400
-    get_db().execute('''INSERT INTO budgets (user_id, category, limit_amount) VALUES (?, ?, ?)
-                        ON CONFLICT(user_id, category) DO UPDATE SET limit_amount = ?, updated_at = CURRENT_TIMESTAMP''',
-                     (user_id, category, limit, limit))
+
+    budget = Budget.query.filter_by(user_id=user_id, category=category).first()
+    if budget:
+        budget.limit_amount = limit
+        budget.updated_at = datetime.datetime.utcnow()
+    else:
+        budget = Budget(user_id=user_id, category=category, limit_amount=limit)
+        db.session.add(budget)
+    db.session.commit()
     return jsonify({'message': 'Budget saved'})
 
 @app.route('/api/admin/stats')
 @admin_required
 def admin_stats():
-    conn = get_db()
-    stats = conn.execute('''
-        SELECT 
-            (SELECT COUNT(*) FROM users) as total_users,
-            (SELECT COUNT(*) FROM users WHERE is_active = 1 AND julianday('now') - julianday(last_login) <= 1) as active_users,
-            (SELECT COUNT(*) FROM users WHERE role = 'admin') as admin_count,
-            (SELECT COUNT(*) FROM transactions) as total_transactions,
-            (SELECT COUNT(*) FROM audit_logs WHERE action = 'login') as total_logins
-    ''').fetchone()
-    return jsonify(dict(stats))
+    total_users = User.query.count()
+    active_users = User.query.filter(User.is_active == True, User.last_login != None,
+                                     (datetime.datetime.utcnow() - User.last_login).days <= 1).count()
+    admin_count = User.query.filter_by(role='admin').count()
+    total_transactions = Transaction.query.count()
+    total_logins = AuditLog.query.filter_by(action='login').count()
+    return jsonify({
+        'total_users': total_users,
+        'active_users': active_users,
+        'admin_count': admin_count,
+        'total_transactions': total_transactions,
+        'total_logins': total_logins
+    })
 
 @app.route('/api/admin/users')
 @admin_required
 def admin_users():
-    users = get_db().execute("SELECT id, name, email, role, is_active, login_count, last_login, accepted_terms, terms_version FROM users").fetchall()
-    return jsonify([dict(u) for u in users])
+    users = User.query.all()
+    return jsonify([{
+        'id': u.id,
+        'name': u.name,
+        'email': u.email,
+        'role': u.role,
+        'is_active': u.is_active,
+        'login_count': u.login_count,
+        'last_login': u.last_login.isoformat() if u.last_login else None,
+        'accepted_terms': u.accepted_terms,
+        'terms_version': u.terms_version
+    } for u in users])
 
 @app.route('/api/admin/logs')
 @admin_required
 def admin_logs():
-    logs = get_db().execute("SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 200").fetchall()
-    return jsonify([dict(l) for l in logs])
+    logs = AuditLog.query.order_by(AuditLog.created_at.desc()).limit(200).all()
+    return jsonify([{
+        'id': l.id,
+        'user_id': l.user_id,
+        'action': l.action,
+        'ip': l.ip,
+        'detail': l.detail,
+        'created_at': l.created_at.isoformat() if l.created_at else None
+    } for l in logs])
 
 @app.route('/api/admin/users/<int:uid>/toggle', methods=['POST'])
 @admin_required
 def admin_toggle(uid):
-    get_db().execute("UPDATE users SET is_active = CASE WHEN is_active = 1 THEN 0 ELSE 1 END WHERE id = ?", (uid,))
-    log_audit(session['user_id'], 'admin_toggle', request.remote_addr, f'Toggled user {uid}')
+    user = User.query.get(uid)
+    if user:
+        user.is_active = not user.is_active
+        db.session.commit()
+        log_audit(session['user_id'], 'admin_toggle', request.remote_addr, f'Toggled user {uid}')
     return jsonify({'message': 'Toggled'})
 
 @app.route('/api/admin/users/<int:uid>/role', methods=['POST'])
@@ -438,8 +472,11 @@ def admin_role(uid):
     new_role = data.get('role')
     if new_role not in ('admin', 'user'):
         return jsonify({'error': 'Invalid role'}), 400
-    get_db().execute("UPDATE users SET role = ? WHERE id = ?", (new_role, uid))
-    log_audit(session['user_id'], 'admin_role_change', request.remote_addr, f'Changed user {uid} role to {new_role}')
+    user = User.query.get(uid)
+    if user:
+        user.role = new_role
+        db.session.commit()
+        log_audit(session['user_id'], 'admin_role_change', request.remote_addr, f'Changed user {uid} role to {new_role}')
     return jsonify({'message': 'Role updated'})
 
 @app.route('/api/terms')
@@ -449,14 +486,13 @@ def terms():
         'content': '<h3>Terms & Conditions</h3><p>Use responsibly. Your data is private.</p>'
     })
 
-# -------------------- Serve frontend (single catch-all) --------------------
+# ---------- Serve Frontend ----------
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def serve_index(path):
     if path.startswith('api/'):
         return jsonify({'error': 'API endpoint not found'}), 404
-    full_path = os.path.join(app.static_folder, path)
-    if os.path.exists(full_path) and not os.path.isdir(full_path):
+    if path and os.path.exists(os.path.join(app.static_folder, path)) and not os.path.isdir(os.path.join(app.static_folder, path)):
         return send_from_directory(app.static_folder, path)
     return send_from_directory(app.static_folder, 'index.html')
 
