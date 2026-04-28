@@ -209,6 +209,20 @@ def register():
         hashed = hash_password(password)
         user_count = conn.execute("SELECT COUNT(*) as cnt FROM users").fetchone()['cnt']
         role = 'admin' if user_count == 0 else 'user'
+        cur = conn.execute("""
+            INSERT INTO users (name, email, password, role, accepted_terms, terms_version)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (name, email, hashed, role, 1, terms_version))
+        user_id = cur.lastrowid   # ✅ use cursor.lastrowid, not conn.lastrowid
+        log_audit(user_id, 'register', request.remote_addr, f'User {email} registered')
+        return jsonify({'message': 'User created'}), 201
+    with get_db() as conn:
+        existing = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
+        if existing:
+            return jsonify({'error': 'Email already registered'}), 400
+        hashed = hash_password(password)
+        user_count = conn.execute("SELECT COUNT(*) as cnt FROM users").fetchone()['cnt']
+        role = 'admin' if user_count == 0 else 'user'
         conn.execute("INSERT INTO users (name, email, password, role, accepted_terms, terms_version) VALUES (?, ?, ?, ?, ?, ?)",
                      (name, email, hashed, role, 1, terms_version))
         user_id = conn.lastrowid
@@ -290,13 +304,15 @@ def add_transaction():
     note = data.get('note', '')
     if not amount or amount <= 0 or not category or tx_type not in ('income', 'expense'):
         return jsonify({'error': 'Invalid transaction data'}), 400
+    
     with get_db() as conn:
-        conn.execute("INSERT INTO transactions (user_id, amount, category, tx_type, note) VALUES (?, ?, ?, ?, ?)",
-                     (user_id, amount, category, tx_type, note))
-        tx_id = conn.lastrowid
+        cur = conn.execute("""
+            INSERT INTO transactions (user_id, amount, category, tx_type, note)
+            VALUES (?, ?, ?, ?, ?)
+        """, (user_id, amount, category, tx_type, note))
+        tx_id = cur.lastrowid   # ✅ fix here
         log_audit(user_id, 'add_transaction', request.remote_addr, f'{tx_type}: {category} - ₱{amount}')
         return jsonify({'id': tx_id, 'message': 'Saved'}), 201
-
 @app.route('/api/transactions/<int:tx_id>', methods=['DELETE'])
 @login_required
 def delete_transaction(tx_id):
