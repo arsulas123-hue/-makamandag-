@@ -1,6 +1,8 @@
 
 import os
 import sqlite3
+
+from flask_sqlalchemy import SQLAlchemy
 import datetime
 import hashlib
 import secrets
@@ -11,9 +13,14 @@ import numpy as np
 from sklearn.linear_model import LinearRegression
 import json
 
-app = Flask(_name_, static_folder='static', static_url_path='')
-app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
-CORS(app, supports_credentials=True)
+
+
+
+# This tells the app to use Render's database if available, 
+# otherwise use a local test file
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///test.db')
+db = SQLAlchemy(app)
+
 
 # -------------------- Database Setup --------------------
 DB_PATH = 'smartspend.db'
@@ -484,6 +491,15 @@ def terms():
         'content': '<h3>Terms & Conditions</h3><p>Use responsibly. Your data is private.</p>'
     })
 
-if _name_ == '_main_':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+
+# 1. Tell Flask your UI files are in the 'static' folder
+app = Flask(__name__, static_folder='static')
+
+# 2. Tell Flask to serve index.html when someone visits the main URL
+@app.route('/')
+def serve_index():
+    return send_from_directory(app.static_folder, 'index.html')
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)

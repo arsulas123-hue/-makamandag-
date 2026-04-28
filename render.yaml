@@ -1,11 +1,16 @@
 services:
   - type: web
-    name: smartspend
-    runtime: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app
+    name: makamandag-app
+    env: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "gunicorn app:app"
     envVars:
-      - key: SECRET_KEY
-        generateValue: true
-      - key: PYTHON_VERSION
-        value: 3.11.5
+      - key: DATABASE_URL
+        fromDatabase:
+          name: makamandag-db
+          property: connectionString
+
+databases:
+  - name: makamandag-db
+    plan: free
