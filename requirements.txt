@@ -1,6 +1,5 @@
-setuptools
-wheel
 Flask
+Flask-SQLAlchemy
 Flask-Cors
 gunicorn
-numpy
+psycopg2-binary
