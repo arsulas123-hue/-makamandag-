@@ -1,410 +1,414 @@
-This is a complete, standalone HTML document that implements a personal finance dashboard with simulated backend logic, including user authentication, transaction management, budgeting, and AI-powered spending forecasts.
-```html
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
-<title>SmartSpend — AI-Powered Personal Finance</title>
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
-<style>
-:root{
-  --bg: #080d14;
-  --bg2: #0d1520;
-  --bg3: #111c2b;
-  --panel: rgba(15, 30, 48, 0.7);
-  --border: rgba(0,210,130,.12);
-  --border2: rgba(255,255,255,.05);
-  --green: #00d282;
-  --green2: #00ff9d;
-  --green-dim: rgba(0,210,130,.12);
-  --red: #ff4d6d;
-  --red-dim: rgba(255,77,109,.1);
-  --amber: #f0a500;
-  --amber-dim: rgba(240,165,0,.1);
-  --blue: #3b82f6;
-  --blue-dim: rgba(59,130,246,.1);
-  --purple: #a855f7;
-  --text: #e2eff8;
-  --muted: #5a7a94;
-  --mono: 'JetBrains Mono', monospace;
-  --sans: 'Space Grotesk', sans-serif;
-  --r: 16px;
-}
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body {
-  font-family: var(--sans);
-  background: var(--bg);
-  color: var(--text);
-  min-height: 100vh;
-  overflow-x: hidden;
-}
-body::before {
-  content: '';
-  position: fixed;
-  inset: 0;
-  background-image: radial-gradient(ellipse 80% 50% at 50% -20%, rgba(0,210,130,.05) 0%, transparent 60%),
-                    linear-gradient(rgba(0,210,130,.01) 1px, transparent 1px),
-                    linear-gradient(90deg, rgba(0,210,130,.01) 1px, transparent 1px);
-  background-size: 100% 100%, 40px 40px, 40px 40px;
-  pointer-events: none;
-  z-index: 0;
-}
-.sidebar { position: fixed; left: 0; top: 0; bottom: 0; width: 70px; background: rgba(13, 21, 32, 0.95); backdrop-filter: blur(12px); border-right: 1px solid var(--border2); display: flex; flex-direction: column; align-items: center; padding: 24px 0; gap: 8px; z-index: 100; transition: width 0.25s cubic-bezier(0.4, 0, 0.2, 1); }
-.sidebar:hover { width: 220px; }
-.sidebar-logo { width: 42px; height: 42px; border-radius: 12px; background: linear-gradient(135deg, var(--green), #009e5f); display: flex; align-items: center; justify-content: center; margin-bottom: 24px; cursor: pointer; }
-.nav-item { width: 100%; display: flex; align-items: center; gap: 14px; padding: 12px 16px; border-radius: 12px; cursor: pointer; border: none; background: transparent; color: var(--muted); font-family: var(--sans); font-size: 0.85rem; font-weight: 500; white-space: nowrap; overflow: hidden; transition: all 0.2s; }
-.nav-item:hover { background: var(--green-dim); color: var(--text); transform: translateX(4px); }
-.nav-item.active { background: var(--green-dim); color: var(--green); border-left: 3px solid var(--green); }
-.nav-icon { width: 22px; height: 22px; flex-shrink: 0; }
-.nav-label { opacity: 0; transition: opacity 0.2s; }
-.sidebar:hover .nav-label { opacity: 1; }
-.sidebar-bottom { margin-top: auto; width: 100%; }
-.main { margin-left: 70px; padding: 28px 32px; position: relative; z-index: 1; min-height: 100vh; }
-@media (max-width: 768px) { .sidebar { width: 60px; } .main { margin-left: 60px; padding: 20px; } }
-@media (max-width: 600px) { .sidebar { display: none; } .main { margin-left: 0; } }
-.topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 28px; flex-wrap: wrap; gap: 16px; }
-.topbar-left h1 { font-size: 1.75rem; font-weight: 700; letter-spacing: -0.02em; background: linear-gradient(135deg, #fff, var(--green)); background-clip: text; -webkit-background-clip: text; color: transparent; }
-.topbar-left .sub { font-size: 0.8rem; color: var(--muted); margin-top: 4px; }
-.topbar-right { display: flex; align-items: center; gap: 12px; }
-.score-pill { display: flex; align-items: center; gap: 8px; padding: 6px 16px; border-radius: 99px; background: var(--green-dim); border: 1px solid var(--border); font-size: 0.8rem; font-weight: 600; color: var(--green); backdrop-filter: blur(4px); }
-.score-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px var(--green); animation: pulse 2s infinite; }
-@keyframes pulse { 0%,100%{ opacity: 1; } 50%{ opacity: 0.4; } }
-.avatar { width: 38px; height: 38px; border-radius: 50%; background: linear-gradient(135deg, var(--blue), var(--purple)); display: flex; align-items: center; justify-content: center; font-weight: 700; color: #fff; cursor: pointer; transition: transform 0.2s; }
-.signout-btn { background: var(--red-dim); border: 1px solid rgba(255,77,109,0.2); color: var(--red); padding: 7px 16px; border-radius: 10px; cursor: pointer; font-size: 0.75rem; font-weight: 600; transition: 0.2s; }
-.screen { display: none; animation: fadeUp 0.35s ease; }
-.screen.active { display: block; }
-@keyframes fadeUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
-.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 18px; margin-bottom: 28px; }
-.stat-card { background: var(--panel); backdrop-filter: blur(10px); border: 1px solid var(--border2); border-radius: var(--r); padding: 20px; transition: all 0.25s; }
-.stat-value { font-size: 1.6rem; font-weight: 700; font-family: var(--mono); line-height: 1.2; }
-.stat-card.green .stat-value { color: var(--green); }
-.stat-card.red .stat-value { color: var(--red); }
-.stat-card.blue .stat-value { color: var(--blue); }
-.stat-card.amber .stat-value { color: var(--amber); }
-.panel { background: var(--panel); backdrop-filter: blur(10px); border: 1px solid var(--border2); border-radius: var(--r); padding: 22px; }
-.panel-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; }
-.chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; margin-bottom: 28px; }
-.filter-group { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
-input, select, .btn { background: var(--bg3); color: var(--text); border: 1px solid var(--border2); border-radius: 10px; padding: 8px 14px; font-family: var(--sans); font-size: 0.85rem; outline: none; }
-.btn { cursor: pointer; transition: 0.2s; font-weight: 600; }
-.btn-green { background: linear-gradient(135deg, var(--green), #009e5f); color: #000; border: none; }
-.btn-ghost { background: transparent; color: var(--muted); border: 1px solid var(--border2); }
-.advice-item { display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: 12px; margin-bottom: 8px; background: var(--bg3); }
-.forecast-row { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
-.forecast-bar-track { flex: 1; height: 8px; background: var(--bg3); border-radius: 99px; overflow: hidden; }
-.forecast-bar-fill { height: 100%; background: linear-gradient(90deg, var(--green), var(--green2)); width: 0; transition: width 1s ease; border-radius: 99px; }
-.table-wrap { overflow-x: auto; border-radius: var(--r); background: var(--panel); border: 1px solid var(--border2); }
-table { width: 100%; border-collapse: collapse; }
-th, td { padding: 12px 16px; text-align: left; border-bottom: 1px solid var(--border2); }
-.badge-green { background: var(--green-dim); color: var(--green); padding: 4px 12px; border-radius: 99px; font-size: 0.75rem; }
-.badge-red, .badge-amber { padding: 4px 12px; border-radius: 99px; font-size: 0.75rem; }
-.badge-red { background: var(--red-dim); color: var(--red); }
-.badge-amber { background: var(--amber-dim); color: var(--amber); }
-.auth-overlay { position: fixed; inset: 0; background: rgba(8,13,20,0.98); backdrop-filter: blur(20px); z-index: 9999; display: flex; align-items: center; justify-content: center; }
-.auth-card { background: linear-gradient(145deg, #0d1520, #0a1220); border: 1px solid rgba(0,210,130,0.2); border-radius: 28px; padding: 40px; width: 420px; max-width: 90%; }
-.auth-input { width: 100%; padding: 12px 16px; margin-bottom: 14px; background: #0a1525; border: 1px solid var(--border2); border-radius: 12px; color: var(--text); }
-.auth-btn { width: 100%; padding: 14px; background: linear-gradient(135deg, var(--green), #009e5f); color: #000; font-weight: 700; border: none; border-radius: 12px; cursor: pointer; }
-.ticker-wrap { overflow: hidden; border-radius: 12px; background: var(--bg2); border: 1px solid var(--border2); margin-bottom: 28px; padding: 12px 0; }
-.ticker { display: flex; gap: 40px; animation: ticker 40s linear infinite; white-space: nowrap; }
-@keyframes ticker { 0% { transform: translateX(0); } 100% { transform: translateX(-50%); } }
-.tick-item { display: inline-flex; gap: 8px; font-size: 0.8rem; color: var(--muted); }
-#toast { position: fixed; bottom: 24px; right: 24px; background: var(--bg2); border: 1px solid var(--green); border-radius: 12px; padding: 12px 20px; opacity: 0; transition: 0.25s; z-index: 10000; }
-#toast.show { opacity: 1; }
-</style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+    <title>SmartSpend — AI-Powered Personal Finance</title>
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <style>
+        /* ====== DARK THEME – same as before ====== */
+        :root{ --bg: #080d14; --bg2: #0d1520; --bg3: #111c2b; --panel: rgba(15,30,48,0.7); --border: rgba(0,210,130,.12); --border2: rgba(255,255,255,.05); --green: #00d282; --green2: #00ff9d; --green-dim: rgba(0,210,130,.12); --red: #ff4d6d; --red-dim: rgba(255,77,109,.1); --amber: #f0a500; --amber-dim: rgba(240,165,0,.1); --blue: #3b82f6; --blue-dim: rgba(59,130,246,.1); --purple: #a855f7; --text: #e2eff8; --muted: #5a7a94; --mono: 'JetBrains Mono', monospace; --sans: 'Space Grotesk', sans-serif; --r: 16px; --r2: 10px; }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: var(--sans); background: var(--bg); color: var(--text); min-height: 100vh; overflow-x: hidden; }
+        body::before { content: ''; position: fixed; inset: 0; background-image: radial-gradient(ellipse 80% 50% at 50% -20%, rgba(0,210,130,.05) 0%, transparent 60%), linear-gradient(rgba(0,210,130,.01) 1px, transparent 1px), linear-gradient(90deg, rgba(0,210,130,.01) 1px, transparent 1px); background-size: 100% 100%, 40px 40px, 40px 40px; pointer-events: none; z-index: 0; }
+        /* Sidebar – same as before (shortened for brevity, but full in final) */
+        .sidebar { position: fixed; left: 0; top: 0; bottom: 0; width: 70px; background: rgba(13,21,32,0.95); backdrop-filter: blur(12px); border-right: 1px solid var(--border2); display: flex; flex-direction: column; align-items: center; padding: 24px 0; gap: 8px; z-index: 100; transition: width 0.25s cubic-bezier(0.4,0,0.2,1); }
+        .sidebar:hover { width: 220px; }
+        .sidebar-logo { width: 42px; height: 42px; border-radius: 12px; background: linear-gradient(135deg, var(--green), #009e5f); display: flex; align-items: center; justify-content: center; margin-bottom: 24px; cursor: pointer; }
+        .nav-item { width: 100%; display: flex; align-items: center; gap: 14px; padding: 12px 16px; border-radius: 12px; cursor: pointer; border: none; background: transparent; color: var(--muted); font-family: var(--sans); font-size: 0.85rem; font-weight: 500; white-space: nowrap; overflow: hidden; transition: all 0.2s; }
+        .nav-item:hover { background: var(--green-dim); color: var(--text); transform: translateX(4px); }
+        .nav-item.active { background: var(--green-dim); color: var(--green); border-left: 3px solid var(--green); }
+        .nav-icon { width: 22px; height: 22px; flex-shrink: 0; }
+        .nav-label { opacity: 0; transition: opacity 0.2s; }
+        .sidebar:hover .nav-label { opacity: 1; }
+        .sidebar-bottom { margin-top: auto; width: 100%; }
+        .main { margin-left: 70px; padding: 28px 32px; position: relative; z-index: 1; min-height: 100vh; }
+        @media (max-width: 768px) { .sidebar { width: 60px; } .main { margin-left: 60px; padding: 20px; } }
+        @media (max-width: 600px) { .sidebar { display: none; } .main { margin-left: 0; } }
+        .topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 28px; flex-wrap: wrap; gap: 16px; }
+        .topbar-left h1 { font-size: 1.75rem; font-weight: 700; letter-spacing: -0.02em; background: linear-gradient(135deg, #fff, var(--green)); background-clip: text; -webkit-background-clip: text; color: transparent; }
+        .topbar-left .sub { font-size: 0.8rem; color: var(--muted); margin-top: 4px; }
+        .topbar-right { display: flex; align-items: center; gap: 12px; }
+        .score-pill { display: flex; align-items: center; gap: 8px; padding: 6px 16px; border-radius: 99px; background: var(--green-dim); border: 1px solid var(--border); font-size: 0.8rem; font-weight: 600; color: var(--green); backdrop-filter: blur(4px); }
+        .score-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px var(--green); animation: pulse 2s infinite; }
+        @keyframes pulse { 0%,100%{ opacity: 1; } 50%{ opacity: 0.4; } }
+        .avatar { width: 38px; height: 38px; border-radius: 50%; background: linear-gradient(135deg, var(--blue), var(--purple)); display: flex; align-items: center; justify-content: center; font-weight: 700; color: #fff; cursor: pointer; transition: transform 0.2s; }
+        .signout-btn { background: var(--red-dim); border: 1px solid rgba(255,77,109,0.2); color: var(--red); padding: 7px 16px; border-radius: 10px; cursor: pointer; font-size: 0.75rem; font-weight: 600; transition: 0.2s; }
+        .signout-btn:hover { background: rgba(255,77,109,0.2); transform: translateY(-1px); }
+        .screen { display: none; animation: fadeUp 0.35s ease; }
+        .screen.active { display: block; }
+        @keyframes fadeUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 18px; margin-bottom: 28px; }
+        .stat-card { background: var(--panel); backdrop-filter: blur(10px); border: 1px solid var(--border2); border-radius: var(--r); padding: 20px; transition: all 0.25s; }
+        .stat-card:hover { transform: translateY(-3px); border-color: var(--border); box-shadow: 0 8px 24px rgba(0,0,0,0.2); }
+        .stat-icon { width: 42px; height: 42px; border-radius: 12px; display: flex; align-items: center; justify-content: center; margin-bottom: 14px; }
+        .stat-label { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 6px; }
+        .stat-value { font-size: 1.6rem; font-weight: 700; font-family: var(--mono); line-height: 1.2; }
+        .stat-card.green .stat-value { color: var(--green); }
+        .stat-card.red .stat-value { color: var(--red); }
+        .stat-card.blue .stat-value { color: var(--blue); }
+        .stat-card.amber .stat-value { color: var(--amber); }
+        .panel { background: var(--panel); backdrop-filter: blur(10px); border: 1px solid var(--border2); border-radius: var(--r); padding: 22px; display: flex; flex-direction: column; }
+        .panel-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 12px; }
+        .panel-title { font-size: 1rem; font-weight: 600; color: var(--text); }
+        .panel-sub { font-size: 0.7rem; color: var(--muted); margin-top: 2px; }
+        .chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; margin-bottom: 28px; }
+        canvas { max-height: 280px; width: 100% !important; }
+        .tx-controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; margin-bottom: 20px; padding: 20px; background: var(--panel); backdrop-filter: blur(8px); border-radius: var(--r); }
+        .filter-group { display: flex; flex-direction: column; gap: 6px; }
+        .filter-label { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; }
+        select, input, textarea { background: var(--bg3); color: var(--text); border: 1px solid var(--border2); border-radius: 10px; padding: 8px 14px; font-family: var(--sans); font-size: 0.85rem; outline: none; transition: 0.2s; }
+        select:focus, input:focus { border-color: var(--green); box-shadow: 0 0 0 2px var(--green-dim); }
+        .btn { padding: 8px 18px; border-radius: 10px; font-weight: 600; cursor: pointer; transition: 0.2s; border: none; }
+        .btn-green { background: linear-gradient(135deg, var(--green), #009e5f); color: #000; }
+        .btn-green:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,210,130,0.3); }
+        .btn-ghost { background: transparent; color: var(--muted); border: 1px solid var(--border2); }
+        .btn-ghost:hover { background: var(--bg3); color: var(--text); }
+        .table-wrap { overflow-x: auto; border-radius: var(--r); background: var(--panel); border: 1px solid var(--border2); }
+        table { width: 100%; border-collapse: collapse; }
+        th { text-align: left; padding: 14px 16px; background: var(--bg3); color: var(--muted); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; }
+        td { padding: 12px 16px; border-bottom: 1px solid var(--border2); font-size: 0.85rem; }
+        .cat-pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 99px; background: var(--bg3); font-size: 0.75rem; }
+        .badge-green { background: var(--green-dim); color: var(--green); }
+        .badge-red { background: var(--red-dim); color: var(--red); }
+        .badge-amber { background: var(--amber-dim); color: var(--amber); }
+        .advice-item { display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: 12px; margin-bottom: 8px; background: var(--bg3); }
+        .forecast-row { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+        .forecast-bar-track { flex: 1; height: 8px; background: var(--bg3); border-radius: 99px; overflow: hidden; }
+        .forecast-bar-fill { height: 100%; background: linear-gradient(90deg, var(--green), var(--green2)); width: 0; transition: width 1s ease; border-radius: 99px; }
+        .auth-overlay { position: fixed; inset: 0; background: rgba(8,13,20,0.98); backdrop-filter: blur(20px); z-index: 9999; display: flex; align-items: center; justify-content: center; }
+        .auth-card { background: linear-gradient(145deg, #0d1520, #0a1220); border: 1px solid rgba(0,210,130,0.2); border-radius: 28px; padding: 40px; width: 420px; max-width: 90%; box-shadow: 0 25px 50px rgba(0,0,0,0.5); }
+        .auth-input { width: 100%; padding: 12px 16px; margin-bottom: 14px; background: #0a1525; border: 1px solid var(--border2); border-radius: 12px; color: var(--text); }
+        .auth-btn { width: 100%; padding: 14px; background: linear-gradient(135deg, var(--green), #009e5f); color: #000; font-weight: 700; border: none; border-radius: 12px; cursor: pointer; font-size: 1rem; transition: 0.2s; }
+        .auth-btn:hover { transform: translateY(-2px); box-shadow: 0 8px 20px rgba(0,210,130,0.3); }
+        .ticker-wrap { overflow: hidden; border-radius: 12px; background: var(--bg2); border: 1px solid var(--border2); margin-bottom: 28px; padding: 12px 0; }
+        .ticker { display: flex; gap: 40px; animation: ticker 40s linear infinite; white-space: nowrap; }
+        .ticker:hover { animation-play-state: paused; }
+        @keyframes ticker { 0% { transform: translateX(0); } 100% { transform: translateX(-50%); } }
+        .tick-item { display: flex; align-items: center; gap: 8px; font-size: 0.8rem; color: var(--muted); }
+        .tick-sym { font-weight: 700; color: var(--green); }
+        #toast { position: fixed; bottom: 24px; right: 24px; background: var(--bg2); border: 1px solid var(--green); border-radius: 12px; padding: 12px 20px; opacity: 0; transform: translateY(10px); transition: 0.25s; z-index: 10000; backdrop-filter: blur(12px); pointer-events: none; }
+        #toast.show { opacity: 1; transform: translateY(0); }
+    </style>
 </head>
 <body>
 
 <nav class="sidebar">
-  <div class="sidebar-logo"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#000"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg></div>
-  <button class="nav-item active" data-nav="dashboard"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg><span class="nav-label">Dashboard</span></button>
-  <button class="nav-item" data-nav="add"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="9"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg><span class="nav-label">Add</span></button>
-  <button class="nav-item" data-nav="analytics"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg><span class="nav-label">Analytics</span></button>
-  <button class="nav-item" data-nav="budgets"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 2a10 10 0 100 20A10 10 0 0012 2z"/><path d="M12 6v6l4 2"/></svg><span class="nav-label">Budgets</span></button>
-  <button class="nav-item" data-nav="transactions"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/></svg><span class="nav-label">History</span></button>
-  <button class="nav-item" id="nav-admin" style="display:none" data-nav="admin"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg><span class="nav-label">Admin</span></button>
-  <div class="sidebar-bottom"><button class="nav-item" onclick="exportFullPDF()"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg><span class="nav-label">Export PDF</span></button></div>
+  <div class="sidebar-logo"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg></div>
+  <button class="nav-item active" onclick="nav('dashboard')"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg><span class="nav-label">Dashboard</span></button>
+  <button class="nav-item" onclick="nav('add')"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="9"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg><span class="nav-label">Add</span></button>
+  <button class="nav-item" onclick="nav('analytics')"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg><span class="nav-label">Analytics</span></button>
+  <button class="nav-item" onclick="nav('budgets')"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 2a10 10 0 100 20A10 10 0 0012 2z"/><path d="M12 6v6l4 2"/></svg><span class="nav-label">Budgets</span></button>
+  <button class="nav-item" onclick="nav('transactions')"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/></svg><span class="nav-label">History</span></button>
+  <button class="nav-item" id="nav-admin" style="display:none" onclick="nav('admin')"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg><span class="nav-label">Admin</span></button>
+  <div class="sidebar-bottom"><button class="nav-item" onclick="exportPDF()"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg><span class="nav-label">Export PDF</span></button></div>
 </nav>
 
 <main class="main">
-  <div class="topbar"><div><h1 id="pageTitle">Dashboard</h1><div class="sub">AI-Powered Finance</div></div><div class="topbar-right"><div class="score-pill"><div class="score-dot"></div><span>Health: <strong id="topScore">—</strong></span></div><div class="avatar" id="userAvatar">U</div><button class="signout-btn" onclick="logout()">Sign Out</button></div></div>
+  <div class="topbar">
+    <div><h1 id="pageTitle">Dashboard</h1><div class="sub" id="pageSub">Personal finance intelligence · Real-time ML insights</div></div>
+    <div class="topbar-right"><div class="score-pill"><div class="score-dot"></div><span>Health: <strong id="topScore">—</strong></span></div><div class="avatar" id="userAvatar">SS</div><button class="signout-btn" onclick="logout()">Sign Out</button></div>
+  </div>
   <div class="ticker-wrap"><div class="ticker" id="ticker"></div></div>
   <div id="toast"></div>
 
-  <!-- Screens -->
-  <div class="screen active" id="screen-dashboard"><div class="stats-grid"><div class="stat-card green"><div class="stat-value" id="sBalance">—</div><div class="stat-label">Balance</div></div><div class="stat-card red"><div class="stat-value" id="sExpense">—</div><div class="stat-label">Expenses (MTD)</div></div><div class="stat-card blue"><div class="stat-value" id="sIncome">—</div><div class="stat-label">Income (MTD)</div></div><div class="stat-card amber"><div class="stat-value" id="sScore">—</div><div class="stat-label">ML Health Score</div></div></div>
-    <div class="chart-grid"><div class="panel"><div class="panel-header"><div class="panel-title">Income vs Expenses (Monthly)</div></div><canvas id="monthlyChart" height="200"></canvas></div><div class="panel"><div class="panel-header"><div class="panel-title">Spending by Category</div></div><canvas id="donutChart" height="200"></canvas></div></div>
-    <div class="chart-grid"><div class="panel"><div class="panel-header"><div class="panel-title">ML Spending Forecast (4 weeks)</div><span class="badge-amber">AI</span></div><div id="forecastBars"></div></div><div class="panel"><div class="panel-header"><div class="panel-title">Budget Intelligence</div></div><div id="adviceList"></div></div></div></div>
+  <!-- Dashboard Screen -->
+  <div class="screen active" id="screen-dashboard">
+    <div class="stats-grid">
+      <div class="stat-card green"><div class="stat-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--green)"><path d="M12 2v20M17 7H9.5a3.5 3.5 0 100 7h5a3.5 3.5 0 110 7H6"/></svg></div><div class="stat-label">Balance</div><div class="stat-value" id="sBalance">—</div></div>
+      <div class="stat-card red"><div class="stat-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--red)"><polyline points="23 18 13.5 8.5 8.5 13.5 1 6"/><polyline points="17 18 23 18 23 12"/></svg></div><div class="stat-label">Expenses</div><div class="stat-value" id="sExpense">—</div></div>
+      <div class="stat-card blue"><div class="stat-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--blue)"><polyline points="1 6 1 18 23 18 23 6"/><line x1="1" y1="12" x2="23" y2="12"/></svg></div><div class="stat-label">Income</div><div class="stat-value" id="sIncome">—</div></div>
+      <div class="stat-card amber"><div class="stat-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--amber)"><path d="M12 2a10 10 0 100 20A10 10 0 0012 2z"/><path d="M12 6v6l4 2"/></svg></div><div class="stat-label">ML Score</div><div class="stat-value" id="sScore">—</div></div>
+    </div>
+    <div class="chart-grid"><div class="panel"><div class="panel-header"><div><div class="panel-title">Income vs Expenses</div><div class="panel-sub">Monthly trend</div></div><span class="badge-green" style="padding:3px 10px;border-radius:99px">Live</span></div><canvas id="monthlyChart" height="200"></canvas></div>
+    <div class="panel"><div class="panel-header"><div><div class="panel-title">Spending by Category</div><div class="panel-sub">Expense distribution</div></div></div><canvas id="donutChart" height="200"></canvas></div></div>
+    <div class="chart-grid"><div class="panel"><div class="panel-header"><div><div class="panel-title">ML Spending Forecast</div><div class="panel-sub">Next 4 weeks</div></div><span class="badge-amber" style="padding:3px 10px;border-radius:99px">AI</span></div><div id="forecastBars"></div></div>
+    <div class="panel"><div class="panel-header"><div><div class="panel-title">Budget Intelligence</div><div class="panel-sub">ML-generated advice</div></div></div><div id="adviceList"></div></div></div>
+  </div>
 
-  <div class="screen" id="screen-add"><div class="stats-grid" style="grid-template-columns:1fr 1fr"><div class="panel"><div class="panel-header"><div class="panel-title">New Transaction</div></div><div style="display:flex;gap:12px;margin-bottom:20px"><button id="btnExp" class="btn" style="flex:1;background:var(--red-dim);color:var(--red)">Expense</button><button id="btnInc" class="btn" style="flex:1;background:var(--green-dim);color:var(--green)">Income</button></div><form id="txForm"><div class="filter-group"><label>Amount (₱)</label><input type="number" id="txAmount" step="0.01" required></div><div class="filter-group"><label>Category</label><select id="txCategory"><option>Food & Dining</option><option>Transport</option><option>Groceries</option><option>Entertainment</option><option>Health</option><option>Salary</option><option>Freelance</option></select></div><div class="filter-group"><label>Note</label><input type="text" id="txNote"></div><input type="hidden" id="txType" value="expense"><button type="submit" class="btn-green" style="width:100%;padding:14px">Save Transaction</button></form></div><div class="panel"><div class="panel-header"><div class="panel-title">Recent Activity</div></div><div id="recentList"></div></div></div></div>
+  <!-- Add Transaction -->
+  <div class="screen" id="screen-add"><div class="stats-grid" style="grid-template-columns:1fr 1fr"><div class="panel"><div class="panel-header"><div class="panel-title">New Transaction</div></div><div class="type-toggle" style="display:flex;gap:12px;margin-bottom:20px"><button class="btn" id="btnExp" onclick="setTxType('expense')" style="flex:1;background:var(--red-dim);color:var(--red)">Expense</button><button class="btn" id="btnInc" onclick="setTxType('income')" style="flex:1;background:var(--green-dim);color:var(--green)">Income</button></div><form id="txForm"><div class="filter-group" style="margin-bottom:16px"><label>Amount (₱)</label><input type="number" id="txAmount" step="0.01" required></div><div class="filter-group" style="margin-bottom:16px"><label>Category</label><select id="txCategory"><option>Food & Dining</option><option>Transport</option><option>Groceries</option><option>Entertainment</option><option>Health</option><option>Salary</option><option>Freelance</option></select></div><div class="filter-group" style="margin-bottom:16px"><label>Note</label><input type="text" id="txNote" placeholder="Optional"></div><input type="hidden" id="txType" value="expense"><button type="submit" class="btn-green" style="width:100%;padding:14px">Save Transaction</button></form></div>
+    <div class="panel"><div class="panel-header"><div class="panel-title">Recent Activity</div></div><div id="recentList"></div></div></div></div>
 
-  <div class="screen" id="screen-analytics"><div class="stats-grid" style="grid-template-columns:1fr 2fr"><div class="panel" style="text-align:center"><canvas id="scoreRingCanvas" width="140" height="140" style="width:140px;height:140px;margin:0 auto"></canvas><div id="ringScore" style="font-size:2rem;margin-top:-40px">—</div></div><div class="panel" id="scoreDescText">Loading insights...</div></div><div class="chart-grid"><div class="panel"><div class="panel-header"><div class="panel-title">Weekly Forecast</div></div><canvas id="forecastChart" height="200"></canvas></div><div class="panel"><div class="panel-header"><div class="panel-title">Category Spending</div></div><canvas id="catBarChart" height="200"></canvas></div></div><div class="panel"><div class="panel-header"><div class="panel-title">Full Intelligence Report</div></div><div id="fullAdvice"></div></div></div>
+  <!-- Analytics -->
+  <div class="screen" id="screen-analytics"><div class="stats-grid" style="grid-template-columns:1fr 2fr;align-items:center"><div class="panel" style="text-align:center"><div style="position:relative;width:140px;margin:0 auto"><canvas id="scoreRingCanvas" width="140" height="140" style="width:140px;height:140px"></canvas><div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center"><div id="ringScore" style="font-size:2rem;font-weight:700;color:var(--green)">—</div><div style="font-size:0.7rem;color:var(--muted)">Health Score</div></div></div></div><div class="panel"><div id="scoreDescText" style="font-size:0.9rem;line-height:1.5;color:var(--muted)">Loading insights...</div></div></div>
+    <div class="chart-grid"><div class="panel"><div class="panel-header"><div class="panel-title">Weekly Forecast</div><span class="badge-amber">ML Prediction</span></div><canvas id="forecastChart" height="200"></canvas></div><div class="panel"><div class="panel-header"><div class="panel-title">Category Heatmap</div></div><canvas id="catBarChart" height="200"></canvas></div></div>
+    <div class="panel"><div class="panel-header"><div class="panel-title">Full Intelligence Report</div></div><div id="fullAdvice"></div></div></div>
 
-  <div class="screen" id="screen-budgets"><div id="budgetBars" class="stats-grid"></div><div class="panel"><div class="panel-header"><div class="panel-title">Set Monthly Limits</div><button class="btn-green" onclick="saveAllBudgets()">Save All</button></div><div id="budgetInputs" class="stats-grid" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr))"></div></div></div>
+  <!-- Budgets -->
+  <div class="screen" id="screen-budgets"><div id="budgetBars" class="stats-grid" style="grid-template-columns:repeat(auto-fit,minmax(280px,1fr))"></div><div class="panel"><div class="panel-header"><div class="panel-title">Set Monthly Limits</div><button class="btn-green" onclick="saveAllBudgets()">Save All</button></div><div id="budgetInputs" class="stats-grid" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px"></div></div></div>
 
-  <div class="screen" id="screen-transactions"><div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:20px"><select id="filterCat"><option value="">All Categories</option><option>Food & Dining</option><option>Transport</option><option>Groceries</option><option>Entertainment</option><option>Health</option></select><select id="filterType"><option value="">All Types</option><option value="income">Income</option><option value="expense">Expense</option></select><button class="btn-ghost" onclick="exportCSV()">CSV</button><button class="btn-ghost" onclick="exportExcel()">Excel</button></div><div class="table-wrap"><table><thead><tr><th>Date</th><th>Category</th><th>Note</th><th>Type</th><th>Amount</th><th></th></tr></thead><tbody id="txTableBody"></tbody></table></div></div>
+  <!-- Transactions -->
+  <div class="screen" id="screen-transactions"><div class="tx-controls"><div class="filter-group"><div class="filter-label">Category</div><select id="filterCat"><option value="">All</option><option>Food & Dining</option><option>Transport</option><option>Groceries</option><option>Entertainment</option><option>Health</option><option>Salary</option><option>Freelance</option></select></div><div class="filter-group"><div class="filter-label">Type</div><select id="filterType"><option value="">All</option><option value="income">Income</option><option value="expense">Expense</option></select></div><div class="filter-group"><div class="filter-label">Sort</div><select id="filterSort"><option value="date">Newest First</option><option value="amount">Highest Amount</option></select></div><div class="filter-group"><div class="filter-label">From</div><input type="date" id="filterFrom"></div><div class="filter-group"><div class="filter-label">To</div><input type="date" id="filterTo"></div><div><button class="btn-ghost" onclick="exportCSV()">CSV</button><button class="btn-ghost" onclick="exportExcel()" style="margin-left:8px">Excel</button></div></div>
+    <div class="table-wrap"><table><thead><tr><th>Date</th><th>Category</th><th>Note</th><th>Type</th><th>Amount</th><th></th></tr></thead><tbody id="txTableBody"></tbody></table></div></div>
 
-  <div class="screen" id="screen-admin"><div class="stats-grid"><div class="stat-card"><div class="stat-value" id="admTotal">—</div><div class="stat-label">Users</div></div><div class="stat-card"><div class="stat-value" id="admTx">—</div><div class="stat-label">Transactions</div></div></div><div class="panel"><div class="panel-header"><div class="panel-title">User Management</div></div><div class="table-wrap"><table><thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Role</th><th>Actions</th></tr></thead><tbody id="adminUsersBody"></tbody></table></div></div></div>
+  <!-- Admin -->
+  <div class="screen" id="screen-admin"><div class="stats-grid"><div class="stat-card"><div class="stat-value" id="admTotal">—</div><div class="stat-label">Total Users</div></div><div class="stat-card"><div class="stat-value" id="admActive">—</div><div class="stat-label">Active Today</div></div><div class="stat-card"><div class="stat-value" id="admAdmins">—</div><div class="stat-label">Admins</div></div><div class="stat-card"><div class="stat-value" id="admTx">—</div><div class="stat-label">Transactions</div></div></div>
+    <div class="panel"><div class="panel-header"><div class="panel-title">User Management</div></div><div class="table-wrap"><table><thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Actions</th></tr></thead><tbody id="adminUsersBody"></tbody></table></div></div>
+    <div class="panel"><div class="panel-header"><div class="panel-title">Audit Logs</div></div><div class="table-wrap"><table><thead><tr><th>Time</th><th>Action</th><th>Detail</th></tr></thead><tbody id="adminLogsBody"></tbody></table></div></div></div>
 </main>
 
-<div id="authOverlay" class="auth-overlay"><div class="auth-card"><div style="text-align:center;margin-bottom:20px"><h2 id="authTitle">Welcome back</h2></div><input type="text" id="regName" class="auth-input" placeholder="Full Name" style="display:none"><input type="email" id="authEmail" class="auth-input" placeholder="Email"><input type="password" id="authPass" class="auth-input" placeholder="Password"><input type="password" id="authConfirm" class="auth-input" placeholder="Confirm Password" style="display:none"><div id="termsRow" style="display:none;margin:12px 0"><label><input type="checkbox" id="termsCheck"> Accept Terms</label></div><div id="authMsg" style="color:var(--red);font-size:0.8rem"></div><button id="authBtn" class="auth-btn">Sign In</button><p onclick="toggleAuthMode()" style="text-align:center;margin-top:16px;color:var(--muted);cursor:pointer">Don't have an account? Register</p></div></div>
+<!-- Auth Overlay -->
+<div id="authOverlay" class="auth-overlay" style="display:flex"><div class="auth-card"><div style="text-align:center;margin-bottom:20px"><div style="width:50px;height:50px;background:linear-gradient(135deg,var(--green),#009e5f);border-radius:16px;margin:0 auto 12px;display:flex;align-items:center;justify-content:center"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#000"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5M2 12l10 5 10-5"/></svg></div><h2 id="authTitle" style="color:var(--green)">Welcome back</h2></div><input type="text" id="regName" class="auth-input" placeholder="Full Name" style="display:none"><input type="email" id="authEmail" class="auth-input" placeholder="Email"><input type="password" id="authPass" class="auth-input" placeholder="Password"><input type="password" id="authConfirm" class="auth-input" placeholder="Confirm Password" style="display:none"><div id="termsRow" style="display:none;margin:12px 0"><label><input type="checkbox" id="termsCheck"> I accept <a href="#" onclick="showTermsModal();return false" style="color:var(--green)">Terms</a></label></div><div id="authMsg" style="color:var(--red);font-size:0.8rem;margin-bottom:12px"></div><button id="authBtn" class="auth-btn" onclick="handleAuth()">Sign In</button><p onclick="toggleAuthMode()" style="text-align:center;margin-top:16px;color:var(--muted);cursor:pointer">Don't have an account? <span style="color:var(--green)">Register</span></p></div></div>
 
 <script>
-// ---------- MOCK DATABASE (localStorage) ----------
+// Global state
 let currentUser = null;
 let allTransactions = [];
 let budgetLimits = {};
 let monthlyChart, donutChart, forecastChart, catBarChart;
 
-function toast(msg) { const t=document.getElementById('toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'), 2500); }
 function fmt(amt) { return '₱' + Number(amt).toLocaleString('en-PH', { minimumFractionDigits: 2 }); }
+function toast(msg, dur=2500) { const t=document.getElementById('toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'), dur); }
 
-// Storage keys
-const USERS_KEY = 'smartspend_users';
-const TX_KEY = 'smartspend_tx';
-const BUDGETS_KEY = 'smartspend_budgets';
-
-function initStorage() {
-  if(!localStorage.getItem(USERS_KEY)) {
-    const defaultUsers = [{ id:1, name:'Admin User', email:'admin@demo.com', password:'admin123', role:'admin', balance:12500 }];
-    localStorage.setItem(USERS_KEY, JSON.stringify(defaultUsers));
-  }
-  if(!localStorage.getItem(BUDGETS_KEY)) localStorage.setItem(BUDGETS_KEY, JSON.stringify({}));
+async function apiFetch(url, opts={}) {
+  const res = await fetch(url, { ...opts, credentials: 'include', headers: { 'Content-Type': 'application/json', ...opts.headers } });
+  if (!res.ok) { const err=await res.json(); throw new Error(err.error || 'Request failed'); }
+  return res.json();
 }
-function getUsers() { return JSON.parse(localStorage.getItem(USERS_KEY)); }
-function saveUsers(users) { localStorage.setItem(USERS_KEY, JSON.stringify(users)); }
-function getTransactions(userId) { const all = JSON.parse(localStorage.getItem(TX_KEY)||'{}'); return all[userId] || []; }
-function saveTransactions(userId, txs) { const all = JSON.parse(localStorage.getItem(TX_KEY)||'{}'); all[userId] = txs; localStorage.setItem(TX_KEY, JSON.stringify(all)); }
-function getBudgets(userId) { const b = JSON.parse(localStorage.getItem(BUDGETS_KEY)||'{}'); return b[userId] || {}; }
-function saveBudgets(userId, budgets) { const b = JSON.parse(localStorage.getItem(BUDGETS_KEY)||'{}'); b[userId] = budgets; localStorage.setItem(BUDGETS_KEY, JSON.stringify(b)); }
 
-// Auth logic
+function nav(screenId) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  const target = document.getElementById(`screen-${screenId}`);
+  if (target) target.classList.add('active');
+  document.querySelectorAll('.nav-item').forEach(btn => btn.classList.remove('active'));
+  const activeBtn = document.getElementById(`nav-${screenId}`);
+  if (activeBtn) activeBtn.classList.add('active');
+  const titles = { dashboard:'Dashboard', add:'Add Transaction', analytics:'ML Analytics', budgets:'Budgets', transactions:'Transactions', admin:'Admin Panel' };
+  document.getElementById('pageTitle').innerText = titles[screenId] || 'Dashboard';
+  if (screenId === 'analytics') loadAnalytics();
+  if (screenId === 'budgets') loadBudgets();
+  if (screenId === 'transactions') renderTransactions();
+  if (screenId === 'admin' && currentUser?.role === 'admin') loadAdminPanel();
+}
+
+let isLogin = true;
 function toggleAuthMode() {
-  const isLogin = document.getElementById('authTitle').innerText === 'Welcome back';
-  if(isLogin) {
-    document.getElementById('authTitle').innerText = 'Create Account';
-    document.getElementById('regName').style.display = 'block';
-    document.getElementById('authConfirm').style.display = 'block';
-    document.getElementById('termsRow').style.display = 'flex';
-    document.getElementById('authBtn').innerText = 'Create Account';
-  } else {
-    document.getElementById('authTitle').innerText = 'Welcome back';
-    document.getElementById('regName').style.display = 'none';
-    document.getElementById('authConfirm').style.display = 'none';
-    document.getElementById('termsRow').style.display = 'none';
-    document.getElementById('authBtn').innerText = 'Sign In';
-  }
+  isLogin = !isLogin;
+  document.getElementById('authTitle').innerText = isLogin ? 'Welcome back' : 'Create Account';
+  document.getElementById('regName').style.display = isLogin ? 'none' : 'block';
+  document.getElementById('authConfirm').style.display = isLogin ? 'none' : 'block';
+  document.getElementById('termsRow').style.display = isLogin ? 'none' : 'flex';
+  document.getElementById('authBtn').innerText = isLogin ? 'Sign In' : 'Create Account';
   document.getElementById('authMsg').innerText = '';
 }
+
 async function handleAuth() {
   const email = document.getElementById('authEmail').value;
-  const pass = document.getElementById('authPass').value;
+  const password = document.getElementById('authPass').value;
   const msgDiv = document.getElementById('authMsg');
-  const isLogin = document.getElementById('authTitle').innerText === 'Welcome back';
-  if(!email || !pass) { msgDiv.innerText = 'Email and password required'; return; }
-  const users = getUsers();
-  if(isLogin) {
-    const user = users.find(u=>u.email===email && u.password===pass);
-    if(!user) { msgDiv.innerText = 'Invalid credentials'; return; }
-    currentUser = { ...user };
-    document.getElementById('authOverlay').style.display = 'none';
-    document.getElementById('userAvatar').innerText = currentUser.name.slice(0,2).toUpperCase();
-    if(currentUser.role === 'admin') document.getElementById('nav-admin').style.display = 'flex';
-    loadDashboardData();
-    nav('dashboard');
-  } else {
+  if (!email || !password) { msgDiv.innerText = 'Email and password required'; return; }
+  if (!isLogin) {
     const name = document.getElementById('regName').value;
     const confirm = document.getElementById('authConfirm').value;
     const terms = document.getElementById('termsCheck').checked;
-    if(!name) { msgDiv.innerText = 'Full name required'; return; }
-    if(pass !== confirm) { msgDiv.innerText = 'Passwords do not match'; return; }
-    if(!terms) { msgDiv.innerText = 'Accept terms'; return; }
-    if(users.find(u=>u.email===email)) { msgDiv.innerText = 'Email exists'; return; }
-    const newId = users.length+1;
-    const newUser = { id:newId, name, email, password:pass, role:'user', balance:0 };
-    users.push(newUser);
-    saveUsers(users);
-    msgDiv.style.color = 'var(--green)';
-    msgDiv.innerText = 'Account created! Please login.';
-    setTimeout(()=>toggleAuthMode(), 1200);
+    if (!name) { msgDiv.innerText = 'Full name required'; return; }
+    if (password !== confirm) { msgDiv.innerText = 'Passwords do not match'; return; }
+    if (!terms) { msgDiv.innerText = 'Please accept Terms'; return; }
+    try {
+      await apiFetch('/api/register', { method:'POST', body: JSON.stringify({ name, email, password, accepted_terms:true, terms_version:'1.0' }) });
+      msgDiv.style.color = 'var(--green)';
+      msgDiv.innerText = 'Account created! Please login.';
+      setTimeout(() => toggleAuthMode(), 1500);
+      return;
+    } catch(e) { msgDiv.innerText = e.message; return; }
   }
+  try {
+    const data = await apiFetch('/api/login', { method:'POST', body: JSON.stringify({ email, password }) });
+    currentUser = data.user;
+    document.getElementById('authOverlay').style.display = 'none';
+    document.getElementById('userAvatar').innerText = currentUser.name.slice(0,2).toUpperCase();
+    if (currentUser.role === 'admin') document.getElementById('nav-admin').style.display = 'flex';
+    loadDashboard();
+    nav('dashboard');
+  } catch(e) { msgDiv.innerText = e.message; }
 }
-function logout() {
+
+async function logout() {
+  await apiFetch('/api/logout', { method:'POST' });
   currentUser = null;
   document.getElementById('authOverlay').style.display = 'flex';
   document.getElementById('nav-admin').style.display = 'none';
-  location.reload();
 }
 
-// Core data & ML
-function getMLInsights(userId) {
-  const txs = getTransactions(userId);
-  const budgets = getBudgets(userId);
-  const now = new Date();
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-  const monthlyExpense = txs.filter(t=>t.tx_type==='expense' && new Date(t.tx_date)>=monthStart).reduce((s,t)=>s+t.amount,0);
-  const monthlyIncome = txs.filter(t=>t.tx_type==='income' && new Date(t.tx_date)>=monthStart).reduce((s,t)=>s+t.amount,0);
-  const balance = monthlyIncome - monthlyExpense;
-  const savingsRate = monthlyIncome > 0 ? (balance/monthlyIncome)*100 : 0;
-  let score = Math.min(100, Math.max(0, Math.floor(60 + (savingsRate/2) - (monthlyExpense/(monthlyIncome+1))*20)));
-  score = Math.min(100, Math.max(0, score));
-  const catSpending = {};
-  txs.filter(t=>t.tx_type==='expense').forEach(t=>{ catSpending[t.category] = (catSpending[t.category]||0)+t.amount; });
-  const advice = [];
-  for(let [cat, spent] of Object.entries(catSpending)) {
-    const limit = budgets[cat];
-    if(limit) {
-      const pct = (spent/limit)*100;
-      let status = pct>100?'over':pct>80?'warning':'good';
-      advice.push({ cat, spent, limit, pct:Math.min(100,Math.floor(pct)), msg:status==='over'?`Exceeded limit by ${fmt(spent-limit)}`:status==='warning'?`Near limit (${Math.floor(pct)}%)`:`On track (${Math.floor(pct)}% used)`, status });
+async function loadDashboard() {
+  if (!currentUser) return;
+  try {
+    const summary = await apiFetch(`/api/summary/${currentUser.id}`);
+    const pred = await apiFetch(`/api/predict/${currentUser.id}`);
+    allTransactions = await apiFetch(`/api/transactions?user_id=${currentUser.id}`);
+    document.getElementById('sBalance').innerText = fmt(summary.balance);
+    document.getElementById('sExpense').innerText = fmt(summary.expense);
+    document.getElementById('sIncome').innerText = fmt(summary.income);
+    document.getElementById('sScore').innerText = pred.score + '/100';
+    document.getElementById('topScore').innerText = pred.score;
+    // Monthly chart
+    const months = Object.keys(summary.monthly).slice(-6);
+    const incData = months.map(m => summary.monthly[m]?.income || 0);
+    const expData = months.map(m => summary.monthly[m]?.expense || 0);
+    if (monthlyChart) monthlyChart.destroy();
+    monthlyChart = new Chart(document.getElementById('monthlyChart'), { type:'bar', data:{ labels:months, datasets:[{ label:'Income', data:incData, backgroundColor:'rgba(0,210,130,0.6)', borderRadius:8 },{ label:'Expense', data:expData, backgroundColor:'rgba(255,77,109,0.6)', borderRadius:8 }] }, options:{ responsive:true, maintainAspectRatio:true, plugins:{ legend:{ labels:{ color:'#e2eff8' } } } } });
+    // Donut
+    if (donutChart) donutChart.destroy();
+    donutChart = new Chart(document.getElementById('donutChart'), { type:'doughnut', data:{ labels:Object.keys(pred.predictions.categories), datasets:[{ data:Object.values(pred.predictions.categories), backgroundColor:['#00d282','#3b82f6','#f0a500','#a855f7','#ff4d6d'], borderWidth:0 }] }, options:{ cutout:'65%', plugins:{ legend:{ position:'bottom', labels:{ color:'#e2eff8' } } } } });
+    // Forecast bars
+    const forecastDiv = document.getElementById('forecastBars');
+    const weeks = pred.predictions.weekly;
+    const maxVal = Math.max(...Object.values(weeks));
+    forecastDiv.innerHTML = Object.entries(weeks).map(([w,v]) => `<div class="forecast-row"><span style="width:70px">${w}</span><div class="forecast-bar-track"><div class="forecast-bar-fill" style="width:${(v/maxVal*100)}%"></div></div><span>${fmt(v)}</span></div>`).join('');
+    // Advice
+    const adviceDiv = document.getElementById('adviceList');
+    adviceDiv.innerHTML = pred.advice.map(a => `<div class="advice-item"><span style="background:${a.status==='over'?'var(--red)':a.status==='warning'?'var(--amber)':'var(--green)'};width:24px;height:24px;border-radius:8px;display:flex;align-items:center;justify-content:center">${a.status==='over'?'⚠️':a.status==='warning'?'📊':'✓'}</span><div><strong>${a.cat}</strong><br><span style="font-size:0.75rem;color:var(--muted)">${a.msg}</span></div></div>`).join('');
+  } catch(e) { console.error(e); }
+}
+
+async function loadAnalytics() {
+  if (!currentUser) return;
+  const pred = await apiFetch(`/api/predict/${currentUser.id}`);
+  const score = pred.score;
+  const ringCanvas = document.getElementById('scoreRingCanvas');
+  const ctx = ringCanvas.getContext('2d');
+  ctx.clearRect(0,0,140,140);
+  ctx.beginPath(); ctx.arc(70,70,60,0,2*Math.PI); ctx.strokeStyle = 'rgba(255,255,255,0.1)'; ctx.lineWidth=12; ctx.stroke();
+  ctx.beginPath(); ctx.arc(70,70,60,-Math.PI/2, (score/100)*2*Math.PI - Math.PI/2); ctx.strokeStyle = score>=70?'#00d282':score>=45?'#f0a500':'#ff4d6d'; ctx.lineWidth=12; ctx.stroke();
+  document.getElementById('ringScore').innerText = score;
+  const desc = score>=80?'Excellent financial health!':score>=60?'Good, keep optimizing':score>=40?'Fair - review budgets':'Needs attention - reduce spending';
+  document.getElementById('scoreDescText').innerHTML = `<strong style="color:var(--green)">${desc}</strong><br>Based on income ratio, budget compliance, and spending patterns.`;
+  // Forecast line chart
+  const weeks = pred.predictions.weekly;
+  if (forecastChart) forecastChart.destroy();
+  forecastChart = new Chart(document.getElementById('forecastChart'), { type:'line', data:{ labels:Object.keys(weeks), datasets:[{ label:'Predicted Spend', data:Object.values(weeks), borderColor:'#00d282', backgroundColor:'rgba(0,210,130,0.1)', fill:true, tension:0.3 }] }, options:{ responsive:true } });
+  // Category bar
+  const cats = pred.predictions.categories;
+  if (catBarChart) catBarChart.destroy();
+  catBarChart = new Chart(document.getElementById('catBarChart'), { type:'bar', data:{ labels:Object.keys(cats), datasets:[{ label:'Total Spent', data:Object.values(cats), backgroundColor:'#3b82f6', borderRadius:8 }] }, options:{ indexAxis:'y', responsive:true } });
+  const fullAdvice = document.getElementById('fullAdvice');
+  fullAdvice.innerHTML = pred.advice.map(a => `<div class="advice-item"><div><strong>${a.cat}</strong><br>${a.msg}</div></div>`).join('');
+}
+
+async function loadBudgets() {
+  if (!currentUser) return;
+  const pred = await apiFetch(`/api/predict/${currentUser.id}`);
+  const budgets = await apiFetch(`/api/budgets/${currentUser.id}`);
+  budgetLimits = Object.fromEntries(budgets.map(b=>[b.category, b.limit]));
+  const barsDiv = document.getElementById('budgetBars');
+  barsDiv.innerHTML = pred.advice.filter(a=>a.limit).map(a=>`<div class="panel"><div class="budget-head"><span>${a.cat}</span><span style="color:${a.status==='over'?'var(--red)':a.status==='warning'?'var(--amber)':'var(--green)'}">${a.pct}%</span></div><div class="forecast-bar-track"><div class="forecast-bar-fill" style="width:${Math.min(a.pct,100)}%;background:${a.status==='over'?'var(--red)':a.status==='warning'?'var(--amber)':'var(--green)'}"></div></div><div class="budget-nums"><span>Spent: ${fmt(a.spent)}</span><span>Limit: ${fmt(a.limit)}</span></div></div>`).join('');
+  const inputsDiv = document.getElementById('budgetInputs');
+  const categories = ['Food & Dining','Transport','Groceries','Entertainment','Health'];
+  inputsDiv.innerHTML = categories.map(cat => `<div style="display:flex;gap:10px;align-items:center"><label style="flex:1">${cat}</label><input type="number" id="b_${cat.replace(/[^a-z]/gi,'_')}" value="${budgetLimits[cat] || ''}" placeholder="Limit" style="width:120px"></div>`).join('');
+}
+
+async function saveAllBudgets() {
+  const categories = ['Food & Dining','Transport','Groceries','Entertainment','Health'];
+  for (const cat of categories) {
+    const input = document.getElementById(`b_${cat.replace(/[^a-z]/gi,'_')}`);
+    const limit = parseFloat(input.value);
+    if (!isNaN(limit) && limit > 0) {
+      await apiFetch(`/api/budgets/${currentUser.id}`, { method:'POST', body: JSON.stringify({ category:cat, limit }) });
     }
   }
-  // weekly forecast (simple moving avg)
-  const lastWeeks = []; const weekMs = 7*24*3600*1000;
-  for(let i=1;i<=4;i++) { const weekExp = txs.filter(t=>t.tx_type==='expense' && new Date(t.tx_date) >= new Date(Date.now()-i*weekMs) && new Date(t.tx_date) < new Date(Date.now()-(i-1)*weekMs)).reduce((a,b)=>a+b.amount,0); lastWeeks.push(weekExp); }
-  const avg = lastWeeks.reduce((a,b)=>a+b,0)/Math.max(1,lastWeeks.filter(w=>w>0).length);
-  const weeklyForecast = { 'Week1':Math.max(0,avg*0.95), 'Week2':Math.max(0,avg*0.98), 'Week3':Math.max(0,avg*1.02), 'Week4':Math.max(0,avg*1.05) };
-  return { score, balance, monthlyIncome, monthlyExpense, catSpending, advice, weeklyForecast };
+  toast('Budgets saved!');
+  loadBudgets();
 }
 
-async function loadDashboardData() {
-  if(!currentUser) return;
-  const txs = getTransactions(currentUser.id);
-  allTransactions = txs;
-  const insights = getMLInsights(currentUser.id);
-  document.getElementById('sBalance').innerText = fmt(insights.balance);
-  document.getElementById('sExpense').innerText = fmt(insights.monthlyExpense);
-  document.getElementById('sIncome').innerText = fmt(insights.monthlyIncome);
-  document.getElementById('sScore').innerText = insights.score;
-  document.getElementById('topScore').innerText = insights.score;
-  // Monthly chart (last 6 months)
-  const monthlyMap = {};
-  txs.forEach(t=>{ const d=new Date(t.tx_date); const key=`${d.getMonth()+1}/${d.getFullYear().slice(-2)}`; if(t.tx_type==='income') monthlyMap[key]=monthlyMap[key]||{i:0,e:0}; else monthlyMap[key]=monthlyMap[key]||{i:0,e:0}; t.tx_type==='income'?monthlyMap[key].i+=t.amount:monthlyMap[key].e+=t.amount; });
-  const months = Object.keys(monthlyMap).slice(-6);
-  const incData = months.map(m=>monthlyMap[m].i); const expData = months.map(m=>monthlyMap[m].e);
-  if(monthlyChart) monthlyChart.destroy();
-  monthlyChart = new Chart(document.getElementById('monthlyChart'), { type:'bar', data:{ labels:months, datasets:[{ label:'Income', data:incData, backgroundColor:'rgba(0,210,130,0.6)' },{ label:'Expense', data:expData, backgroundColor:'rgba(255,77,109,0.6)' }] }, options:{ responsive:true } });
-  if(donutChart) donutChart.destroy();
-  donutChart = new Chart(document.getElementById('donutChart'), { type:'doughnut', data:{ labels:Object.keys(insights.catSpending), datasets:[{ data:Object.values(insights.catSpending), backgroundColor:['#00d282','#3b82f6','#f0a500','#a855f7','#ff4d6d'] }] }, options:{ cutout:'65%' } });
-  const maxFore = Math.max(...Object.values(insights.weeklyForecast));
-  document.getElementById('forecastBars').innerHTML = Object.entries(insights.weeklyForecast).map(([w,v])=>`<div class="forecast-row"><span style="width:70px">${w}</span><div class="forecast-bar-track"><div class="forecast-bar-fill" style="width:${(v/maxFore*100)}%"></div></div><span>${fmt(v)}</span></div>`).join('');
-  document.getElementById('adviceList').innerHTML = insights.advice.length? insights.advice.map(a=>`<div class="advice-item"><span>${a.cat}</span><div>${a.msg}</div></div>`).join('') : '<div class="advice-item">✨ Great job! No budget warnings.</div>';
-  document.getElementById('recentList').innerHTML = allTransactions.slice(0,5).map(t=>`<div style="display:flex;justify-content:space-between;padding:8px 0"><div>${t.category}<br><small>${new Date(t.tx_date).toLocaleDateString()}</small></div><div>${fmt(t.amount)}</div></div>`).join('');
-  renderTransactionsTable();
-}
-function renderTransactionsTable() {
-  const catFilter = document.getElementById('filterCat')?.value || '';
-  const typeFilter = document.getElementById('filterType')?.value || '';
-  let filtered = allTransactions.filter(t=>(!catFilter || t.category===catFilter) && (!typeFilter || t.tx_type===typeFilter));
-  filtered.sort((a,b)=>new Date(b.tx_date)-new Date(a.tx_date));
+async function renderTransactions() {
+  if (!currentUser) return;
+  const cat = document.getElementById('filterCat').value;
+  const type = document.getElementById('filterType').value;
+  const from = document.getElementById('filterFrom').value;
+  const to = document.getElementById('filterTo').value;
+  let filtered = allTransactions.filter(t => (!cat || t.category===cat) && (!type || t.tx_type===type) && (!from || new Date(t.tx_date)>=new Date(from)) && (!to || new Date(t.tx_date)<=new Date(to)));
+  const sort = document.getElementById('filterSort').value;
+  filtered.sort((a,b) => sort==='amount' ? b.amount-a.amount : new Date(b.tx_date)-new Date(a.tx_date));
   const tbody = document.getElementById('txTableBody');
-  if(!tbody) return;
-  tbody.innerHTML = filtered.map(t=>`<tr><td>${new Date(t.tx_date).toLocaleDateString()}</td><td><span class="badge-${t.tx_type==='income'?'green':'red'}">${t.category}</span></td><td>${t.note||'—'}</td><td>${t.tx_type}</td><td class="${t.tx_type}">${fmt(t.amount)}</td><td><button class="btn-ghost" onclick="deleteTx(${t.tx_id})">✕</button></td></tr>`).join('');
+  if (!filtered.length) { tbody.innerHTML='<tr><td colspan="6" style="text-align:center">No transactions</td></tr>'; return; }
+  tbody.innerHTML = filtered.map(t => `<tr><td>${new Date(t.tx_date).toLocaleDateString()}</td><td><span class="cat-pill">${t.category}</span></td><td>${t.note || '—'}</td><td><span class="badge-${t.tx_type==='income'?'green':'red'}">${t.tx_type}</span></td><td class="${t.tx_type==='income'?'tx-income':'tx-expense'}">${fmt(t.amount)}</td><td><button class="btn-ghost" style="padding:4px 10px" onclick="deleteTx(${t.tx_id})">✕</button></td></tr>`).join('');
 }
+
 async function deleteTx(id) {
+  if (!confirm('Delete this transaction?')) return;
+  await apiFetch(`/api/transactions/${id}`, { method:'DELETE' });
   allTransactions = allTransactions.filter(t=>t.tx_id!==id);
-  saveTransactions(currentUser.id, allTransactions);
-  loadDashboardData();
-  toast('Transaction deleted');
+  renderTransactions();
+  loadDashboard();
 }
-document.getElementById('txForm')?.addEventListener('submit', (e) => {
-  e.preventDefault();
-  const amount = parseFloat(document.getElementById('txAmount').value);
-  const category = document.getElementById('txCategory').value;
-  const type = document.getElementById('txType').value;
-  const note = document.getElementById('txNote').value;
-  if(!amount || amount<=0) { toast('Invalid amount'); return; }
-  const newTx = { tx_id:Date.now(), amount, category, tx_type:type, note, tx_date:new Date().toISOString() };
-  allTransactions.unshift(newTx);
-  saveTransactions(currentUser.id, allTransactions);
-  toast('Transaction saved');
-  document.getElementById('txForm').reset();
-  loadDashboardData();
-  if(document.getElementById('screen-add').classList.contains('active')) nav('add');
-});
+
 function setTxType(type) {
   document.getElementById('txType').value = type;
   document.getElementById('btnExp').style.background = type==='expense' ? 'var(--red-dim)' : 'transparent';
   document.getElementById('btnInc').style.background = type==='income' ? 'var(--green-dim)' : 'transparent';
 }
-async function loadAnalytics() {
-  const ins = getMLInsights(currentUser.id);
-  const ring = document.getElementById('scoreRingCanvas');
-  const ctx = ring.getContext('2d');
-  const score = ins.score;
-  ctx.clearRect(0,0,140,140);
-  ctx.beginPath(); ctx.arc(70,70,60,0,2*Math.PI); ctx.strokeStyle = 'rgba(255,255,255,0.1)'; ctx.lineWidth=12; ctx.stroke();
-  ctx.beginPath(); ctx.arc(70,70,60,-Math.PI/2, (score/100)*2*Math.PI - Math.PI/2); ctx.strokeStyle = score>=70?'#00d282':score>=45?'#f0a500':'#ff4d6d'; ctx.lineWidth=12; ctx.stroke();
-  document.getElementById('ringScore').innerText = score;
-  document.getElementById('scoreDescText').innerHTML = `<strong>${score>=80?'Excellent':score>=60?'Good':score>=40?'Fair':'Needs attention'}</strong><br>Score based on savings rate and budget adherence.`;
-  if(forecastChart) forecastChart.destroy();
-  forecastChart = new Chart(document.getElementById('forecastChart'), { type:'line', data:{ labels:Object.keys(ins.weeklyForecast), datasets:[{ label:'Forecast Spend', data:Object.values(ins.weeklyForecast), borderColor:'#00d282', tension:0.3 }] } });
-  if(catBarChart) catBarChart.destroy();
-  catBarChart = new Chart(document.getElementById('catBarChart'), { type:'bar', data:{ labels:Object.keys(ins.catSpending), datasets:[{ label:'Total', data:Object.values(ins.catSpending), backgroundColor:'#3b82f6' }] }, options:{ indexAxis:'y' } });
-  document.getElementById('fullAdvice').innerHTML = ins.advice.map(a=>`<div class="advice-item"><strong>${a.cat}</strong><br>${a.msg}</div>`).join('');
-}
-async function loadBudgetsUI() {
-  const budgets = getBudgets(currentUser.id);
-  const categories = ['Food & Dining','Transport','Groceries','Entertainment','Health'];
-  const ins = getMLInsights(currentUser.id);
-  const barsDiv = document.getElementById('budgetBars');
-  barsDiv.innerHTML = categories.map(cat=>{ const spent = ins.catSpending[cat]||0; const limit = budgets[cat]||0; const pct = limit?Math.min(100,(spent/limit)*100):0; const status = pct>100?'over':pct>80?'warning':'good'; return `<div class="panel"><div>${cat}</div><div class="forecast-bar-track"><div class="forecast-bar-fill" style="width:${pct}%;background:${status==='over'?'var(--red)':status==='warning'?'var(--amber)':'var(--green)'}"></div></div><div>Spent: ${fmt(spent)} / ${limit?fmt(limit):'No limit'}</div></div>`; }).join('');
-  const inputsDiv = document.getElementById('budgetInputs');
-  inputsDiv.innerHTML = categories.map(cat=>`<div><label>${cat}</label><input type="number" id="b_${cat.replace(/\s/g,'')}" value="${budgets[cat]||''}" placeholder="Limit" style="width:100%"></div>`).join('');
-}
-async function saveAllBudgets() {
-  const categories = ['Food & Dining','Transport','Groceries','Entertainment','Health'];
-  const newBudgets = {};
-  categories.forEach(cat=>{ const val = parseFloat(document.getElementById(`b_${cat.replace(/\s/g,'')}`).value); if(!isNaN(val) && val>0) newBudgets[cat]=val; });
-  saveBudgets(currentUser.id, newBudgets);
-  toast('Budgets saved');
-  loadBudgetsUI();
-  loadDashboardData();
-}
-function nav(screenId) {
-  document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
-  document.getElementById(`screen-${screenId}`).classList.add('active');
-  const titles = { dashboard:'Dashboard', add:'Add Transaction', analytics:'Analytics', budgets:'Budgets', transactions:'History', admin:'Admin' };
-  document.getElementById('pageTitle').innerText = titles[screenId];
-  if(screenId === 'analytics') loadAnalytics();
-  if(screenId === 'budgets') loadBudgetsUI();
-  if(screenId === 'transactions') renderTransactionsTable();
-  if(screenId === 'admin' && currentUser?.role === 'admin') loadAdminPanel();
-  document.querySelectorAll('.nav-item').forEach(btn=>btn.classList.remove('active'));
-  const activeBtn = Array.from(document.querySelectorAll('.nav-item')).find(btn=>btn.getAttribute('data-nav')===screenId);
-  if(activeBtn) activeBtn.classList.add('active');
-}
+document.getElementById('txForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const amount = parseFloat(document.getElementById('txAmount').value);
+  const category = document.getElementById('txCategory').value;
+  const type = document.getElementById('txType').value;
+  const note = document.getElementById('txNote').value;
+  if (!amount || amount<=0) { toast('Invalid amount'); return; }
+  await apiFetch('/api/transactions', { method:'POST', body: JSON.stringify({ user_id:currentUser.id, amount, category, tx_type:type, note }) });
+  toast('Transaction saved');
+  document.getElementById('txForm').reset();
+  loadDashboard();
+  allTransactions = await apiFetch(`/api/transactions?user_id=${currentUser.id}`);
+  renderTransactions();
+  document.getElementById('recentList').innerHTML = allTransactions.slice(0,5).map(t => `<div style="display:flex;justify-content:space-between;padding:8px 0"><div>${t.category}<br><small>${new Date(t.tx_date).toLocaleDateString()}</small></div><div>${fmt(t.amount)}</div></div>`).join('');
+});
+
 async function loadAdminPanel() {
-  if(!currentUser || currentUser.role !== 'admin') return;
-  const users = getUsers();
-  document.getElementById('admTotal').innerText = users.length;
-  let totalTx = 0;
-  for(let u of users) totalTx += getTransactions(u.id).length;
-  document.getElementById('admTx').innerText = totalTx;
-  const tbody = document.getElementById('adminUsersBody');
-  tbody.innerHTML = users.map(u=>`<tr><td>${u.id}</td><td>${u.name}</td><td>${u.email}</td><td>${u.role}</td><td><button class="btn-ghost" onclick="toggleUserRole(${u.id})">Toggle Role</button></td></tr>`).join('');
+  if (!currentUser || currentUser.role !== 'admin') return;
+  const stats = await apiFetch('/api/admin/stats');
+  document.getElementById('admTotal').innerText = stats.total_users;
+  document.getElementById('admActive').innerText = stats.active_users;
+  document.getElementById('admAdmins').innerText = stats.admin_count;
+  document.getElementById('admTx').innerText = stats.total_transactions;
+  const users = await apiFetch('/api/admin/users');
+  const usersBody = document.getElementById('adminUsersBody');
+  usersBody.innerHTML = users.map(u => `<tr><td>${u.id}</td><td>${u.name}</td><td>${u.email}</td><td><span class="badge-${u.role==='admin'?'green':'blue'}">${u.role}</span></td><td><span style="color:${u.is_active ? 'var(--green)' : 'var(--red)'}">${u.is_active ? 'Active' : 'Disabled'}</span></td><td><button class="btn-ghost" onclick="adminToggle(${u.id})">Toggle</button> <button class="btn-ghost" onclick="adminRole(${u.id},'${u.role}')">Role</button></td></tr>`).join('');
+  const logs = await apiFetch('/api/admin/logs');
+  const logsBody = document.getElementById('adminLogsBody');
+  logsBody.innerHTML = logs.slice(0,50).map(l => `<tr><td>${new Date(l.created_at).toLocaleString()}</td><td>${l.action}</td><td>${l.detail || '—'}</td></tr>`).join('');
 }
-window.toggleUserRole = (id) => {
-  const users = getUsers();
-  const idx = users.findIndex(u=>u.id===id);
-  if(idx!==-1) { users[idx].role = users[idx].role === 'admin' ? 'user' : 'admin'; saveUsers(users); loadAdminPanel(); toast('Role updated'); }
-};
-function exportCSV() { let csv="Date,Category,Note,Type,Amount\n"; allTransactions.forEach(t=>csv+=`${new Date(t.tx_date).toLocaleDateString()},${t.category},${t.note||''},${t.tx_type},${t.amount}\n`); const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([csv])); a.download='transactions.csv'; a.click(); }
-function exportExcel() { let html="<table><tr><th>Date</th><th>Category</th><th>Note</th><th>Type</th><th>Amount</th></tr>"; allTransactions.forEach(t=>html+=`<tr><td>${new Date(t.tx_date).toLocaleDateString()}</td><td>${t.category}</td><td>${t.note||''}</td><td>${t.tx_type}</td><td>${t.amount}</td></tr>`); html+="</table>"; const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([html],{type:'application/vnd.ms-excel'})); a.download='transactions.xls'; a.click(); }
-function exportFullPDF() { const { jsPDF } = window.jspdf; const doc = new jsPDF(); doc.text('SmartSpend Report',20,20); doc.text(`Generated: ${new Date().toLocaleString()}`,20,30); doc.text(`Balance: ${document.getElementById('sBalance').innerText}`,20,40); doc.save('report.pdf'); toast('PDF ready'); }
-document.querySelectorAll('.nav-item[data-nav]').forEach(btn=>btn.addEventListener('click',()=>nav(btn.getAttribute('data-nav'))));
-document.getElementById('btnExp')?.addEventListener('click',()=>setTxType('expense'));
-document.getElementById('btnInc')?.addEventListener('click',()=>setTxType('income'));
-document.getElementById('filterCat')?.addEventListener('change',()=>renderTransactionsTable());
-document.getElementById('filterType')?.addEventListener('change',()=>renderTransactionsTable());
-initStorage();
-if(localStorage.getItem('demo_ticker')===null) { const tickerDiv=document.getElementById('ticker'); const items=['📈 SPY +0.8%','💰 Savings +2%','📊 Budget 68%','🤖 AI Active','⭐ Score Live']; tickerDiv.innerHTML = [...items,...items].map(i=>`<span class="tick-item">${i}</span>`).join(''); }
-(async ()=>{ const users=getUsers(); const demoUser=users.find(u=>u.email==='admin@demo.com'); if(demoUser) { currentUser=demoUser; document.getElementById('authOverlay').style.display='none'; document.getElementById('userAvatar').innerText=currentUser.name.slice(0,2).toUpperCase(); if(currentUser.role==='admin') document.getElementById('nav-admin').style.display='flex'; if(getTransactions(currentUser.id).length===0){ const sample=[{tx_id:1,amount:3500,category:'Food & Dining',tx_type:'expense',note:'Groceries',tx_date:new Date().toISOString()},{tx_id:2,amount:25000,category:'Salary',tx_type:'income',note:'Salary',tx_date:new Date().toISOString()}]; saveTransactions(currentUser.id,sample); } loadDashboardData(); nav('dashboard'); } else { document.getElementById('authOverlay').style.display='flex'; } })();
-window.setTxType = setTxType; window.deleteTx = deleteTx; window.saveAllBudgets=saveAllBudgets; window.exportCSV=exportCSV; window.exportExcel=exportExcel; window.exportFullPDF=exportFullPDF;
+window.adminToggle = async (id) => { await apiFetch(`/api/admin/users/${id}/toggle`, { method:'POST' }); loadAdminPanel(); toast('User toggled'); };
+window.adminRole = async (id,current) => { const newRole = current === 'admin' ? 'user' : 'admin'; await apiFetch(`/api/admin/users/${id}/role`, { method:'POST', body: JSON.stringify({ role:newRole }) }); loadAdminPanel(); toast('Role updated'); };
+
+function exportCSV() {
+  let csv = "Date,Category,Note,Type,Amount\n";
+  allTransactions.forEach(t => csv += `${new Date(t.tx_date).toLocaleDateString()},${t.category},${t.note || ''},${t.tx_type},${t.amount}\n`);
+  const blob = new Blob([csv], {type:'text/csv'});
+  const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: 'smartspend.csv' });
+  a.click();
+}
+function exportExcel() {
+  let html = '<table><tr><th>Date</th><th>Category</th><th>Note</th><th>Type</th><th>Amount</th></tr>';
+  allTransactions.forEach(t => html += `<tr><td>${new Date(t.tx_date).toLocaleDateString()}</td><td>${t.category}</td><td>${t.note || ''}</td><td>${t.tx_type}</td><td>${t.amount}</td></tr>`);
+  html += '</table>';
+  const blob = new Blob([html], {type:'application/vnd.ms-excel'});
+  const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: 'smartspend.xls' });
+  a.click();
+}
+async function exportPDF() {
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF();
+  doc.setFontSize(16); doc.text('SmartSpend Report', 20, 20);
+  doc.setFontSize(10); doc.text(`Generated: ${new Date().toLocaleString()}`, 20, 30);
+  doc.save('smartspend_report.pdf');
+  toast('PDF generated');
+}
+function showTermsModal() { alert('Terms: Use responsibly. Data is private. No financial advice.'); }
+
+['filterCat','filterType','filterSort','filterFrom','filterTo'].forEach(id => document.getElementById(id).addEventListener('change', () => renderTransactions()));
+
+const ticker = document.getElementById('ticker');
+const tickerItems = ['📈 SPY +0.8%', '💰 SAVINGS +2.1%', '📊 BUDGET 68%', '🤖 AI FORECAST ACTIVE', '⭐ HEALTH SCORE LOADING'];
+setInterval(() => { ticker.innerHTML = [...tickerItems,...tickerItems].map(i => `<span class="tick-item">${i}</span>`).join(''); }, 0);
+ticker.innerHTML = [...tickerItems,...tickerItems].map(i => `<span class="tick-item">${i}</span>`).join('');
+
+(async () => {
+  try { const user = await apiFetch('/api/me'); currentUser = user; document.getElementById('authOverlay').style.display = 'none'; document.getElementById('userAvatar').innerText = user.name.slice(0,2).toUpperCase(); if (user.role === 'admin') document.getElementById('nav-admin').style.display = 'flex'; loadDashboard(); nav('dashboard'); } catch(e) { document.getElementById('authOverlay').style.display = 'flex'; }
+})();
 </script>
 </body>
 </html>
-```
