@@ -16,13 +16,14 @@ app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', secrets.token_hex(32))
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 
-# ==================== ✅ In‑memory database (no file permission issues) ====================
-# Create a shared in‑memory connection that persists across requests
-memory_conn = sqlite3.connect('file::memory:?cache=shared', check_same_thread=False)
-memory_conn.row_factory = sqlite3.Row
+# ==================== In‑memory database (no disk writes) ====================
+# A single connection that stays alive and can be used across requests.
+# check_same_thread=False is required because Flask uses multiple threads.
+db_connection = sqlite3.connect('file::memory:?cache=shared', check_same_thread=False)
+db_connection.row_factory = sqlite3.Row
 
 def get_db():
-    return memory_conn
+    return db_connection
 
 def init_db():
     conn = get_db()
@@ -103,9 +104,8 @@ def admin_required(f):
         return f(*args, **kwargs)
     return decorated
 
-# -------------------- ML Functions (simplified for brevity, but keep yours) --------------------
+# -------------------- ML Functions --------------------
 def calculate_health_score(user_id, transactions, budgets):
-    # (keep your full implementation here – same as before)
     expenses = [t for t in transactions if t['tx_type'] == 'expense']
     income = sum(t['amount'] for t in transactions if t['tx_type'] == 'income')
     total_expense = sum(e['amount'] for e in expenses)
@@ -134,7 +134,6 @@ def calculate_health_score(user_id, transactions, budgets):
     return max(0, min(100, round(score)))
 
 def forecast_spending(transactions, weeks=4):
-    # (keep your full implementation)
     expenses = [t for t in transactions if t['tx_type'] == 'expense']
     if len(expenses) < 3:
         avg = np.mean([t['amount'] for t in expenses]) if expenses else 2000
@@ -168,7 +167,6 @@ def forecast_spending(transactions, weeks=4):
     return {f'Week {i+1}': round(predictions[i]) for i in range(weeks)}
 
 def generate_advice(user_id, transactions, budgets):
-    # (keep your full implementation)
     expenses = [t for t in transactions if t['tx_type'] == 'expense']
     cat_spending = {}
     for exp in expenses:
@@ -189,7 +187,7 @@ def generate_advice(user_id, transactions, budgets):
                 advice.append({'cat': cat, 'spent': spent, 'limit': None, 'pct': 0, 'status': 'warning', 'msg': f'high spending (₱{spent:,.2f}) - consider budget'})
     return advice
 
-# -------------------- API ROUTES --------------------
+# -------------------- API Routes --------------------
 @app.route('/api/register', methods=['POST'])
 def register():
     try:
@@ -311,13 +309,150 @@ def add_transaction():
     log_audit(user_id, 'add_transaction', request.remote_addr, f'{tx_type}: {category} - ₱{amount}')
     return jsonify({'id': tx_id, 'message': 'Saved'}), 201
 
-# ... add all other routes (summary, predict, budgets, admin, terms) exactly as before
-# For brevity I'm not repeating them, but you must copy them from your previous working code.
-# The key point is to use `get_db()` instead of creating a new connection each time.
+@app.route('/api/transactions/<int:tx_id>', methods=['DELETE'])
+@login_required
+def delete_transaction(tx_id):
+    conn = get_db()
+    tx = conn.execute("SELECT user_id FROM transactions WHERE id = ?", (tx_id,)).fetchone()
+    if not tx:
+        return jsonify({'error': 'Not found'}), 404
+    if tx['user_id'] != session['user_id']:
+        return jsonify({'error': 'Access denied'}), 403
+    conn.execute("DELETE FROM transactions WHERE id = ?", (tx_id,))
+    log_audit(session['user_id'], 'delete_transaction', request.remote_addr, f'Deleted tx {tx_id}')
+    return jsonify({'message': 'Deleted'})
 
-@app.route('/')
+@app.route('/api/summary/<int:user_id>')
+@login_required
+def summary(user_id):
+    if user_id != session['user_id']:
+        return jsonify({'error': 'Access denied'}), 403
+    conn = get_db()
+    row = conn.execute('''
+        SELECT 
+            COALESCE(SUM(CASE WHEN tx_type = 'income' THEN amount ELSE 0 END), 0) as total_income,
+            COALESCE(SUM(CASE WHEN tx_type = 'expense' THEN amount ELSE 0 END), 0) as total_expense,
+            COALESCE(SUM(CASE WHEN tx_type = 'income' THEN amount ELSE -amount END), 0) as balance,
+            COUNT(*) as tx_count
+        FROM transactions WHERE user_id = ?
+    ''', (user_id,)).fetchone()
+    months = conn.execute('''
+        SELECT strftime('%Y-%m', tx_date) as month,
+            SUM(CASE WHEN tx_type = 'income' THEN amount ELSE 0 END) as income,
+            SUM(CASE WHEN tx_type = 'expense' THEN amount ELSE 0 END) as expense
+        FROM transactions WHERE user_id = ?
+        GROUP BY month ORDER BY month DESC LIMIT 6
+    ''', (user_id,)).fetchall()
+    monthly = {m['month']: {'income': m['income'] or 0, 'expense': m['expense'] or 0} for m in months}
+    return jsonify({
+        'income': row['total_income'],
+        'expense': row['total_expense'],
+        'balance': row['balance'],
+        'tx_count': row['tx_count'],
+        'monthly': monthly
+    })
+
+@app.route('/api/predict/<int:user_id>')
+@login_required
+def predict(user_id):
+    if user_id != session['user_id']:
+        return jsonify({'error': 'Access denied'}), 403
+    conn = get_db()
+    txns = conn.execute("SELECT * FROM transactions WHERE user_id = ?", (user_id,)).fetchall()
+    transactions = [dict(t) for t in txns]
+    budgets_rows = conn.execute("SELECT category, limit_amount FROM budgets WHERE user_id = ?", (user_id,)).fetchall()
+    budgets = {b['category']: b['limit_amount'] for b in budgets_rows}
+    score = calculate_health_score(user_id, transactions, budgets)
+    forecast = forecast_spending(transactions)
+    categories = {}
+    for t in transactions:
+        if t['tx_type'] == 'expense':
+            categories[t['category']] = categories.get(t['category'], 0) + t['amount']
+    advice = generate_advice(user_id, transactions, budgets)
+    return jsonify({
+        'score': score,
+        'predictions': {'weekly': forecast, 'categories': categories},
+        'advice': advice
+    })
+
+@app.route('/api/budgets/<int:user_id>', methods=['GET'])
+@login_required
+def get_budgets(user_id):
+    if user_id != session['user_id']:
+        return jsonify({'error': 'Access denied'}), 403
+    rows = get_db().execute("SELECT category, limit_amount FROM budgets WHERE user_id = ?", (user_id,)).fetchall()
+    return jsonify([{'category': r['category'], 'limit': r['limit_amount']} for r in rows])
+
+@app.route('/api/budgets/<int:user_id>', methods=['POST'])
+@login_required
+def set_budget(user_id):
+    if user_id != session['user_id']:
+        return jsonify({'error': 'Access denied'}), 403
+    data = request.json
+    category = data.get('category')
+    limit = data.get('limit')
+    if not category or limit is None or limit < 0:
+        return jsonify({'error': 'Invalid budget'}), 400
+    get_db().execute('''INSERT INTO budgets (user_id, category, limit_amount) VALUES (?, ?, ?)
+                        ON CONFLICT(user_id, category) DO UPDATE SET limit_amount = ?, updated_at = CURRENT_TIMESTAMP''',
+                     (user_id, category, limit, limit))
+    return jsonify({'message': 'Budget saved'})
+
+@app.route('/api/admin/stats')
+@admin_required
+def admin_stats():
+    conn = get_db()
+    stats = conn.execute('''
+        SELECT 
+            (SELECT COUNT(*) FROM users) as total_users,
+            (SELECT COUNT(*) FROM users WHERE is_active = 1 AND julianday('now') - julianday(last_login) <= 1) as active_users,
+            (SELECT COUNT(*) FROM users WHERE role = 'admin') as admin_count,
+            (SELECT COUNT(*) FROM transactions) as total_transactions,
+            (SELECT COUNT(*) FROM audit_logs WHERE action = 'login') as total_logins
+    ''').fetchone()
+    return jsonify(dict(stats))
+
+@app.route('/api/admin/users')
+@admin_required
+def admin_users():
+    users = get_db().execute("SELECT id, name, email, role, is_active, login_count, last_login, accepted_terms, terms_version FROM users").fetchall()
+    return jsonify([dict(u) for u in users])
+
+@app.route('/api/admin/logs')
+@admin_required
+def admin_logs():
+    logs = get_db().execute("SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 200").fetchall()
+    return jsonify([dict(l) for l in logs])
+
+@app.route('/api/admin/users/<int:uid>/toggle', methods=['POST'])
+@admin_required
+def admin_toggle(uid):
+    get_db().execute("UPDATE users SET is_active = CASE WHEN is_active = 1 THEN 0 ELSE 1 END WHERE id = ?", (uid,))
+    log_audit(session['user_id'], 'admin_toggle', request.remote_addr, f'Toggled user {uid}')
+    return jsonify({'message': 'Toggled'})
+
+@app.route('/api/admin/users/<int:uid>/role', methods=['POST'])
+@admin_required
+def admin_role(uid):
+    data = request.json
+    new_role = data.get('role')
+    if new_role not in ('admin', 'user'):
+        return jsonify({'error': 'Invalid role'}), 400
+    get_db().execute("UPDATE users SET role = ? WHERE id = ?", (new_role, uid))
+    log_audit(session['user_id'], 'admin_role_change', request.remote_addr, f'Changed user {uid} role to {new_role}')
+    return jsonify({'message': 'Role updated'})
+
+@app.route('/api/terms')
+def terms():
+    return jsonify({
+        'version': '1.0',
+        'content': '<h3>Terms & Conditions</h3><p>Use responsibly. Your data is private.</p>'
+    })
+
+# -------------------- Serve frontend (corrected) --------------------
+@app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
-def serve_index(path):
+def serve_index(path=''):
     if path.startswith('api/'):
         return jsonify({'error': 'API endpoint not found'}), 404
     full_path = os.path.join(app.static_folder, path)
