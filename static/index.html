@@ -187,8 +187,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   <button class="nav-item" onclick="nav('analytics')"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg><span class="nav-label">Analytics</span></button>
   <button class="nav-item" onclick="nav('budgets')"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 2a10 10 0 100 20A10 10 0 0012 2z"/><path d="M12 6v6l4 2"/></svg><span class="nav-label">Budgets</span></button>
   <button class="nav-item" onclick="nav('transactions')"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/></svg><span class="nav-label">History</span></button>
-  <button class="nav-item" id="nav-admin" style="display:none" onclick="nav('admin')"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg><span class="nav-label">Admin</span></button>
-  <div class="sidebar-bottom"><button class="nav-item" onclick="exportPDF()"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg><span class="nav-label">Export PDF</span></button></div>
+  <div class="sidebar-bottom"><button class="nav-item" onclick="exportPDF()"><span class="nav-label">Export PDF</span></button></div>
 </nav>
 
 <main class="main">
@@ -581,6 +580,79 @@ async function loadDashboard() {
     const adviceDiv = document.getElementById('adviceList');
     adviceDiv.innerHTML = pred.advice.map(a => <div class="advice-item"><span style="background:${a.status==='over'?'var(--red)':a.status==='warning'?'var(--amber)':'var(--green)'};width:24px;height:24px;border-radius:8px;display:flex;align-items:center;justify-content:center">${a.status==='over'?'⚠️':a.status==='warning'?'📊':'✓'}</span><div><strong>${a.cat}</strong><br><span style="font-size:0.75rem;color:var(--muted)">${a.msg}</span></div></div>).join('');
   } catch(e) { console.error(e); }
+}
+ function nav(screenId) {
+      // 1. Hide all screens
+      document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+      // 2. Show selected screen
+      document.getElementById('screen-' + screenId).classList.add('active');
+      // 3. Update Nav UI
+      document.querySelectorAll('.nav-item').forEach(btn => btn.classList.remove('active'));
+      event.currentTarget.classList.add('active');
+      
+      // Update Title
+      document.getElementById('pageTitle').innerText = screenId.charAt(0).toUpperCase() + screenId.slice(1);
+    }
+
+    async function logout() {
+      const res = await fetch('/api/logout', { method: 'POST' });
+      if (res.ok) window.location.reload();
+    }
+    
+    // Add logic here to fetch your data and replace the "—" marks
+// 1. Run this when the page loads
+document.addEventListener('DOMContentLoaded', () => {
+    checkUser();
+});
+
+async function checkUser() {
+    try {
+        const res = await fetch('/api/me');
+        if (res.ok) {
+            const user = await res.json();
+            document.getElementById('userAvatar').innerText = user.name.substring(0, 2).toUpperCase();
+            loadDashboardData(user.id);
+        } else {
+            // If not logged in, show the login overlay (if you have one)
+            console.log("User not authenticated");
+        }
+    } catch (err) {
+        console.error("Auth check failed:", err);
+    }
+}
+
+async function loadDashboardData(userId) {
+    try {
+        // 2. Fetch Financial Summary (Balance, Income, Expenses)
+        const summaryRes = await fetch(`/api/summary/${userId}`);
+        const summary = await summaryRes.json();
+
+        if (summary) {
+            document.getElementById('sBalance').innerText = `₱${summary.balance.toLocaleString()}`;
+            document.getElementById('sIncome').innerText = `₱${summary.income.toLocaleString()}`;
+            document.getElementById('sExpense').innerText = `₱${summary.expense.toLocaleString()}`;
+        }
+
+        // 3. Fetch ML Insights (Health Score & Advice)
+        const mlRes = await fetch(`/api/predict/${userId}`);
+        const mlData = await mlRes.json();
+
+        if (mlData) {
+            document.getElementById('sScore').innerText = mlData.score;
+            document.getElementById('topScore').innerText = mlData.score;
+            
+            // Update the advice list
+            const adviceContainer = document.getElementById('adviceList');
+            adviceContainer.innerHTML = mlData.advice.map(item => `
+                <div class="advice-item">
+                    <span>${item.cat}: <strong>${item.msg}</strong></span>
+                </div>
+            `).join('');
+        }
+
+    } catch (err) {
+        console.error("Failed to load dashboard:", err);
+    }
 }
 
 // Analytics
