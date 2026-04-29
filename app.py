@@ -80,11 +80,19 @@ def calculate_health_score(transactions, budgets):
         expenses = [t for t in transactions if t['tx_type'] == 'expense']
         income = sum(t['amount'] for t in transactions if t['tx_type'] == 'income')
         total_expense = sum(e['amount'] for e in expenses)
+        
+        # Base score calculation
         score = 70
+        
+        # Savings rate impact (higher savings = better score)
         if income > 0:
             savings_rate = (income - total_expense) / income
+            # Max +20 points for saving 50% or more
             score += min(20, max(0, savings_rate * 40))
+        else:
+            savings_rate = -1  # No income = bad
         
+        # Budget compliance impact
         budget_compliance = 0
         budget_count = 0
         for cat, limit in budgets.items():
@@ -95,10 +103,18 @@ def calculate_health_score(transactions, budgets):
                     budget_compliance += 1
                 elif spent <= limit * 1.15:
                     budget_compliance += 0.5
+        
         if budget_count > 0:
             score += (budget_compliance / budget_count) * 10
         
-        return max(0, min(100, round(score)))
+        # Penalty for negative savings (spending more than income)
+        if income > 0 and total_expense > income:
+            deficit_ratio = (total_expense - income) / income
+            score -= min(30, deficit_ratio * 50)
+        
+        final_score = max(0, min(100, round(score)))
+        
+        return final_score
     except Exception as e:
         print(f"Error calculating health score: {e}")
         return 70
@@ -173,6 +189,191 @@ def generate_advice(transactions, budgets):
     })
     
     return advice
+
+def calculate_savings_efficiency(income, expenses, budgets):
+    """Calculate how efficiently user saves vs wastes money"""
+    savings = income - expenses
+    if income <= 0:
+        return 0, "No income data"
+    
+    savings_rate = (savings / income) * 100
+    # Waste ratio: money spent on non-essential vs essential
+    essential_cats = ['Groceries', 'Health', 'Transport']
+    essential_spent = sum(e['amount'] for e in expenses if e['category'] in essential_cats) if expenses else 0
+    total_expense = sum(e['amount'] for e in expenses) if expenses else 0
+    waste_ratio = ((total_expense - essential_spent) / total_expense * 100) if total_expense > 0 else 0
+    
+    efficiency_score = max(0, min(100, savings_rate * 1.5 + (100 - waste_ratio) * 0.5))
+    return round(efficiency_score), f"Savings: {savings_rate:.1f}%, Waste: {waste_ratio:.1f}%"
+
+def real_time_ml_insights(transactions, budgets):
+    """Generate real-time ML insights for chatbot"""
+    expenses = [t for t in transactions if t['tx_type'] == 'expense']
+    income = sum(t['amount'] for t in transactions if t['tx_type'] == 'income')
+    expense_total = sum(e['amount'] for e in expenses)
+    savings = income - expense_total
+    
+    # Category analysis for waste detection
+    cat_spending = {}
+    for e in expenses:
+        cat_spending[e['category']] = cat_spending.get(e['category'], 0) + e['amount']
+    
+    # Find wasteful categories (non-essential high spending)
+    essential = ['Groceries', 'Health', 'Transport', 'Rent', 'Utilities']
+    wasteful_cats = {k: v for k, v in cat_spending.items() if k not in essential and v > 3000}
+    
+    return {
+        'savings': savings,
+        'income': income,
+        'expenses': expense_total,
+        'savings_rate': (savings / income * 100) if income > 0 else 0,
+        'waste_categories': wasteful_cats,
+        'top_waste': max(wasteful_cats.items(), key=lambda x: x[1]) if wasteful_cats else None
+    }
+
+def generate_chatbot_response(user_message, transactions, budgets):
+    """Generate intelligent chatbot response with real-time ML insights"""
+    if not transactions:
+        return "👋 Welcome! I don't see any transactions yet. Add some transactions so I can analyze your spending and provide personalized investment advice."
+    
+    msg = user_message.lower()
+    
+    # Get real-time ML insights
+    insights = real_time_ml_insights(transactions, budgets)
+    expenses = [t for t in transactions if t['tx_type'] == 'expense']
+    income_total = insights['income']
+    expense_total = insights['expenses']
+    balance = insights['savings']
+    health_score = calculate_health_score(transactions, budgets)
+    efficiency, efficiency_msg = calculate_savings_efficiency(income_total, expense_total, budgets)
+    
+    # Category breakdown
+    cat_spending = {}
+    for e in expenses:
+        cat_spending[e['category']] = cat_spending.get(e['category'], 0) + e['amount']
+    top_category = max(cat_spending.items(), key=lambda x: x[1]) if cat_spending else ("None", 0)
+    
+    # Investment keywords
+    if any(word in msg for word in ['invest', 'stock', 'where to invest', 'crypto', 'etf', 'mutual fund', 'portfolio']):
+        surplus = max(0, balance)
+        monthly_potential = surplus * 0.3
+        ten_year_growth = monthly_potential * 12 * 15.0  # Simplified compounding
+        
+        return f"📈 **AI Investment Strategy**\n\n" + \
+               f"Based on your real-time ML analysis:\n" + \
+               f"• **Health Score:** {health_score}/100 ({'🟢 Good' if health_score >= 70 else '🔴 Needs Improvement'})\n" + \
+               f"• **Savings Efficiency:** {efficiency}% - {efficiency_msg}\n" + \
+               f"• **Available Surplus:** ₱{surplus:,.2f}\n\n" + \
+               f"**Recommended Allocation:**\n" + \
+               f"• 40% to S&P500 ETF (VOO/SPY) - ₱{surplus * 0.4:,.2f}\n" + \
+               f"• 30% to high-yield savings - ₱{surplus * 0.3:,.2f}\n" + \
+               f"• 20% to blue-chip stocks - ₱{surplus * 0.2:,.2f}\n" + \
+               f"• 10% to skill development - ₱{surplus * 0.1:,.2f}\n\n" + \
+               f"📊 **Monthly Investment Potential:** ₱{monthly_potential:,.2f}\n" + \
+               f"💰 **10-Year Growth at 7%:** ₱{ten_year_growth:,.2f}"
+    
+    # Forecast/prediction keywords (LINKED TO ML FORECAST)
+    elif any(word in msg for word in ['forecast', 'predict', 'next month', 'spending trend', 'ml forecast']):
+        forecast = forecast_spending(transactions)
+        avg_forecast = sum(forecast.values()) / 4 if forecast else 0
+        
+        return f"🤖 **ML-Powered Spending Forecast** 🔮\n\n" + \
+               f"Based on {len(expenses)} historical transactions analyzed by our ML model:\n\n" + \
+               f"📅 **Weekly Predictions:**\n" + \
+               f"• {', '.join([f'{k}: ₱{v:,.2f}' for k, v in forecast.items()])}\n\n" + \
+               f"📊 **Key Metrics:**\n" + \
+               f"• Average Weekly: ₱{avg_forecast:,.2f}\n" + \
+               f"• Top Category: {top_category[0]} (₱{top_category[1]:,.2f})\n" + \
+               f"• Health Score: {health_score}/100\n\n" + \
+               f"💡 **ML Suggestion:** Reducing {top_category[0]} by 15% could save ₱{top_category[1] * 0.15:,.2f} monthly."
+    
+    # Health score details (LINKED TO SAVINGS/WASTE)
+    elif any(word in msg for word in ['health', 'score', 'savings rate', 'waste', 'efficiency']):
+        if health_score >= 70:
+            status = "Excellent! 🟢"
+            color = "green"
+            recommendation = "You're on track! Consider increasing investments."
+        else:
+            status = "Needs Improvement 🔴"
+            color = "red"
+            recommendation = "Review your wasteful spending categories below."
+        
+        waste_msg = ""
+        if insights['waste_categories']:
+            waste_msg = f"\n\n⚠️ **Waste Detected:**\n"
+            for cat, amt in insights['waste_categories'].items():
+                waste_msg += f"• {cat}: ₱{amt:,.2f} (Consider reducing)\n"
+        
+        return f"💚 **Financial Health Score: {health_score}/100** {status}\n\n" + \
+               f"📊 **Real-Time ML Analysis:**\n" + \
+               f"• Income: ₱{income_total:,.2f}\n" + \
+               f"• Expenses: ₱{expense_total:,.2f}\n" + \
+               f"• Savings Rate: {insights['savings_rate']:.1f}%\n" + \
+               f"• Savings Efficiency: {efficiency}%\n" + \
+               f"• {efficiency_msg}{waste_msg}\n\n" + \
+               f"💡 **Recommendation:** {recommendation}"
+    
+    # Budget advice
+    elif any(word in msg for word in ['advice', 'tip', 'budget', 'save', 'saving']):
+        advice_list = generate_advice(transactions, budgets)
+        
+        # Add ML-specific advice based on waste
+        ml_advice = ""
+        if insights['waste_categories']:
+            ml_advice = f"\n🎯 **ML Identified Waste:** Reduce {', '.join(list(insights['waste_categories'].keys())[:2])} spending."
+        
+        main_tip = advice_list[0] if advice_list else {'msg': 'Set up automatic transfers to savings.'}
+        
+        return f"💡 **Smart Financial Tips (ML-Powered)**\n\n" + \
+               f"• {main_tip.get('msg', '')}\n" + \
+               f"• Current Savings Rate: {insights['savings_rate']:.1f}%\n" + \
+               f"• Health Score: {health_score}/100\n" + \
+               f"• Recommended Action: Automate 20% of income to investments{ml_advice}"
+    
+    # Retirement planning
+    elif any(word in msg for word in ['retire', 'retirement', 'future']):
+        monthly_surplus = max(0, balance / 12) if balance > 0 else 0
+        years_to_retire = 20
+        future_value = monthly_surplus * 12 * ((1 + 0.07) ** years_to_retire - 1) / 0.07 if monthly_surplus > 0 else 0
+        
+        return f"⏳ **Retirement Projection (ML Model)**\n\n" + \
+               f"Based on your current financial health (Score: {health_score}/100):\n\n" + \
+               f"• Monthly Surplus: ₱{monthly_surplus:,.2f}\n" + \
+               f"• 20-Year Growth at 7%: ₱{future_value:,.2f}\n" + \
+               f"• Savings Efficiency: {efficiency}%\n\n" + \
+               f"🎯 **ML Suggestion:** Increase savings rate to 25% to retire 5 years earlier."
+    
+    # Spending analysis
+    elif any(word in msg for word in ['spending', 'where money', 'categories']):
+        cat_list = "\n".join([f"• {cat}: ₱{amt:,.2f}" for cat, amt in sorted(cat_spending.items(), key=lambda x: x[1], reverse=True)[:5]])
+        
+        return f"💰 **Spending Analysis (ML Insights)**\n\n" + \
+               f"Your top spending categories:\n{cat_list}\n\n" + \
+               f"📊 **Quick Stats:**\n" + \
+               f"• Health Score: {health_score}/100\n" + \
+               f"• Savings Rate: {insights['savings_rate']:.1f}%\n" + \
+               f"• Total Expenses: ₱{expense_total:,.2f}\n\n" + \
+               f"💡 Ask me 'forecast' to see ML predictions or 'investment advice' for financial growth!"
+    
+    # Default response with ML summary
+    else:
+        forecast = forecast_spending(transactions)
+        avg_forecast = sum(forecast.values()) / 4 if forecast else 0
+        
+        return f"✨ **Cognitive AI Financial Report**\n\n" + \
+               f"📈 **Real-Time Metrics:**\n" + \
+               f"• Balance: ₱{balance:,.2f}\n" + \
+               f"• Health Score: {health_score}/100 ({'🟢 Good' if health_score >= 70 else '🔴 Needs Work'})\n" + \
+               f"• Savings Rate: {insights['savings_rate']:.1f}%\n" + \
+               f"• ML Forecast: ₱{avg_forecast:,.2f}/week\n\n" + \
+               f"📊 **Top Category:** {top_category[0]} (₱{top_category[1]:,.2f})\n\n" + \
+               f"💬 **Try asking me:**\n" + \
+               f"• 'What's my health score?'\n" + \
+               f"• 'Show ML forecast'\n" + \
+               f"• 'Where to invest my money?'\n" + \
+               f"• 'Budget advice'\n" + \
+               f"• 'Retirement planning'\n" + \
+               f"• 'Analyze my spending'"
 
 # ========== API ROUTES ==========
 @app.route('/api/health')
@@ -402,87 +603,6 @@ def chatbot():
         return jsonify({'response': response})
     except Exception as e:
         return jsonify({'response': f"Sorry, I encountered an error: {str(e)}"})
-
-def generate_chatbot_response(user_message, transactions, budgets):
-    """Generate intelligent chatbot response with market and investment insights"""
-    if not transactions:
-        return "👋 Welcome! I don't see any transactions yet. Add some transactions so I can analyze your spending and provide personalized investment advice."
-    
-    msg = user_message.lower()
-    
-    # Calculate user financial metrics
-    expenses = [t for t in transactions if t['tx_type'] == 'expense']
-    income_total = sum(t['amount'] for t in transactions if t['tx_type'] == 'income')
-    expense_total = sum(e['amount'] for e in expenses)
-    balance = income_total - expense_total
-    health_score = calculate_health_score(transactions, budgets)
-    forecast = forecast_spending(transactions)
-    avg_forecast = sum(forecast.values()) / 4 if forecast else 0
-    
-    # Category breakdown
-    cat_spending = {}
-    for e in expenses:
-        cat_spending[e['category']] = cat_spending.get(e['category'], 0) + e['amount']
-    top_category = max(cat_spending.items(), key=lambda x: x[1]) if cat_spending else ("None", 0)
-    
-    # Investment keywords
-    if any(word in msg for word in ['invest', 'stock', 'where to invest', 'crypto', 'etf', 'mutual fund', 'portfolio']):
-        surplus = balance
-        return f"📈 **AI Investment Strategy**\n\nBased on your ₱{balance:,.2f} surplus and health score {health_score}/100:\n\n" + \
-               f"• **Recommended Allocation:**\n" + \
-               f"  - 40% to S&P500 ETF (VOO/SPY) - Historical return ~10% annually\n" + \
-               f"  - 30% to high-yield savings account (4-5% APY) for emergency fund\n" + \
-               f"  - 20% to blue-chip dividend stocks (JNJ, KO, PG)\n" + \
-               f"  - 10% to skill development or leisure\n\n" + \
-               f"• **Monthly Investment Potential:** ₱{max(0, round(surplus * 0.3)):,.2f}\n" + \
-               f"• **Compounding Estimate:** At 7% annual return, ₱{max(0, round(surplus * 0.3)):,.2f}/month grows to ₱{round(max(0, surplus * 0.3) * 12 * 12.5):,.2f} in 10 years."
-    
-    # Forecast/prediction keywords
-    elif any(word in msg for word in ['forecast', 'predict', 'next month', 'spending trend']):
-        return f"🤖 **Personalized ML Forecast**\n\nBased on your {len(expenses)} transactions:\n\n" + \
-               f"• {', '.join([f'{k}: ₱{v:,.2f}' for k, v in forecast.items()])}\n\n" + \
-               f"• **Average Weekly Spend:** ₱{avg_forecast:,.2f}\n" + \
-               f"• **Top Category:** {top_category[0]} (₱{top_category[1]:,.2f})\n\n" + \
-               f"💡 *Reducing {top_category[0]} by 15% could free up ₱{round(top_category[1] * 0.15):,.2f} monthly for investments.*"
-    
-    # Chart/trend analysis
-    elif any(word in msg for word in ['chart', 'trend', 'category', 'spending pattern']):
-        return f"📊 **Real-time Spending Analysis**\n\n" + \
-               f"• **Largest Expense Category:** {top_category[0]} (₱{top_category[1]:,.2f})\n" + \
-               f"• **Income vs Expense:** {'Surplus' if balance > 0 else 'Deficit'} of ₱{abs(balance):,.2f}\n" + \
-               f"• **Health Score:** {health_score}/100 ({'Excellent' if health_score > 80 else 'Good' if health_score > 60 else 'Needs improvement'})\n\n" + \
-               f"📈 *Technical Analysis: Your spending shows a {'positive' if income_total > expense_total else 'negative'} trend.*"
-    
-    # Budget advice
-    elif any(word in msg for word in ['advice', 'tip', 'budget', 'save', 'saving']):
-        advice_list = generate_advice(transactions, budgets)
-        main_tip = advice_list[0] if advice_list else {'msg': 'Set up automatic transfers to savings.'}
-        return f"💡 **Smart Financial Tip**\n\n{main_tip.get('msg', '')}\n\n" + \
-               f"• **Current Savings Rate:** {max(0, round((balance/income_total)*100 if income_total > 0 else 0))}%\n" + \
-               f"• **Recommended Action:** Automate 20% of income to investment accounts before spending."
-    
-    # Retirement planning
-    elif any(word in msg for word in ['retire', 'retirement', 'future']):
-        monthly_surplus = max(0, balance / 12)
-        years = 20
-        future_value = monthly_surplus * 12 * ((1 + 0.07) ** years - 1) / 0.07 if monthly_surplus > 0 else 0
-        return f"⏳ **Retirement Projection**\n\nBased on your current finances:\n\n" + \
-               f"• **Monthly Surplus:** ₱{monthly_surplus:,.2f}\n" + \
-               f"• **20-Year Growth at 7%:** ₱{future_value:,.2f}\n\n" + \
-               f"• **Recommendation:** Increase savings rate to 25% for earlier retirement."
-    
-    # Default response
-    else:
-        return f"✨ **Cognitive AI Report**\n\n" + \
-               f"• **Balance:** ₱{balance:,.2f}\n" + \
-               f"• **Health Score:** {health_score}/100\n" + \
-               f"• **Weekly Forecast:** ₱{avg_forecast:,.2f}\n" + \
-               f"• **Top Category:** {top_category[0]} (₱{top_category[1]:,.2f})\n\n" + \
-               f"💬 **Try asking:**\n" + \
-               f"  • 'Where to invest my money?'\n" + \
-               f"  • 'Show me spending forecast'\n" + \
-               f"  • 'Budget advice'\n" + \
-               f"  • 'Retirement planning'"
 
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
