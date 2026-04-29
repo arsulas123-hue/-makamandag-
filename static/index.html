@@ -1,81 +1,11 @@
-// ========== DASHBOARD & DATA ==========
-async function loadDashboard() {
-    if (!currentUser) return;
-    try {
-        const summary = await apiFetch(`/api/summary/${currentUser.id}`);
-        const pred = await apiFetch(`/api/predict/${currentUser.id}`);
-        allTransactions = await apiFetch(`/api/transactions?user_id=${currentUser.id}`);
-        currentSummary = summary;
-        currentPrediction = pred;
-        
-        document.getElementById('sBalance').innerText = fmt(summary.balance);
-        document.getElementById('sExpense').innerText = fmt(summary.expense);
-        document.getElementById('sIncome').innerText = fmt(summary.income);
-        document.getElementById('sScore').innerText = pred.score + '/100';
-        document.getElementById('topScore').innerText = pred.score;
-        
-        if (monthlyChart) monthlyChart.destroy();
-        const months = Object.keys(summary.monthly).slice(-6);
-        monthlyChart = new Chart(document.getElementById('monthlyChart'), { 
-            type: 'bar', data: { labels: months, datasets: [{ label: 'Income', data: months.map(m => summary.monthly[m]?.income || 0), backgroundColor: 'rgba(0,210,130,0.6)', borderRadius: 8 }, { label: 'Expense', data: months.map(m => summary.monthly[m]?.expense || 0), backgroundColor: 'rgba(255,77,109,0.6)', borderRadius: 8 }] }
-        });
-        
-        if (donutChart) donutChart.destroy();
-        donutChart = new Chart(document.getElementById('donutChart'), { type: 'doughnut', data: { labels: Object.keys(pred.predictions.categories), datasets: [{ data: Object.values(pred.predictions.categories), backgroundColor: ['#00d282', '#3b82f6', '#f0a500', '#a855f7', '#ff4d6d'] }] }, options: { cutout: '65%' } });
-        
-        const weeks = pred.predictions.weekly;
-        const maxVal = Math.max(...Object.values(weeks), 1);
-        document.getElementById('forecastBars').innerHTML = Object.entries(weeks).map(([w,v]) => `<div class="forecast-row"><span class="forecast-week">${w}</span><div class="forecast-bar-track"><div class="forecast-bar-fill" style="width:${(v/maxVal*100)}%"></div></div><span>${fmt(v)}</span></div>`).join('');
-        
-        document.getElementById('adviceList').innerHTML = pred.advice.map(a => `<div class="advice-item"><strong>${a.cat}</strong>: ${a.msg}</div>`).join('');
-        document.getElementById('recentList').innerHTML = allTransactions.slice(0, 5).map(t => `<div style="padding:10px 0; border-bottom:1px solid var(--border2);"><strong>${t.category}</strong><br>${fmt(t.amount)}<br><small>${new Date(t.tx_date).toLocaleDateString()}</small></div>`).join('');
-        renderTransactions();
-        loadAnalytics();
-    } catch (e) { console.error(e); toast('Error loading data'); }
-}
-
-async function renderTransactions() {
-    if (!currentUser) return;
-    document.getElementById('txTableBody').innerHTML = allTransactions.slice(0, 50).map(t => `
-        <tr>
-            <td>${new Date(t.tx_date).toLocaleDateString()}<tr>
-            <td>${t.category}</td>
-            <td>${t.note || '—'}</td>
-            <td style="color: ${t.tx_type === 'income' ? '#00d282' : '#ff4d6d'}">${t.tx_type}</td>
-            <td>${fmt(t.amount)}</td>
-        </tr>
-    `).join('');
-}
-
-async function loadAnalytics() {
-    if (!currentUser) return;
-    const pred = currentPrediction;
-    if (forecastChart) forecastChart.destroy();
-    forecastChart = new Chart(document.getElementById('forecastChart'), { type: 'line', data: { labels: Object.keys(pred.predictions.weekly), datasets: [{ label: 'Predicted Spend', data: Object.values(pred.predictions.weekly), borderColor: '#00d282', tension: 0.3, fill: true, backgroundColor: 'rgba(0,210,130,0.1)' }] } });
-    if (catBarChart) catBarChart.destroy();
-    catBarChart = new Chart(document.getElementById('catBarChart'), { type: 'bar', data: { labels: Object.keys(pred.predictions.categories), datasets: [{ label: 'Total Spent', data: Object.values(pred.predictions.categories), backgroundColor: '#3b82f6', borderRadius: 8 }] }, options: { indexAxis: 'y' } });
-    document.getElementById('fullAdvice').innerHTML = pred.advice.map(a => `<div class="advice-item"><strong>${a.cat}</strong><br>${a.msg}</div>`).join('');
-}
-
-async function loadBudgets() {
-    if (!currentUser) return;
-    const budgets = await apiFetch(`/api/budgets/${currentUser.id}`);
-    const limits = Object.fromEntries(budgets.map(b => [b.category, b.limit]));
-    const categories = ['Food & Dining', 'Transport', 'Groceries', 'Entertainment', 'Health'];
-    document.getElementById('budgetInputs').innerHTML = categories.map(cat => `
-        <div><label>${cat}</label><input type="number" id="budget_${cat.replace(/\s/g, '')}" value="${limits[cat] || ''}" placeholder="Limit" style="width:100%"></div>
-    `).join('');
-    
-    document.getElementById('saveBudgetsBtn').onclick = async () => {
-        for (<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SmartSpend — AI-Powered Personal Finance</title>
     <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         :root {
@@ -176,11 +106,11 @@ async function loadBudgets() {
         .auth-link:hover { color: #00d282; }
         
         /* Chatbot */
-        .chat-container { position: fixed; bottom: 24px; right: 24px; z-index: 10001; cursor: move; }
-        .chat-window { width: 360px; height: 480px; background: var(--bg2); backdrop-filter: blur(10px); border: 1px solid var(--green); border-radius: 24px; display: flex; flex-direction: column; overflow: hidden; cursor: default; box-shadow: 0 8px 32px rgba(0,0,0,0.3); }
-        .chat-header { padding: 14px 18px; background: var(--bg3); border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; cursor: move; user-select: none; }
+        .chat-container { position: fixed; bottom: 24px; right: 24px; z-index: 10001; }
+        .chat-window { width: 360px; height: 480px; background: var(--bg2); backdrop-filter: blur(10px); border: 1px solid var(--green); border-radius: 24px; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 8px 32px rgba(0,0,0,0.3); }
+        .chat-header { padding: 14px 18px; background: var(--bg3); border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; }
         .chat-header span { font-weight: 600; color: var(--green); }
-        .chat-header button { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 1.1rem; margin-left: 12px; transition: 0.2s; }
+        .chat-header button { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 1.1rem; }
         .chat-header button:hover { color: var(--red); }
         .chat-messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
         .message { max-width: 85%; padding: 10px 14px; border-radius: 18px; font-size: 0.85rem; animation: messagePop 0.3s ease; }
@@ -192,19 +122,17 @@ async function loadBudgets() {
         .chat-input input:focus { border-color: var(--green); }
         .chat-input button { background: var(--green); border: none; border-radius: 20px; padding: 8px 18px; color: #000; font-weight: 600; cursor: pointer; transition: 0.2s; }
         .chat-input button:hover { transform: scale(1.05); }
-        .hidden { display: none; }
     </style>
 </head>
 <body>
 
 <nav class="sidebar">
-    <div class="sidebar-logo"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#000"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg></div>
-    <button class="nav-item" data-nav="dashboard"><span class="nav-label">Dashboard</span></button>
+    <div class="sidebar-logo"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg></div>
+    <button class="nav-item active" data-nav="dashboard"><span class="nav-label">Dashboard</span></button>
     <button class="nav-item" data-nav="add"><span class="nav-label">Add Transaction</span></button>
     <button class="nav-item" data-nav="analytics"><span class="nav-label">Analytics</span></button>
     <button class="nav-item" data-nav="budgets"><span class="nav-label">Budgets</span></button>
     <button class="nav-item" data-nav="transactions"><span class="nav-label">History</span></button>
-    <div class="sidebar-bottom"><button class="nav-item" id="exportBtn"><span class="nav-label">Export PDF</span></button></div>
 </nav>
 
 <main class="main">
@@ -291,8 +219,8 @@ async function loadBudgets() {
         <div class="auth-card">
             <h2 id="authTitle">Welcome back</h2>
             <input type="text" id="regName" class="auth-input" placeholder="Full Name" style="display:none">
-            <input type="email" id="authEmail" class="auth-input" placeholder="Email">
-            <input type="password" id="authPass" class="auth-input" placeholder="Password">
+            <input type="email" id="authEmail" class="auth-input" placeholder="Email" value="admin@smartspend.com">
+            <input type="password" id="authPass" class="auth-input" placeholder="Password" value="admin123">
             <input type="password" id="authConfirm" class="auth-input" placeholder="Confirm Password" style="display:none">
             <div id="termsRow" style="display:none; margin-bottom:14px;"><label><input type="checkbox" id="termsCheck"> Accept Terms</label></div>
             <div id="authMsg" style="color:#ff4d6d; font-size:0.8rem; margin-bottom:12px;"></div>
@@ -302,9 +230,9 @@ async function loadBudgets() {
     </div>
 
     <!-- Chatbot -->
-    <div id="chatContainer" class="chat-container">
+    <div class="chat-container">
         <div class="chat-window">
-            <div class="chat-header" id="chatHeader"><span>🤖 SmartSpend AI Assistant</span><button id="closeChatBtn">✕</button></div>
+            <div class="chat-header"><span>🤖 SmartSpend AI Assistant</span></div>
             <div class="chat-messages" id="chatMessages"><div class="message bot-message">✨ Hi! Ask me about saving money, budget tips, or your finances!</div></div>
             <div class="chat-input"><input id="chatInput" placeholder="Ask something..."><button id="sendChatBtn">Send</button></div>
         </div>
@@ -322,11 +250,23 @@ let isLogin = true;
 
 // ========== UTILITIES ==========
 function fmt(amt) { return '₱' + Number(amt).toLocaleString('en-PH', { minimumFractionDigits: 2 }); }
-function toast(msg) { const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 2500); }
+function toast(msg) { 
+    const t = document.getElementById('toast'); 
+    t.textContent = msg; 
+    t.classList.add('show'); 
+    setTimeout(() => t.classList.remove('show'), 2500); 
+}
 
 async function apiFetch(url, opts = {}) {
-    const res = await fetch(url, { ...opts, credentials: 'include', headers: { 'Content-Type': 'application/json' } });
-    if (!res.ok) { const err = await res.json(); throw new Error(err.error || 'Request failed'); }
+    const res = await fetch(url, { 
+        ...opts, 
+        credentials: 'include', 
+        headers: { 'Content-Type': 'application/json' } 
+    });
+    if (!res.ok) { 
+        const err = await res.json(); 
+        throw new Error(err.error || 'Request failed'); 
+    }
     return res.json();
 }
 
@@ -383,7 +323,7 @@ async function handleAuth() {
         document.getElementById('authOverlay').style.display = 'none';
         document.getElementById('userAvatar').innerText = currentUser.name.slice(0, 2).toUpperCase();
         await loadDashboard();
-        nav('dashboard');
+        navigate('dashboard');
     } catch (e) { msgDiv.innerText = e.message; }
 }
 
@@ -396,7 +336,7 @@ async function logout() {
 }
 
 // ========== NAVIGATION ==========
-function nav(screenId) {
+function navigate(screenId) {
     document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
     document.getElementById(`screen-${screenId}`).classList.add('active');
     document.querySelectorAll('.nav-item').forEach(btn => btn.classList.remove('active'));
@@ -428,19 +368,51 @@ async function loadDashboard() {
         if (monthlyChart) monthlyChart.destroy();
         const months = Object.keys(summary.monthly).slice(-6);
         monthlyChart = new Chart(document.getElementById('monthlyChart'), { 
-            type: 'bar', data: { labels: months, datasets: [{ label: 'Income', data: months.map(m => summary.monthly[m]?.income || 0), backgroundColor: 'rgba(0,210,130,0.6)', borderRadius: 8 }, { label: 'Expense', data: months.map(m => summary.monthly[m]?.expense || 0), backgroundColor: 'rgba(255,77,109,0.6)', borderRadius: 8 }] }
+            type: 'bar', 
+            data: { 
+                labels: months, 
+                datasets: [
+                    { label: 'Income', data: months.map(m => summary.monthly[m]?.income || 0), backgroundColor: 'rgba(0,210,130,0.6)', borderRadius: 8 },
+                    { label: 'Expense', data: months.map(m => summary.monthly[m]?.expense || 0), backgroundColor: 'rgba(255,77,109,0.6)', borderRadius: 8 }
+                ]
+            }
         });
         
         if (donutChart) donutChart.destroy();
-        donutChart = new Chart(document.getElementById('donutChart'), { type: 'doughnut', data: { labels: Object.keys(pred.predictions.categories), datasets: [{ data: Object.values(pred.predictions.categories), backgroundColor: ['#00d282', '#3b82f6', '#f0a500', '#a855f7', '#ff4d6d'] }] }, options: { cutout: '65%' } });
+        const catData = pred.predictions.categories;
+        donutChart = new Chart(document.getElementById('donutChart'), { 
+            type: 'doughnut', 
+            data: { 
+                labels: Object.keys(catData), 
+                datasets: [{ data: Object.values(catData), backgroundColor: ['#00d282', '#3b82f6', '#f0a500', '#a855f7', '#ff4d6d'] }]
+            }, 
+            options: { cutout: '65%' } 
+        });
         
         // Forecast bars
         const weeks = pred.predictions.weekly;
-        const maxVal = Math.max(...Object.values(weeks));
-        document.getElementById('forecastBars').innerHTML = Object.entries(weeks).map(([w,v]) => `<div class="forecast-row"><span class="forecast-week">${w}</span><div class="forecast-bar-track"><div class="forecast-bar-fill" style="width:${(v/maxVal*100)}%"></div></div><span>${fmt(v)}</span></div>`).join('');
+        const maxVal = Math.max(...Object.values(weeks), 1);
+        document.getElementById('forecastBars').innerHTML = Object.entries(weeks).map(([w,v]) => 
+            `<div class="forecast-row">
+                <span class="forecast-week">${w}</span>
+                <div class="forecast-bar-track">
+                    <div class="forecast-bar-fill" style="width:${(v/maxVal*100)}%"></div>
+                </div>
+                <span>${fmt(v)}</span>
+            </div>`
+        ).join('');
         
-        document.getElementById('adviceList').innerHTML = pred.advice.map(a => `<div class="advice-item"><strong>${a.cat}</strong>: ${a.msg}</div>`).join('');
-        document.getElementById('recentList').innerHTML = allTransactions.slice(0, 5).map(t => `<div style="padding:10px 0; border-bottom:1px solid var(--border2);"><strong>${t.category}</strong><br>${fmt(t.amount)}<br><small>${new Date(t.tx_date).toLocaleDateString()}</small></div>`).join('');
+        document.getElementById('adviceList').innerHTML = pred.advice.map(a => 
+            `<div class="advice-item"><strong>${a.cat}</strong>: ${a.msg}</div>`
+        ).join('');
+        
+        document.getElementById('recentList').innerHTML = allTransactions.slice(0, 5).map(t => 
+            `<div style="padding:10px 0; border-bottom:1px solid var(--border2);">
+                <strong>${t.category}</strong><br>${fmt(t.amount)}<br>
+                <small>${new Date(t.tx_date).toLocaleDateString()}</small>
+            </div>`
+        ).join('');
+        
         renderTransactions();
         loadAnalytics();
     } catch (e) { console.error(e); toast('Error loading data'); }
@@ -463,10 +435,37 @@ async function loadAnalytics() {
     if (!currentUser) return;
     const pred = currentPrediction;
     if (forecastChart) forecastChart.destroy();
-    forecastChart = new Chart(document.getElementById('forecastChart'), { type: 'line', data: { labels: Object.keys(pred.predictions.weekly), datasets: [{ label: 'Predicted Spend', data: Object.values(pred.predictions.weekly), borderColor: '#00d282', tension: 0.3, fill: true, backgroundColor: 'rgba(0,210,130,0.1)' }] } });
+    forecastChart = new Chart(document.getElementById('forecastChart'), { 
+        type: 'line', 
+        data: { 
+            labels: Object.keys(pred.predictions.weekly), 
+            datasets: [{ 
+                label: 'Predicted Spend', 
+                data: Object.values(pred.predictions.weekly), 
+                borderColor: '#00d282', 
+                tension: 0.3, 
+                fill: true, 
+                backgroundColor: 'rgba(0,210,130,0.1)' 
+            }] 
+        } 
+    });
     if (catBarChart) catBarChart.destroy();
-    catBarChart = new Chart(document.getElementById('catBarChart'), { type: 'bar', data: { labels: Object.keys(pred.predictions.categories), datasets: [{ label: 'Total Spent', data: Object.values(pred.predictions.categories), backgroundColor: '#3b82f6', borderRadius: 8 }] }, options: { indexAxis: 'y' } });
-    document.getElementById('fullAdvice').innerHTML = pred.advice.map(a => `<div class="advice-item"><strong>${a.cat}</strong><br>${a.msg}</div>`).join('');
+    catBarChart = new Chart(document.getElementById('catBarChart'), { 
+        type: 'bar', 
+        data: { 
+            labels: Object.keys(pred.predictions.categories), 
+            datasets: [{ 
+                label: 'Total Spent', 
+                data: Object.values(pred.predictions.categories), 
+                backgroundColor: '#3b82f6', 
+                borderRadius: 8 
+            }] 
+        }, 
+        options: { indexAxis: 'y' } 
+    });
+    document.getElementById('fullAdvice').innerHTML = pred.advice.map(a => 
+        `<div class="advice-item"><strong>${a.cat}</strong><br>${a.msg}</div>`
+    ).join('');
 }
 
 async function loadBudgets() {
@@ -474,4 +473,4 @@ async function loadBudgets() {
     const budgets = await apiFetch(`/api/budgets/${currentUser.id}`);
     const limits = Object.fromEntries(budgets.map(b => [b.category, b.limit]));
     const categories = ['Food & Dining', 'Transport', 'Groceries', 'Entertainment', 'Health'];
-    document.getElementById('budgetInputs').innerHTML = categories.map(cat
+    document.getElementById('budgetInputs').
