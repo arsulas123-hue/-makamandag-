@@ -12,7 +12,7 @@
         *{ margin:0; padding:0; box-sizing:border-box; }
         :root{ --bg:#080d14; --bg2:#0d1520; --bg3:#111c2b; --panel:rgba(15,30,48,0.7); --border:rgba(0,210,130,.12); --border2:rgba(255,255,255,.05); --green:#00d282; --green2:#00ff9d; --green-dim:rgba(0,210,130,.12); --red:#ff4d6d; --red-dim:rgba(255,77,109,.1); --amber:#f0a500; --amber-dim:rgba(240,165,0,.1); --blue:#3b82f6; --blue-dim:rgba(59,130,246,.1); --purple:#a855f7; --text:#e2eff8; --muted:#5a7a94; --mono:'JetBrains Mono',monospace; --sans:'Space Grotesk',sans-serif; --r:16px; }
         body{ font-family:var(--sans); background:var(--bg); color:var(--text); min-height:100vh; overflow-x:hidden; }
-        body::before{ content:''; position:fixed; inset:0; background-image:radial-gradient(ellipse 80% 50% at 50% -20%,rgba(0,210,130,.05) 0%,transparent 60%),linear-gradient(rgba(0,210,130,.01) 1px,transparent 1px),linear-gradient(90deg,rgba(0,210,130,.01) 1px,transparent 1px); background-size:100% 100%,40px 40px,40px 40px; pointer-events:none; z-index:0; }
+        body::before{ content:''; position:fixed; inset:0; background-image:radial-gradient(ellipse 80% 50% at 50% -20%,rgba(0,210,130,.05) 0%,transparent 60%),linear-gradient(rgba(0,210,130,.01) 1px,transparent 1px),linear-gradient(90deg,rgba(0,210,130,.01) 1px,transparent 1px); pointer-events:none; z-index:0; }
         .sidebar{ position:fixed; left:0; top:0; bottom:0; width:70px; background:rgba(13,21,32,0.95); backdrop-filter:blur(12px); border-right:1px solid var(--border2); display:flex; flex-direction:column; align-items:center; padding:24px 0; gap:8px; z-index:100; transition:width 0.25s; }
         .sidebar:hover{ width:220px; }
         .sidebar-logo{ width:42px; height:42px; border-radius:12px; background:linear-gradient(135deg,var(--green),#009e5f); display:flex; align-items:center; justify-content:center; margin-bottom:24px; cursor:pointer; }
@@ -67,7 +67,6 @@
         .ticker-wrap{ overflow:hidden; border-radius:12px; background:var(--bg2); padding:12px 0; margin-bottom:28px; }
         .ticker{ display:flex; gap:40px; animation:ticker 40s linear infinite; white-space:nowrap; }
         @keyframes ticker{ 0%{ transform:translateX(0); } 100%{ transform:translateX(-50%); } }
-        /* Chatbot Styles - Draggable, Resizable, Animated */
         .chat-container{ position:fixed; z-index:10001; cursor:move; }
         .chat-window{ width:380px; height:500px; background:var(--bg2); backdrop-filter:blur(10px); border:1px solid var(--green); border-radius:24px; display:flex; flex-direction:column; overflow:hidden; box-shadow:0 8px 32px rgba(0,210,130,0.3); transition:all 0.3s ease; cursor:default; }
         .chat-window.minimized{ height:60px; }
@@ -81,10 +80,10 @@
         .user-message{ align-self:flex-end; background:var(--green-dim); color:var(--green); border-bottom-right-radius:4px; }
         .bot-message{ align-self:flex-start; background:var(--bg3); color:var(--text); border-bottom-left-radius:4px; }
         .chat-input{ display:flex; padding:12px; gap:8px; background:var(--bg3); border-top:1px solid var(--border); }
-        .chat-input input{ flex:1; background:var(--bg2); border-radius:20px; padding:8px 14px; border:1px solid var(--border); transition:0.2s; }
+        .chat-input input{ flex:1; background:var(--bg2); border-radius:20px; padding:8px 14px; border:1px solid var(--border); }
         .chat-input input:focus{ border-color:var(--green); outline:none; }
         .chat-input button{ background:var(--green); border:none; border-radius:20px; padding:8px 16px; color:#000; font-weight:600; cursor:pointer; transition:0.2s; }
-        .chat-input button:hover{ transform:scale(1.05); box-shadow:0 2px 8px rgba(0,210,130,0.4); }
+        .chat-input button:hover{ transform:scale(1.05); }
         .resize-handle{ position:absolute; bottom:0; right:0; width:20px; height:20px; cursor:se-resize; background:linear-gradient(135deg,transparent 50%,var(--green) 50%); border-bottom-right-radius:24px; }
         .hidden-chat{ display:none; }
     </style>
@@ -122,7 +121,7 @@
             <div class="panel"><div class="panel-header"><div class="panel-title">Spending by Category</div></div><canvas id="donutChart" height="200"></canvas></div>
         </div>
         <div class="chart-grid">
-            <div class="panel"><div class="panel-header"><div class="panel-title">ML Spending Forecast (4 weeks)</div><span class="badge-amber" style="background:var(--amber-dim);color:var(--amber);padding:4px 12px;border-radius:99px;">AI</span></div><div id="forecastBars"></div></div>
+            <div class="panel"><div class="panel-header"><div class="panel-title">ML Spending Forecast (4 weeks)</div><span style="background:var(--amber-dim);color:var(--amber);padding:4px 12px;border-radius:99px;">AI</span></div><div id="forecastBars"></div></div>
             <div class="panel"><div class="panel-header"><div class="panel-title">Weekly Expense Trend</div></div><canvas id="weeklyTrendChart" height="200"></canvas></div>
         </div>
         <div class="panel"><div class="panel-header"><div class="panel-title">Budget Intelligence - ML Generated Advice</div></div><div id="adviceList"></div></div>
@@ -144,15 +143,15 @@
     <div class="screen" id="screen-admin"><div class="stats-grid"><div class="stat-card"><div class="stat-value" id="admTotal">—</div><div class="stat-label">Users</div></div><div class="stat-card"><div class="stat-value" id="admTx">—</div><div class="stat-label">Transactions</div></div></div><div class="panel"><div class="table-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Actions</th></tr></thead><tbody id="adminUsersBody"></tbody></table></div></div></div>
 </main>
 
-<!-- Draggable, Resizable Chatbot -->
+<!-- Draggable Chatbot -->
 <div id="chatContainer" class="chat-container" style="bottom:24px;right:24px;">
     <div id="chatWindow" class="chat-window">
         <div class="chat-header" id="chatHeader">
             <span>🤖 SmartSpend AI Assistant</span>
             <div><button id="minimizeChatBtn">−</button><button id="closeChatBtn">✕</button></div>
         </div>
-        <div class="chat-messages" id="chatMessages"><div class="message bot-message">✨ Hi! I'm your AI finance assistant. I analyze your spending patterns in real-time. Ask me anything! 💰</div></div>
-        <div class="chat-input"><input id="chatInput" placeholder="Ask about savings, budget, or forecast..."><button id="sendChatBtn">Send</button></div>
+        <div class="chat-messages" id="chatMessages"><div class="message bot-message">✨ Hi! I analyze your spending in real-time. Ask me about saving, budget, or forecast!</div></div>
+        <div class="chat-input"><input id="chatInput" placeholder="Ask about your finances..."><button id="sendChatBtn">Send</button></div>
         <div class="resize-handle" id="resizeHandle"></div>
     </div>
 </div>
@@ -176,45 +175,54 @@ async function apiFetch(url, opts={}) {
     return res.json();
 }
 
-// Chatbot AI that uses real data
 function getSmartResponse(msg) {
     const m = msg.toLowerCase();
     const income = currentSummary.income;
     const expense = currentSummary.expense;
     const balance = currentSummary.balance;
     const score = currentPrediction.score;
-    const topCategory = Object.entries(currentPrediction.predictions.categories).sort((a,b)=>b[1]-a[1])[0];
+    const topCat = Object.entries(currentPrediction.predictions.categories).sort((a,b)=>b[1]-a[1])[0];
     const savingsRate = income > 0 ? ((income - expense) / income * 100).toFixed(1) : 0;
     
-    if(m.includes('save') || m.includes('save money')) {
-        if(expense > income * 0.7) return `💡 Your expenses are ${fmt(expense)} (${savingsRate < 0 ? 'exceeding' : 'using'} ${Math.abs(savingsRate)}% of income). Try reducing ${topCategory?.[0] || 'discretionary'} spending by 15% this month.`;
-        return `✨ Great savings rate! You're saving ${savingsRate}% of income. Consider investing the surplus.`;
-    }
-    if(m.includes('health') || m.includes('score')) {
-        if(score >= 80) return `🎉 Excellent health score: ${score}/100! Your income (${fmt(income)}) well exceeds expenses.`;
-        if(score >= 60) return `👍 Good score: ${score}/100. Slight optimizations could boost it further.`;
-        return `⚠️ Your health score is ${score}/100. Focus on reducing ${topCategory?.[0] || 'expenses'} to improve.`;
-    }
-    if(m.includes('budget') || m.includes('tip')) {
-        const advice = currentPrediction.advice[0];
-        return advice ? `📊 Budget tip: ${advice.cat} - ${advice.msg}` : `Set budgets for each category in the Budgets tab to get personalized insights!`;
-    }
-    if(m.includes('forecast') || m.includes('prediction')) {
-        const nextWeek = Object.values(currentPrediction.predictions.weekly)[0] || 0;
-        return `🔮 ML predicts you'll spend ${fmt(nextWeek)} next week. ${nextWeek > expense ? 'Consider reducing discretionary purchases.' : 'You\'re on track!'}`;
-    }
-    if(m.includes('income')) return `💰 Your monthly income is ${fmt(income)}. ${income < 50000 ? 'Try side hustles to increase earnings.' : 'Great income level!'}`;
-    if(m.includes('expense') || m.includes('spending')) return `📉 Your monthly expenses are ${fmt(expense)}. Top category: ${topCategory?.[0] || 'None'} at ${fmt(topCategory?.[1] || 0)}.`;
-    if(m.includes('balance')) return `💵 Your current balance is ${fmt(balance)}. ${balance >= 0 ? 'Keep building your savings!' : 'Try to reduce expenses to get back to positive.'}`;
-    return `💬 I can help with: "Save money", "Health score", "Budget tip", "Forecast", "Income", or "Spending". Ask me anything about your finances!`;
+    if(m.includes('save')) return expense > income * 0.7 ? `💡 Expenses are ${fmt(expense)} (${savingsRate}% of income). Reduce ${topCat?.[0] || 'spending'} by 15%.` : `✨ You're saving ${savingsRate}% of income! Great job!`;
+    if(m.includes('health') || m.includes('score')) return score >= 80 ? `🎉 Excellent score: ${score}/100!` : score >= 60 ? `👍 Good score: ${score}/100.` : `⚠️ Score: ${score}/100. Focus on reducing expenses.`;
+    if(m.includes('budget')) return currentPrediction.advice[0] ? `📊 ${currentPrediction.advice[0].cat}: ${currentPrediction.advice[0].msg}` : `Set budgets in the Budgets tab for personalized tips!`;
+    if(m.includes('forecast')) return `🔮 Next week forecast: ${fmt(Object.values(currentPrediction.predictions.weekly)[0] || 0)}`;
+    if(m.includes('income')) return `💰 Monthly income: ${fmt(income)}`;
+    if(m.includes('expense')) return `📉 Monthly expenses: ${fmt(expense)}. Top: ${topCat?.[0] || 'None'} at ${fmt(topCat?.[1] || 0)}`;
+    if(m.includes('balance')) return `💵 Balance: ${fmt(balance)}`;
+    return `💬 Ask me: "Save money", "Health score", "Budget tip", "Forecast", "Income", or "Expenses"!`;
 }
 
-// Draggable Chatbot
+// Chatbot UI
+let minimized = false;
+document.getElementById('minimizeChatBtn').onclick = () => {
+    const win = document.getElementById('chatWindow');
+    minimized = !minimized;
+    if(minimized) { win.classList.add('minimized'); win.style.height = '60px'; win.querySelector('.chat-messages').style.display = 'none'; win.querySelector('.chat-input').style.display = 'none'; win.querySelector('.resize-handle').style.display = 'none'; }
+    else { win.classList.remove('minimized'); win.style.height = '500px'; win.querySelector('.chat-messages').style.display = 'flex'; win.querySelector('.chat-input').style.display = 'flex'; win.querySelector('.resize-handle').style.display = 'block'; }
+};
+document.getElementById('closeChatBtn').onclick = () => document.getElementById('chatContainer').style.display = 'none';
+document.getElementById('sendChatBtn').onclick = () => {
+    const input = document.getElementById('chatInput');
+    const msg = input.value.trim();
+    if(!msg) return;
+    const msgsDiv = document.getElementById('chatMessages');
+    msgsDiv.innerHTML += `<div class="message user-message">${msg}</div>`;
+    input.value = '';
+    msgsDiv.scrollTop = msgsDiv.scrollHeight;
+    setTimeout(() => {
+        msgsDiv.innerHTML += `<div class="message bot-message">${getSmartResponse(msg)}</div>`;
+        msgsDiv.scrollTop = msgsDiv.scrollHeight;
+    }, 300);
+};
+document.getElementById('chatInput').addEventListener('keypress', e => { if(e.key==='Enter') document.getElementById('sendChatBtn').click(); });
+
+// Draggable
 function makeDraggable() {
     const container = document.getElementById('chatContainer');
     const header = document.getElementById('chatHeader');
-    let isDragging = false;
-    let offsetX, offsetY;
+    let isDragging = false, offsetX, offsetY;
     header.addEventListener('mousedown', (e) => {
         if(e.target.tagName === 'BUTTON') return;
         isDragging = true;
@@ -225,8 +233,7 @@ function makeDraggable() {
     });
     document.addEventListener('mousemove', (e) => {
         if(!isDragging) return;
-        let left = e.clientX - offsetX;
-        let top = e.clientY - offsetY;
+        let left = e.clientX - offsetX, top = e.clientY - offsetY;
         left = Math.max(0, Math.min(left, window.innerWidth - container.offsetWidth));
         top = Math.max(0, Math.min(top, window.innerHeight - container.offsetHeight));
         container.style.left = left + 'px';
@@ -238,14 +245,13 @@ function makeDraggable() {
 }
 makeDraggable();
 
-// Resizable Chatbot
+// Resizable
 function makeResizable() {
     const container = document.getElementById('chatContainer');
     const chatWindow = document.getElementById('chatWindow');
-    const resizeHandle = document.getElementById('resizeHandle');
-    let isResizing = false;
-    let startX, startY, startWidth, startHeight;
-    resizeHandle.addEventListener('mousedown', (e) => {
+    const handle = document.getElementById('resizeHandle');
+    let isResizing = false, startX, startY, startWidth, startHeight;
+    handle.addEventListener('mousedown', (e) => {
         isResizing = true;
         startX = e.clientX;
         startY = e.clientY;
@@ -267,31 +273,6 @@ function makeResizable() {
 }
 makeResizable();
 
-// Chat UI
-let minimized = false;
-document.getElementById('minimizeChatBtn').onclick = () => {
-    const win = document.getElementById('chatWindow');
-    minimized = !minimized;
-    if(minimized) { win.classList.add('minimized'); win.style.height = '60px'; win.querySelector('.chat-messages').style.display = 'none'; win.querySelector('.chat-input').style.display = 'none'; win.querySelector('.resize-handle').style.display = 'none'; }
-    else { win.classList.remove('minimized'); win.style.height = '500px'; win.querySelector('.chat-messages').style.display = 'flex'; win.querySelector('.chat-input').style.display = 'flex'; win.querySelector('.resize-handle').style.display = 'block'; }
-};
-document.getElementById('closeChatBtn').onclick = () => document.getElementById('chatContainer').style.display = 'none';
-document.getElementById('sendChatBtn').onclick = async () => {
-    const input = document.getElementById('chatInput');
-    const msg = input.value.trim();
-    if(!msg) return;
-    const msgsDiv = document.getElementById('chatMessages');
-    msgsDiv.innerHTML += `<div class="message user-message">${msg}</div>`;
-    input.value = '';
-    msgsDiv.scrollTop = msgsDiv.scrollHeight;
-    const reply = getSmartResponse(msg);
-    setTimeout(() => {
-        msgsDiv.innerHTML += `<div class="message bot-message">${reply}</div>`;
-        msgsDiv.scrollTop = msgsDiv.scrollHeight;
-    }, 300);
-};
-document.getElementById('chatInput').addEventListener('keypress', e => { if(e.key==='Enter') document.getElementById('sendChatBtn').click(); });
-
 // AUTHENTICATION
 function toggleAuthMode() {
     isLogin = !isLogin;
@@ -300,7 +281,6 @@ function toggleAuthMode() {
     document.getElementById('authConfirm').style.display = isLogin ? 'none' : 'block';
     document.getElementById('termsRow').style.display = isLogin ? 'none' : 'flex';
     document.getElementById('authBtn').innerText = isLogin ? 'Sign In' : 'Create Account';
-    document.getElementById('authMsg').innerText = '';
     document.getElementById('toggleAuthLink').innerHTML = isLogin ? "Don't have an account? Register" : "Already have an account? Sign In";
 }
 
@@ -349,4 +329,35 @@ async function handleAuth() {
 }
 
 async function logout() {
-    await fetch('/api/logout', { method:
+    await fetch('/api/logout', { method: 'POST', credentials: 'include' });
+    currentUser = null;
+    document.getElementById('authOverlay').style.display = 'flex';
+    document.getElementById('nav-admin').style.display = 'none';
+}
+
+function nav(screenId) {
+    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+    document.getElementById(`screen-${screenId}`).classList.add('active');
+    document.querySelectorAll('.nav-item').forEach(btn => btn.classList.remove('active'));
+    const activeBtn = Array.from(document.querySelectorAll('.nav-item')).find(btn => btn.getAttribute('data-nav') === screenId);
+    if (activeBtn) activeBtn.classList.add('active');
+    const titles = { dashboard:'Dashboard', add:'Add Transaction', analytics:'Analytics', budgets:'Budgets', transactions:'History', admin:'Admin' };
+    document.getElementById('pageTitle').innerText = titles[screenId] || 'SmartSpend';
+    if (screenId === 'analytics') loadAnalytics();
+    if (screenId === 'budgets') loadBudgets();
+    if (screenId === 'transactions') renderTransactions();
+}
+
+async function loadDashboard() {
+    if (!currentUser) return;
+    try {
+        const summary = await apiFetch(`/api/summary/${currentUser.id}`);
+        const pred = await apiFetch(`/api/predict/${currentUser.id}`);
+        allTransactions = await apiFetch(`/api/transactions?user_id=${currentUser.id}`);
+        currentSummary = summary;
+        currentPrediction = pred;
+        document.getElementById('sBalance').innerText = fmt(summary.balance);
+        document.getElementById('sExpense').innerText = fmt(summary.expense);
+        document.getElementById('sIncome').innerText = fmt(summary.income);
+        document.getElementById('sScore').innerText = pred.score + '/100';
+       
