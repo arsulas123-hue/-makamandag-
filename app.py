@@ -3,17 +3,17 @@ from functools import wraps
 from flask import Flask, request, jsonify, session, send_from_directory
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
-import numpy as np
-from sklearn.linear_model import LinearRegression
 
 app = Flask(__name__, static_folder='static')
 CORS(app, supports_credentials=True)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', secrets.token_hex(32))
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_HTTPONLY'] = True
-app.config['SESSION_COOKIE_SECURE'] = False  # Set to False for Render (HTTPS handled by proxy)
+app.config['SESSION_COOKIE_SECURE'] = False
 
-DATABASE_URL = "postgresql://makamandag_db_user:zcDibuXdlpEpcZNGEYLc9nqpgWwuTTfO@dpg-d7od7md7vvec739acfj0-a/makamandag_db"
+# PostgreSQL database
+DATABASE_URL = os.environ.get('DATABASE_URL', 
+    "postgresql://makamandag_db_user:zcDibuXdlpEpcZNGEYLc9nqpgWwuTTfO@dpg-d7od7md7vvec739acfj0-a/makamandag_db")
 app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
