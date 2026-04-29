@@ -1,4 +1,73 @@
-<!DOCTYPE html>
+// ========== DASHBOARD & DATA ==========
+async function loadDashboard() {
+    if (!currentUser) return;
+    try {
+        const summary = await apiFetch(`/api/summary/${currentUser.id}`);
+        const pred = await apiFetch(`/api/predict/${currentUser.id}`);
+        allTransactions = await apiFetch(`/api/transactions?user_id=${currentUser.id}`);
+        currentSummary = summary;
+        currentPrediction = pred;
+        
+        document.getElementById('sBalance').innerText = fmt(summary.balance);
+        document.getElementById('sExpense').innerText = fmt(summary.expense);
+        document.getElementById('sIncome').innerText = fmt(summary.income);
+        document.getElementById('sScore').innerText = pred.score + '/100';
+        document.getElementById('topScore').innerText = pred.score;
+        
+        if (monthlyChart) monthlyChart.destroy();
+        const months = Object.keys(summary.monthly).slice(-6);
+        monthlyChart = new Chart(document.getElementById('monthlyChart'), { 
+            type: 'bar', data: { labels: months, datasets: [{ label: 'Income', data: months.map(m => summary.monthly[m]?.income || 0), backgroundColor: 'rgba(0,210,130,0.6)', borderRadius: 8 }, { label: 'Expense', data: months.map(m => summary.monthly[m]?.expense || 0), backgroundColor: 'rgba(255,77,109,0.6)', borderRadius: 8 }] }
+        });
+        
+        if (donutChart) donutChart.destroy();
+        donutChart = new Chart(document.getElementById('donutChart'), { type: 'doughnut', data: { labels: Object.keys(pred.predictions.categories), datasets: [{ data: Object.values(pred.predictions.categories), backgroundColor: ['#00d282', '#3b82f6', '#f0a500', '#a855f7', '#ff4d6d'] }] }, options: { cutout: '65%' } });
+        
+        const weeks = pred.predictions.weekly;
+        const maxVal = Math.max(...Object.values(weeks), 1);
+        document.getElementById('forecastBars').innerHTML = Object.entries(weeks).map(([w,v]) => `<div class="forecast-row"><span class="forecast-week">${w}</span><div class="forecast-bar-track"><div class="forecast-bar-fill" style="width:${(v/maxVal*100)}%"></div></div><span>${fmt(v)}</span></div>`).join('');
+        
+        document.getElementById('adviceList').innerHTML = pred.advice.map(a => `<div class="advice-item"><strong>${a.cat}</strong>: ${a.msg}</div>`).join('');
+        document.getElementById('recentList').innerHTML = allTransactions.slice(0, 5).map(t => `<div style="padding:10px 0; border-bottom:1px solid var(--border2);"><strong>${t.category}</strong><br>${fmt(t.amount)}<br><small>${new Date(t.tx_date).toLocaleDateString()}</small></div>`).join('');
+        renderTransactions();
+        loadAnalytics();
+    } catch (e) { console.error(e); toast('Error loading data'); }
+}
+
+async function renderTransactions() {
+    if (!currentUser) return;
+    document.getElementById('txTableBody').innerHTML = allTransactions.slice(0, 50).map(t => `
+        <tr>
+            <td>${new Date(t.tx_date).toLocaleDateString()}<tr>
+            <td>${t.category}</td>
+            <td>${t.note || '—'}</td>
+            <td style="color: ${t.tx_type === 'income' ? '#00d282' : '#ff4d6d'}">${t.tx_type}</td>
+            <td>${fmt(t.amount)}</td>
+        </tr>
+    `).join('');
+}
+
+async function loadAnalytics() {
+    if (!currentUser) return;
+    const pred = currentPrediction;
+    if (forecastChart) forecastChart.destroy();
+    forecastChart = new Chart(document.getElementById('forecastChart'), { type: 'line', data: { labels: Object.keys(pred.predictions.weekly), datasets: [{ label: 'Predicted Spend', data: Object.values(pred.predictions.weekly), borderColor: '#00d282', tension: 0.3, fill: true, backgroundColor: 'rgba(0,210,130,0.1)' }] } });
+    if (catBarChart) catBarChart.destroy();
+    catBarChart = new Chart(document.getElementById('catBarChart'), { type: 'bar', data: { labels: Object.keys(pred.predictions.categories), datasets: [{ label: 'Total Spent', data: Object.values(pred.predictions.categories), backgroundColor: '#3b82f6', borderRadius: 8 }] }, options: { indexAxis: 'y' } });
+    document.getElementById('fullAdvice').innerHTML = pred.advice.map(a => `<div class="advice-item"><strong>${a.cat}</strong><br>${a.msg}</div>`).join('');
+}
+
+async function loadBudgets() {
+    if (!currentUser) return;
+    const budgets = await apiFetch(`/api/budgets/${currentUser.id}`);
+    const limits = Object.fromEntries(budgets.map(b => [b.category, b.limit]));
+    const categories = ['Food & Dining', 'Transport', 'Groceries', 'Entertainment', 'Health'];
+    document.getElementById('budgetInputs').innerHTML = categories.map(cat => `
+        <div><label>${cat}</label><input type="number" id="budget_${cat.replace(/\s/g, '')}" value="${limits[cat] || ''}" placeholder="Limit" style="width:100%"></div>
+    `).join('');
+    
+    document.getElementById('saveBudgetsBtn').onclick = async () => {
+        for (<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
