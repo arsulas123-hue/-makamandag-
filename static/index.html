@@ -18,8 +18,6 @@
             --mono: 'JetBrains Mono', monospace; --sans: 'Space Grotesk', sans-serif; --r: 16px;
         }
         body { font-family: var(--sans); background: var(--bg); color: var(--text); min-height: 100vh; }
-        
-        /* Sidebar */
         .sidebar { position: fixed; left: 0; top: 0; bottom: 0; width: 80px; background: rgba(15, 22, 34, 0.98); backdrop-filter: blur(12px); border-right: 1px solid var(--border2); display: flex; flex-direction: column; align-items: center; padding: 24px 0; gap: 10px; z-index: 100; transition: width 0.3s; }
         .sidebar:hover { width: 240px; }
         .sidebar-logo { width: 48px; height: 48px; border-radius: 14px; background: linear-gradient(135deg, var(--green), #009e5f); display: flex; align-items: center; justify-content: center; margin-bottom: 28px; cursor: pointer; }
@@ -32,8 +30,6 @@
         .main { margin-left: 80px; padding: 24px 32px; position: relative; min-height: 100vh; }
         @media (max-width: 768px) { .sidebar { width: 70px; } .main { margin-left: 70px; padding: 20px; } }
         @media (max-width: 600px) { .sidebar { display: none; } .main { margin-left: 0; } }
-        
-        /* Top Bar */
         .topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 28px; flex-wrap: wrap; gap: 16px; }
         .topbar h1 { font-size: 1.75rem; font-weight: 700; background: linear-gradient(135deg, #fff, var(--green)); background-clip: text; -webkit-background-clip: text; color: transparent; }
         .topbar-right { display: flex; align-items: center; gap: 16px; }
@@ -46,13 +42,9 @@
         .avatar { width: 42px; height: 42px; border-radius: 50%; background: linear-gradient(135deg, var(--blue), var(--purple)); display: flex; align-items: center; justify-content: center; font-weight: 700; cursor: pointer; }
         .signout-btn { background: var(--red-dim); border: 1px solid rgba(255, 77, 109, 0.2); color: var(--red); padding: 8px 18px; border-radius: 10px; cursor: pointer; font-size: 0.8rem; font-weight: 600; }
         .signout-btn:hover { background: rgba(255, 77, 109, 0.2); transform: translateY(-2px); }
-        
-        /* Screens */
         .screen { display: none; animation: fadeUp 0.35s ease; }
         .screen.active { display: block; }
         @keyframes fadeUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
-        
-        /* Stats Cards */
         .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 20px; margin-bottom: 28px; }
         .stat-card { background: var(--panel); backdrop-filter: blur(10px); border: 1px solid var(--border2); border-radius: var(--r); padding: 22px; transition: all 0.25s; cursor: pointer; }
         .stat-card:hover { transform: translateY(-4px); border-color: var(--border); box-shadow: 0 8px 24px rgba(0,0,0,0.2); }
@@ -62,45 +54,31 @@
         .stat-card.red .stat-value { color: var(--red); }
         .stat-card.blue .stat-value { color: var(--blue); }
         .stat-card.amber .stat-value { color: var(--amber); }
-        
-        /* Panels */
         .panel { background: var(--panel); backdrop-filter: blur(10px); border: 1px solid var(--border2); border-radius: var(--r); padding: 22px; }
         .panel-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 12px; }
         .panel-title { font-size: 1rem; font-weight: 600; }
         .chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 20px; margin-bottom: 28px; }
         canvas { max-height: 260px; width: 100% !important; }
-        
-        /* Forms */
         input, select, .btn { background: var(--bg3); color: var(--text); border: 1px solid var(--border2); border-radius: 10px; padding: 10px 14px; font-size: 0.85rem; outline: none; transition: all 0.2s; }
         input:focus, select:focus { border-color: var(--green); box-shadow: 0 0 0 2px var(--green-dim); }
         .btn { cursor: pointer; font-weight: 600; }
         .btn-green { background: linear-gradient(135deg, var(--green), #009e5f); color: #000; border: none; }
         .btn-green:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0, 210, 130, 0.3); }
-        
-        /* Table */
         .table-wrap { overflow-x: auto; border-radius: var(--r); background: var(--panel); border: 1px solid var(--border2); }
         table { width: 100%; border-collapse: collapse; }
         th { text-align: left; padding: 14px 16px; background: var(--bg3); color: var(--muted); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; }
         td { padding: 12px 16px; border-bottom: 1px solid var(--border2); font-size: 0.85rem; }
         tr:hover td { background: rgba(255, 255, 255, 0.02); }
-        
-        /* Advice */
         .advice-item { padding: 14px; border-radius: 12px; margin-bottom: 10px; background: var(--bg3); transition: all 0.2s; }
         .advice-item:hover { transform: translateX(6px); background: var(--bg2); }
         .advice-item strong { color: var(--green); }
         .waste-alert { background: rgba(255, 77, 109, 0.2); border-left: 3px solid var(--red); }
-        
-        /* Forecast */
         .forecast-row { display: flex; align-items: center; gap: 14px; margin-bottom: 14px; padding: 8px 0; }
         .forecast-week { width: 70px; font-weight: 600; color: var(--green); }
         .forecast-bar-track { flex: 1; height: 8px; background: var(--bg3); border-radius: 99px; overflow: hidden; }
         .forecast-bar-fill { height: 100%; background: linear-gradient(90deg, var(--green), var(--green2)); width: 0; border-radius: 99px; transition: width 1s ease; }
-        
-        /* Toast */
         #toast { position: fixed; bottom: 24px; right: 24px; background: var(--bg2); border: 1px solid var(--green); border-radius: 12px; padding: 12px 24px; opacity: 0; transform: translateY(10px); transition: all 0.25s; z-index: 10000; backdrop-filter: blur(12px); }
         #toast.show { opacity: 1; transform: translateY(0); }
-        
-        /* Auth Overlay */
         .auth-overlay { position: fixed; inset: 0; background: rgba(8,13,20,0.98); backdrop-filter: blur(20px); z-index: 9999; display: flex; align-items: center; justify-content: center; }
         .auth-card { background: linear-gradient(145deg, #0d1520, #0a1220); border: 1px solid rgba(0,210,130,0.2); border-radius: 28px; padding: 40px; width: 400px; max-width: 90%; }
         .auth-card h2 { text-align: center; margin-bottom: 24px; background: linear-gradient(135deg, #fff, #00d282); background-clip: text; -webkit-background-clip: text; color: transparent; }
@@ -108,8 +86,6 @@
         .auth-btn { width: 100%; padding: 14px; background: linear-gradient(135deg, #00d282, #009e5f); border: none; border-radius: 12px; color: #000; font-weight: 700; cursor: pointer; }
         .auth-link { cursor: pointer; text-align: center; margin-top: 16px; color: #6c86a0; }
         .auth-link:hover { color: #00d282; }
-        
-        /* Chatbot */
         .chat-container { position: fixed; bottom: 24px; right: 24px; z-index: 10001; cursor: move; }
         .chat-window { width: 380px; height: 480px; background: var(--bg2); backdrop-filter: blur(10px); border: 1px solid var(--green); border-radius: 24px; display: flex; flex-direction: column; overflow: hidden; cursor: default; box-shadow: 0 8px 32px rgba(0,0,0,0.3); }
         .chat-header { padding: 14px 18px; background: var(--bg3); border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; cursor: move; user-select: none; }
@@ -126,14 +102,11 @@
         .chat-input input:focus { border-color: var(--green); }
         .chat-input button { background: var(--green); border: none; border-radius: 20px; padding: 8px 18px; color: #000; font-weight: 600; cursor: pointer; transition: 0.2s; }
         .chat-input button:hover { transform: scale(1.05); }
-        .hidden { display: none; }
-        
-        /* ML Badge */
         .ml-badge { background: linear-gradient(135deg, var(--purple), var(--blue)); padding: 2px 8px; border-radius: 12px; font-size: 0.7rem; font-weight: 600; margin-left: 8px; }
+        .empty-state { text-align: center; padding: 40px 20px; color: var(--muted); }
     </style>
 </head>
 <body>
-
 <nav class="sidebar">
     <div class="sidebar-logo"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg></div>
     <button class="nav-item active" data-nav="dashboard"><span class="nav-label">Dashboard</span></button>
@@ -143,7 +116,6 @@
     <button class="nav-item" data-nav="transactions"><span class="nav-label">History</span></button>
     <div class="sidebar-bottom"><button class="nav-item" id="exportBtn"><span class="nav-label">Export PDF</span></button></div>
 </nav>
-
 <main class="main">
     <div class="topbar">
         <div><h1 id="pageTitle">Dashboard</h1></div>
@@ -154,14 +126,13 @@
         </div>
     </div>
     <div id="toast"></div>
-
-    <!-- Dashboard Screen -->
+    <!-- Dashboard -->
     <div class="screen active" id="screen-dashboard">
         <div class="stats-grid">
             <div class="stat-card green"><div class="stat-value" id="sBalance">—</div><div class="stat-label">Balance</div></div>
             <div class="stat-card red"><div class="stat-value" id="sExpense">—</div><div class="stat-label">Monthly Expenses</div></div>
             <div class="stat-card blue"><div class="stat-value" id="sIncome">—</div><div class="stat-label">Monthly Income</div></div>
-            <div class="stat-card" id="healthCard"><div class="stat-value" id="sScore">—</div><div class="stat-label">ML Health Score <span class="ml-badge">AI</span></div></div>
+            <div class="stat-card" id="healthCard"><div class="stat-value" id="sScore">—</div><div class="stat-label">ML Health Score</div></div>
         </div>
         <div class="chart-grid">
             <div class="panel"><div class="panel-header"><div class="panel-title">Income vs Expenses Trend</div></div><canvas id="monthlyChart" height="200"></canvas></div>
@@ -172,8 +143,7 @@
             <div class="panel"><div class="panel-header"><div class="panel-title">Budget Intelligence - AI Advice</div></div><div id="adviceList"></div></div>
         </div>
     </div>
-
-    <!-- Add Transaction Screen -->
+    <!-- Add Transaction -->
     <div class="screen" id="screen-add">
         <div class="stats-grid" style="grid-template-columns: 1fr 1fr">
             <div class="panel">
@@ -196,8 +166,7 @@
             <div class="panel"><div class="panel-header"><div class="panel-title">Recent Activity</div></div><div id="recentList"></div></div>
         </div>
     </div>
-
-    <!-- Analytics Screen -->
+    <!-- Analytics -->
     <div class="screen" id="screen-analytics">
         <div class="chart-grid">
             <div class="panel"><div class="panel-header"><div class="panel-title">Weekly Spending Forecast <span class="ml-badge">ML PREDICTION</span></div></div><canvas id="forecastChart" height="200"></canvas></div>
@@ -205,25 +174,17 @@
         </div>
         <div class="panel"><div class="panel-header"><div class="panel-title">ML Intelligence Report</div></div><div id="fullAdvice"></div></div>
     </div>
-
-    <!-- Budgets Screen -->
+    <!-- Budgets -->
     <div class="screen" id="screen-budgets">
         <div class="panel">
             <div class="panel-header"><div class="panel-title">Monthly Budget Limits</div><button class="btn-green" id="saveBudgetsBtn">Save All</button></div>
             <div id="budgetInputs" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px;"></div>
         </div>
     </div>
-
-    <!-- Transactions Screen -->
+    <!-- Transactions History -->
     <div class="screen" id="screen-transactions">
-        <div class="table-wrap">
-            <table>
-                <thead><tr><th>Date</th><th>Category</th><th>Note</th><th>Type</th><th>Amount</th></tr></thead>
-                <tbody id="txTableBody"></tbody>
-            </table>
-        </div>
+        <div class="table-wrap"><table><thead><tr><th>Date</th><th>Category</th><th>Note</th><th>Type</th><th>Amount</th></tr></thead><tbody id="txTableBody"></tbody></table></div>
     </div>
-
     <!-- Auth Overlay -->
     <div id="authOverlay" class="auth-overlay">
         <div class="auth-card">
@@ -238,108 +199,197 @@
             <div id="toggleAuthLink" class="auth-link">Don't have an account? Register</div>
         </div>
     </div>
-
     <!-- Chatbot -->
     <div id="chatContainer" class="chat-container">
         <div class="chat-window">
             <div class="chat-header" id="chatHeader"><span>🤖 SmartSpend AI Assistant <span class="ml-badge">ML POWERED</span></span><button id="closeChatBtn">✕</button></div>
-            <div class="chat-messages" id="chatMessages"><div class="message bot-message">✨ Hi! I'm your ML-powered financial assistant. Ask me about:<br>• 'ML forecast' - See AI spending predictions<br>• 'Health score' - Get savings vs waste analysis<br>• 'Investment advice' - Personalized strategy<br>• 'Budget tips' - Smart money management</div></div>
+            <div class="chat-messages" id="chatMessages"><div class="message bot-message">✨ Hi! I'm your ML-powered assistant. Ask me about:<br>• 'ML forecast' – see predictions from your data<br>• 'Health score' – savings vs waste<br>• 'Investment advice' – personalized strategy</div></div>
             <div class="chat-input"><input id="chatInput" placeholder="Ask something..."><button id="sendChatBtn">Send</button></div>
         </div>
     </div>
 </main>
-
 <script>
-// ========== GLOBAL STATE ==========
 let currentUser = null;
 let allTransactions = [];
 let currentSummary = { balance: 0, expense: 0, income: 0 };
-let currentPrediction = { score: 0, predictions: { weekly: {}, categories: {} }, advice: [] };
+let currentPrediction = { has_data: false, score: null, predictions: { weekly: null, categories: {} }, advice: [] };
 let monthlyChart, donutChart, forecastChart, catBarChart;
 let isLogin = true;
 
-// ========== UTILITIES ==========
 function fmt(amt) { return '₱' + Number(amt).toLocaleString('en-PH', { minimumFractionDigits: 2 }); }
 function toast(msg) { const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 2500); }
-
 async function apiFetch(url, opts = {}) {
-    const res = await fetch(url, { 
-        ...opts, 
-        credentials: 'include', 
-        headers: { 'Content-Type': 'application/json' } 
-    });
-    if (!res.ok) { 
-        const err = await res.json(); 
-        throw new Error(err.error || 'Request failed'); 
-    }
+    const res = await fetch(url, { ...opts, credentials: 'include', headers: { 'Content-Type': 'application/json' } });
+    if (!res.ok) { const err = await res.json(); throw new Error(err.error || 'Request failed'); }
     return res.json();
 }
-
-// ========== HEALTH SCORE DISPLAY (GREEN for 70-100, RED for 0-69) ==========
 function updateHealthScoreDisplay(score) {
-    const scoreElement = document.getElementById('sScore');
-    const topScoreElement = document.getElementById('topScore');
-    const scorePill = document.getElementById('scorePill');
-    const healthCard = document.getElementById('healthCard');
-    
-    if (scoreElement) {
-        scoreElement.innerText = score + '/100';
-        
-        // Color based on score: Green if 70-100, Red if 0-69
-        if (score >= 70) {
-            scoreElement.style.color = '#00d282';
-            if (healthCard) {
-                healthCard.classList.remove('red');
-                healthCard.classList.add('green');
-            }
-            if (scorePill) {
-                scorePill.classList.remove('red');
-                scorePill.classList.add('green');
-                scorePill.style.borderColor = '#00d282';
-            }
-        } else {
-            scoreElement.style.color = '#ff4d6d';
-            if (healthCard) {
-                healthCard.classList.remove('green');
-                healthCard.classList.add('red');
-            }
-            if (scorePill) {
-                scorePill.classList.remove('green');
-                scorePill.classList.add('red');
-                scorePill.style.borderColor = '#ff4d6d';
-            }
-        }
+    const scoreEl = document.getElementById('sScore');
+    const topEl = document.getElementById('topScore');
+    const pill = document.getElementById('scorePill');
+    if (score === null || score === undefined) {
+        if(scoreEl) scoreEl.innerText = '—';
+        if(topEl) topEl.innerText = '—';
+        if(scoreEl) scoreEl.style.color = 'var(--muted)';
+        if(pill) pill.classList.remove('green','red');
+        return;
     }
-    
-    if (topScoreElement) {
-        topScoreElement.innerText = score;
-        if (score >= 70) {
-            topScoreElement.style.color = '#00d282';
-        } else {
-            topScoreElement.style.color = '#ff4d6d';
-        }
+    scoreEl.innerText = score + '/100';
+    topEl.innerText = score;
+    if (score >= 70) {
+        scoreEl.style.color = '#00d282';
+        pill.classList.add('green');
+        pill.classList.remove('red');
+    } else {
+        scoreEl.style.color = '#ff4d6d';
+        pill.classList.add('red');
+        pill.classList.remove('green');
     }
 }
-
-// ========== WASTE ALERT ==========
 function addWasteAlert() {
-    if (currentPrediction.score < 70 && currentPrediction.advice) {
-        const wasteAlert = currentPrediction.advice.find(a => a.cat === 'Warning' || a.msg.includes('exceeded'));
-        const adviceList = document.getElementById('adviceList');
-        if (adviceList && !document.getElementById('wasteAlert')) {
+    if (currentPrediction.has_data && currentPrediction.score !== null && currentPrediction.score < 70) {
+        const adviceDiv = document.getElementById('adviceList');
+        if (adviceDiv && !document.getElementById('wasteAlert')) {
             const alertDiv = document.createElement('div');
             alertDiv.id = 'wasteAlert';
             alertDiv.className = 'advice-item waste-alert';
-            alertDiv.innerHTML = `<strong>⚠️ WASTE ALERT - ML DETECTED</strong><br>Your health score is low (${currentPrediction.score}/100). You're spending more than you're saving! Check your budget and reduce non-essential spending.`;
-            adviceList.insertBefore(alertDiv, adviceList.firstChild);
+            alertDiv.innerHTML = `<strong>⚠️ WASTE ALERT</strong><br>Your health score (${currentPrediction.score}/100) is low. Review discretionary spending.`;
+            adviceDiv.insertBefore(alertDiv, adviceDiv.firstChild);
         }
     } else {
-        const existingAlert = document.getElementById('wasteAlert');
-        if (existingAlert) existingAlert.remove();
+        const existing = document.getElementById('wasteAlert');
+        if (existing) existing.remove();
     }
 }
+async function loadDashboard() {
+    if (!currentUser) return;
+    try {
+        const summary = await apiFetch(`/api/summary/${currentUser.id}`);
+        const pred = await apiFetch(`/api/predict/${currentUser.id}`);
+        allTransactions = await apiFetch(`/api/transactions?user_id=${currentUser.id}`);
+        currentSummary = summary;
+        currentPrediction = pred;
 
-// ========== AUTHENTICATION ==========
+        document.getElementById('sBalance').innerText = fmt(summary.balance);
+        document.getElementById('sExpense').innerText = fmt(summary.expense);
+        document.getElementById('sIncome').innerText = fmt(summary.income);
+
+        if (!pred.has_data) {
+            updateHealthScoreDisplay(null);
+            document.getElementById('forecastBars').innerHTML = '<div class="empty-state">📊 No transactions yet. Add your first income or expense to see ML spending forecast.</div>';
+            document.getElementById('adviceList').innerHTML = '<div class="advice-item">💡 Add transactions to receive AI‑powered financial advice and health score.</div>';
+            if (monthlyChart) monthlyChart.destroy();
+            if (donutChart) donutChart.destroy();
+            const monthlyCtx = document.getElementById('monthlyChart').getContext('2d');
+            monthlyCtx.clearRect(0,0, document.getElementById('monthlyChart').width, document.getElementById('monthlyChart').height);
+            const donutCtx = document.getElementById('donutChart').getContext('2d');
+            donutCtx.clearRect(0,0, document.getElementById('donutChart').width, document.getElementById('donutChart').height);
+            return;
+        }
+
+        updateHealthScoreDisplay(pred.score);
+        if (monthlyChart) monthlyChart.destroy();
+        const months = Object.keys(summary.monthly).slice(-6);
+        monthlyChart = new Chart(document.getElementById('monthlyChart'), {
+            type: 'bar',
+            data: { labels: months, datasets: [
+                { label: 'Income', data: months.map(m => summary.monthly[m]?.income || 0), backgroundColor: 'rgba(0,210,130,0.6)', borderRadius: 8 },
+                { label: 'Expense', data: months.map(m => summary.monthly[m]?.expense || 0), backgroundColor: 'rgba(255,77,109,0.6)', borderRadius: 8 }
+            ]}
+        });
+        if (donutChart) donutChart.destroy();
+        const catData = pred.predictions.categories;
+        donutChart = new Chart(document.getElementById('donutChart'), { type: 'doughnut', data: { labels: Object.keys(catData), datasets: [{ data: Object.values(catData), backgroundColor: ['#00d282','#3b82f6','#f0a500','#a855f7','#ff4d6d'] }] }, options: { cutout: '65%' } });
+
+        const weeks = pred.predictions.weekly || {};
+        const maxVal = Object.values(weeks).length ? Math.max(...Object.values(weeks), 1) : 1;
+        document.getElementById('forecastBars').innerHTML = Object.entries(weeks).map(([w,v]) => `<div class="forecast-row"><span class="forecast-week">${w}</span><div class="forecast-bar-track"><div class="forecast-bar-fill" style="width:${(v/maxVal*100)}%"></div></div><span>${fmt(v)}</span></div>`).join('');
+        document.getElementById('adviceList').innerHTML = pred.advice.map(a => `<div class="advice-item"><strong>${a.cat}</strong>: ${a.msg}</div>`).join('');
+        addWasteAlert();
+        document.getElementById('recentList').innerHTML = allTransactions.slice(0,5).map(t => `<div style="padding:10px 0; border-bottom:1px solid var(--border2);"><strong>${t.category}</strong><br>${fmt(t.amount)}<br><small>${new Date(t.tx_date).toLocaleDateString()}</small></div>`).join('');
+        renderTransactions();
+        loadAnalytics();
+    } catch(e) { console.error(e); toast('Error loading data'); }
+}
+function renderTransactions() {
+    if(!currentUser) return;
+    document.getElementById('txTableBody').innerHTML = allTransactions.slice(0,50).map(t => `<tr><td>${new Date(t.tx_date).toLocaleDateString()}</td><td>${t.category}</td><td>${t.note||'—'}</td><td style="color:${t.tx_type==='income'?'#00d282':'#ff4d6d'}">${t.tx_type}</td><td>${fmt(t.amount)}</td></tr>`).join('');
+}
+async function loadAnalytics() {
+    if(!currentUser) return;
+    const pred = currentPrediction;
+    if(!pred.has_data) {
+        if(forecastChart) forecastChart.destroy();
+        if(catBarChart) catBarChart.destroy();
+        const fcCtx = document.getElementById('forecastChart').getContext('2d');
+        fcCtx.clearRect(0,0, document.getElementById('forecastChart').width, document.getElementById('forecastChart').height);
+        const catCtx = document.getElementById('catBarChart').getContext('2d');
+        catCtx.clearRect(0,0, document.getElementById('catBarChart').width, document.getElementById('catBarChart').height);
+        document.getElementById('fullAdvice').innerHTML = '<div class="advice-item">📊 Add transactions to see ML predictions and category breakdown.</div>';
+        return;
+    }
+    if(forecastChart) forecastChart.destroy();
+    forecastChart = new Chart(document.getElementById('forecastChart'), { type: 'line', data: { labels: Object.keys(pred.predictions.weekly), datasets: [{ label: 'ML Predicted Spend', data: Object.values(pred.predictions.weekly), borderColor: '#00d282', tension: 0.3, fill: true, backgroundColor: 'rgba(0,210,130,0.1)' }] }, options: { responsive: true, plugins: { tooltip: { callbacks: { label: (ctx) => '₱' + ctx.raw.toLocaleString('en-PH') } } } } });
+    if(catBarChart) catBarChart.destroy();
+    catBarChart = new Chart(document.getElementById('catBarChart'), { type: 'bar', data: { labels: Object.keys(pred.predictions.categories), datasets: [{ label: 'Total Spent', data: Object.values(pred.predictions.categories), backgroundColor: '#3b82f6', borderRadius: 8 }] }, options: { indexAxis: 'y' } });
+    document.getElementById('fullAdvice').innerHTML = pred.advice.map(a => `<div class="advice-item"><strong>${a.cat}</strong><br>${a.msg}</div>`).join('');
+}
+async function loadBudgets() {
+    if(!currentUser) return;
+    const budgets = await apiFetch(`/api/budgets/${currentUser.id}`);
+    const limits = Object.fromEntries(budgets.map(b => [b.category, b.limit]));
+    const categories = ['Food & Dining', 'Transport', 'Groceries', 'Entertainment', 'Health'];
+    document.getElementById('budgetInputs').innerHTML = categories.map(cat => `<div><label>${cat}</label><input type="number" id="budget_${cat.replace(/\s/g,'')}" value="${limits[cat]||''}" placeholder="Limit" style="width:100%"></div>`).join('');
+    document.getElementById('saveBudgetsBtn').onclick = async () => {
+        for(const cat of categories) {
+            const val = parseFloat(document.getElementById(`budget_${cat.replace(/\s/g,'')}`).value);
+            if(val && val>0) await apiFetch(`/api/budgets/${currentUser.id}`, { method: 'POST', body: JSON.stringify({ category: cat, limit: val }) });
+        }
+        toast('Budgets saved!');
+        await loadDashboard();
+    };
+}
+// Chatbot
+document.getElementById('sendChatBtn').addEventListener('click', async () => {
+    const input = document.getElementById('chatInput');
+    const msg = input.value.trim();
+    if(!msg) return;
+    input.value = '';
+    const container = document.getElementById('chatMessages');
+    container.innerHTML += `<div class="message user-message">${msg}</div>`;
+    container.scrollTop = container.scrollHeight;
+    try {
+        const response = await apiFetch('/api/chatbot', { method: 'POST', body: JSON.stringify({ message: msg }) });
+        container.innerHTML += `<div class="message bot-message">${response.response}</div>`;
+    } catch(e) { container.innerHTML += `<div class="message bot-message">Sorry, error.</div>`; }
+    container.scrollTop = container.scrollHeight;
+});
+document.getElementById('chatInput').addEventListener('keypress', (e) => { if(e.key==='Enter') document.getElementById('sendChatBtn').click(); });
+// Navigation & events
+document.querySelectorAll('.nav-item').forEach(btn => btn.addEventListener('click', () => { const screen = btn.getAttribute('data-nav'); if(screen) navigate(screen); }));
+function navigate(screenId) {
+    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+    document.getElementById(`screen-${screenId}`).classList.add('active');
+    document.querySelectorAll('.nav-item').forEach(btn => btn.classList.remove('active'));
+    const activeBtn = Array.from(document.querySelectorAll('.nav-item')).find(btn => btn.getAttribute('data-nav') === screenId);
+    if(activeBtn) activeBtn.classList.add('active');
+    const titles = { dashboard:'Dashboard', add:'Add Transaction', analytics:'Analytics', budgets:'Budgets', transactions:'History' };
+    document.getElementById('pageTitle').innerText = titles[screenId]||'SmartSpend';
+    if(screenId === 'analytics') loadAnalytics();
+    if(screenId === 'budgets') loadBudgets();
+    if(screenId === 'transactions') renderTransactions();
+}
+document.getElementById('btnExp').addEventListener('click', () => { document.getElementById('txType').value = 'expense'; document.getElementById('btnExp').style.opacity='1'; document.getElementById('btnInc').style.opacity='0.5'; });
+document.getElementById('btnInc').addEventListener('click', () => { document.getElementById('txType').value = 'income'; document.getElementById('btnInc').style.opacity='1'; document.getElementById('btnExp').style.opacity='0.5'; });
+document.getElementById('txForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const data = { amount: parseFloat(document.getElementById('txAmount').value), category: document.getElementById('txCategory').value, tx_type: document.getElementById('txType').value, note: document.getElementById('txNote').value };
+    try { await apiFetch('/api/transactions', { method:'POST', body: JSON.stringify(data) }); toast('Transaction saved!'); document.getElementById('txForm').reset(); await loadDashboard(); } catch(e) { toast('Error'); }
+});
+document.getElementById('signoutBtn').addEventListener('click', logout);
+document.getElementById('toggleAuthLink').addEventListener('click', toggleAuthMode);
+document.getElementById('authBtn').addEventListener('click', handleAuth);
+document.getElementById('closeChatBtn').addEventListener('click', () => { document.getElementById('chatContainer').style.display = 'none'; });
 function toggleAuthMode() {
     isLogin = !isLogin;
     document.getElementById('authTitle').innerText = isLogin ? 'Welcome back' : 'Create Account';
@@ -350,312 +400,59 @@ function toggleAuthMode() {
     document.getElementById('toggleAuthLink').innerHTML = isLogin ? "Don't have an account? Register" : "Already have an account? Sign In";
     document.getElementById('authMsg').innerHTML = '';
 }
-
 async function handleAuth() {
     const email = document.getElementById('authEmail').value;
     const pass = document.getElementById('authPass').value;
     const msgDiv = document.getElementById('authMsg');
-    if (!email || !pass) { msgDiv.innerText = 'Email and password required'; return; }
-
-    if (!isLogin) {
+    if(!email || !pass) { msgDiv.innerText = 'Email and password required'; return; }
+    if(!isLogin) {
         const name = document.getElementById('regName').value;
         const confirm = document.getElementById('authConfirm').value;
         const terms = document.getElementById('termsCheck').checked;
-        if (!name) { msgDiv.innerText = 'Full name required'; return; }
-        if (pass !== confirm) { msgDiv.innerText = 'Passwords do not match'; return; }
-        if (!terms) { msgDiv.innerText = 'Accept terms'; return; }
-        if (pass.length < 8) { msgDiv.innerText = 'Password must be at least 8 characters'; return; }
+        if(!name) { msgDiv.innerText = 'Full name required'; return; }
+        if(pass !== confirm) { msgDiv.innerText = 'Passwords do not match'; return; }
+        if(!terms) { msgDiv.innerText = 'Accept terms'; return; }
+        if(pass.length < 8) { msgDiv.innerText = 'Password must be at least 8 characters'; return; }
         try {
-            const res = await fetch('/api/register', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name, email, password: pass, accepted_terms: true }),
-                credentials: 'include'
-            });
+            const res = await fetch('/api/register', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ name, email, password: pass, accepted_terms: true }), credentials:'include' });
             const data = await res.json();
-            if (!res.ok) throw new Error(data.error);
+            if(!res.ok) throw new Error(data.error);
             msgDiv.style.color = '#00d282';
             msgDiv.innerText = 'Account created! Please login.';
             setTimeout(() => toggleAuthMode(), 1500);
-        } catch (e) { msgDiv.innerText = e.message; }
+        } catch(e) { msgDiv.innerText = e.message; }
         return;
     }
-
     try {
-        const res = await fetch('/api/login', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ email, password: pass }),
-            credentials: 'include'
-        });
+        const res = await fetch('/api/login', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ email, password: pass }), credentials:'include' });
         const data = await res.json();
-        if (!res.ok) throw new Error(data.error);
+        if(!res.ok) throw new Error(data.error);
         currentUser = data.user;
         document.getElementById('authOverlay').style.display = 'none';
-        document.getElementById('userAvatar').innerText = currentUser.name.slice(0, 2).toUpperCase();
+        document.getElementById('userAvatar').innerText = currentUser.name.slice(0,2).toUpperCase();
         await loadDashboard();
         navigate('dashboard');
-    } catch (e) { msgDiv.innerText = e.message; }
+    } catch(e) { msgDiv.innerText = e.message; }
 }
-
 async function logout() {
-    await fetch('/api/logout', { method: 'POST', credentials: 'include' });
+    await fetch('/api/logout', { method:'POST', credentials:'include' });
     currentUser = null;
     document.getElementById('authOverlay').style.display = 'flex';
     document.getElementById('userAvatar').innerText = 'US';
     location.reload();
 }
-
-// ========== NAVIGATION ==========
-function navigate(screenId) {
-    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
-    document.getElementById(`screen-${screenId}`).classList.add('active');
-    document.querySelectorAll('.nav-item').forEach(btn => btn.classList.remove('active'));
-    const activeBtn = Array.from(document.querySelectorAll('.nav-item')).find(btn => btn.getAttribute('data-nav') === screenId);
-    if (activeBtn) activeBtn.classList.add('active');
-    const titles = { dashboard: 'Dashboard', add: 'Add Transaction', analytics: 'Analytics', budgets: 'Budgets', transactions: 'History' };
-    document.getElementById('pageTitle').innerText = titles[screenId] || 'SmartSpend';
-    if (screenId === 'analytics') loadAnalytics();
-    if (screenId === 'budgets') loadBudgets();
-    if (screenId === 'transactions') renderTransactions();
-}
-
-// ========== DASHBOARD ==========
-async function loadDashboard() {
-    if (!currentUser) return;
-    try {
-        const summary = await apiFetch(`/api/summary/${currentUser.id}`);
-        const pred = await apiFetch(`/api/predict/${currentUser.id}`);
-        allTransactions = await apiFetch(`/api/transactions?user_id=${currentUser.id}`);
-        currentSummary = summary;
-        currentPrediction = pred;
-        
-        document.getElementById('sBalance').innerText = fmt(summary.balance);
-        document.getElementById('sExpense').innerText = fmt(summary.expense);
-        document.getElementById('sIncome').innerText = fmt(summary.income);
-        
-        // Update health score with color
-        updateHealthScoreDisplay(pred.score);
-        
-        if (monthlyChart) monthlyChart.destroy();
-        const months = Object.keys(summary.monthly).slice(-6);
-        monthlyChart = new Chart(document.getElementById('monthlyChart'), { 
-            type: 'bar', 
-            data: { 
-                labels: months, 
-                datasets: [
-                    { label: 'Income', data: months.map(m => summary.monthly[m]?.income || 0), backgroundColor: 'rgba(0,210,130,0.6)', borderRadius: 8 },
-                    { label: 'Expense', data: months.map(m => summary.monthly[m]?.expense || 0), backgroundColor: 'rgba(255,77,109,0.6)', borderRadius: 8 }
-                ]
-            }
-        });
-        
-        if (donutChart) donutChart.destroy();
-        const catData = pred.predictions.categories;
-        donutChart = new Chart(document.getElementById('donutChart'), { 
-            type: 'doughnut', 
-            data: { 
-                labels: Object.keys(catData), 
-                datasets: [{ data: Object.values(catData), backgroundColor: ['#00d282', '#3b82f6', '#f0a500', '#a855f7', '#ff4d6d'] }]
-            }, 
-            options: { cutout: '65%' } 
-        });
-        
-        // Forecast bars
-        const weeks = pred.predictions.weekly;
-        const maxVal = Math.max(...Object.values(weeks), 1);
-        document.getElementById('forecastBars').innerHTML = Object.entries(weeks).map(([w,v]) => 
-            `<div class="forecast-row">
-                <span class="forecast-week">${w}</span>
-                <div class="forecast-bar-track">
-                    <div class="forecast-bar-fill" style="width:${(v/maxVal*100)}%"></div>
-                </div>
-                <span>${fmt(v)}</span>
-            </div>`
-        ).join('');
-        
-        document.getElementById('adviceList').innerHTML = pred.advice.map(a => 
-            `<div class="advice-item"><strong>${a.cat}</strong>: ${a.msg}</div>`
-        ).join('');
-        
-        // Add waste alert if needed
-        addWasteAlert();
-        
-        document.getElementById('recentList').innerHTML = allTransactions.slice(0, 5).map(t => 
-            `<div style="padding:10px 0; border-bottom:1px solid var(--border2);">
-                <strong>${t.category}</strong><br>${fmt(t.amount)}<br>
-                <small>${new Date(t.tx_date).toLocaleDateString()}</small>
-            </div>`
-        ).join('');
-        
-        renderTransactions();
-        loadAnalytics();
-    } catch (e) { console.error(e); toast('Error loading data'); }
-}
-
-async function renderTransactions() {
-    if (!currentUser) return;
-    document.getElementById('txTableBody').innerHTML = allTransactions.slice(0, 50).map(t => `
-        <tr>
-            <td>${new Date(t.tx_date).toLocaleDateString()}</td>
-            <td>${t.category}</td>
-            <td>${t.note || '—'}</td>
-            <td style="color: ${t.tx_type === 'income' ? '#00d282' : '#ff4d6d'}">${t.tx_type}</td>
-            <td>${fmt(t.amount)}</td>
-        </tr>
-    `).join('');
-}
-
-async function loadAnalytics() {
-    if (!currentUser) return;
-    const pred = currentPrediction;
-    if (forecastChart) forecastChart.destroy();
-    forecastChart = new Chart(document.getElementById('forecastChart'), { 
-        type: 'line', 
-        data: { 
-            labels: Object.keys(pred.predictions.weekly), 
-            datasets: [{ 
-                label: 'ML Predicted Spend', 
-                data: Object.values(pred.predictions.weekly), 
-                borderColor: '#00d282', 
-                tension: 0.3, 
-                fill: true, 
-                backgroundColor: 'rgba(0,210,130,0.1)' 
-            }] 
-        } 
-    });
-    if (catBarChart) catBarChart.destroy();
-    catBarChart = new Chart(document.getElementById('catBarChart'), { 
-        type: 'bar', 
-        data: { 
-            labels: Object.keys(pred.predictions.categories), 
-            datasets: [{ 
-                label: 'Total Spent', 
-                data: Object.values(pred.predictions.categories), 
-                backgroundColor: '#3b82f6', 
-                borderRadius: 8 
-            }] 
-        }, 
-        options: { indexAxis: 'y' } 
-    });
-    document.getElementById('fullAdvice').innerHTML = pred.advice.map(a => 
-        `<div class="advice-item"><strong>${a.cat}</strong><br>${a.msg}</div>`
-    ).join('');
-}
-
-async function loadBudgets() {
-    if (!currentUser) return;
-    const budgets = await apiFetch(`/api/budgets/${currentUser.id}`);
-    const limits = Object.fromEntries(budgets.map(b => [b.category, b.limit]));
-    const categories = ['Food & Dining', 'Transport', 'Groceries', 'Entertainment', 'Health'];
-    document.getElementById('budgetInputs').innerHTML = categories.map(cat => `
-        <div>
-            <label>${cat}</label>
-            <input type="number" id="budget_${cat.replace(/\s/g, '')}" value="${limits[cat] || ''}" placeholder="Limit" style="width:100%">
-        </div>
-    `).join('');
-    
-    document.getElementById('saveBudgetsBtn').onclick = async () => {
-        for (const cat of categories) {
-            const val = parseFloat(document.getElementById(`budget_${cat.replace(/\s/g, '')}`).value);
-            if (val && val > 0) {
-                await apiFetch(`/api/budgets/${currentUser.id}`, {
-                    method: 'POST',
-                    body: JSON.stringify({ category: cat, limit: val })
-                });
-            }
-        }
-        toast('Budgets saved!');
-        await loadDashboard();
-    };
-}
-
-// ========== CHATBOT ==========
-document.getElementById('sendChatBtn').addEventListener('click', async () => {
-    const input = document.getElementById('chatInput');
-    const msg = input.value.trim();
-    if (!msg) return;
-    input.value = '';
-    const container = document.getElementById('chatMessages');
-    container.innerHTML += `<div class="message user-message">${msg}</div>`;
-    container.scrollTop = container.scrollHeight;
-    
-    try {
-        const response = await apiFetch('/api/chatbot', {
-            method: 'POST',
-            body: JSON.stringify({ message: msg })
-        });
-        container.innerHTML += `<div class="message bot-message">${response.response}</div>`;
-        container.scrollTop = container.scrollHeight;
-    } catch (e) {
-        container.innerHTML += `<div class="message bot-message">Sorry, I'm having trouble responding right now.</div>`;
-        container.scrollTop = container.scrollHeight;
-    }
-});
-
-document.getElementById('chatInput').addEventListener('keypress', (e) => {
-    if (e.key === 'Enter') document.getElementById('sendChatBtn').click();
-});
-
-// ========== EVENT LISTENERS ==========
-document.querySelectorAll('.nav-item').forEach(btn => {
-    btn.addEventListener('click', () => {
-        const screen = btn.getAttribute('data-nav');
-        if (screen) navigate(screen);
-    });
-});
-
-document.getElementById('btnExp').addEventListener('click', () => {
-    document.getElementById('txType').value = 'expense';
-    document.getElementById('btnExp').style.opacity = '1';
-    document.getElementById('btnInc').style.opacity = '0.5';
-});
-
-document.getElementById('btnInc').addEventListener('click', () => {
-    document.getElementById('txType').value = 'income';
-    document.getElementById('btnInc').style.opacity = '1';
-    document.getElementById('btnExp').style.opacity = '0.5';
-});
-
-document.getElementById('txForm').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const data = {
-        amount: parseFloat(document.getElementById('txAmount').value),
-        category: document.getElementById('txCategory').value,
-        tx_type: document.getElementById('txType').value,
-        note: document.getElementById('txNote').value
-    };
-    try {
-        await apiFetch('/api/transactions', { method: 'POST', body: JSON.stringify(data) });
-        toast('Transaction saved!');
-        document.getElementById('txForm').reset();
-        await loadDashboard();
-    } catch (e) { toast('Error saving transaction'); }
-});
-
-document.getElementById('signoutBtn').addEventListener('click', logout);
-document.getElementById('toggleAuthLink').addEventListener('click', toggleAuthMode);
-document.getElementById('authBtn').addEventListener('click', handleAuth);
-document.getElementById('authEmail').addEventListener('keydown', (e) => { if (e.key === 'Enter') handleAuth(); });
-document.getElementById('authPass').addEventListener('keydown', (e) => { if (e.key === 'Enter') handleAuth(); });
-document.getElementById('closeChatBtn').addEventListener('click', () => {
-    document.getElementById('chatContainer').style.display = 'none';
-});
-
-// ========== INIT ==========
 async function init() {
     try {
-        const res = await fetch('/api/me', { credentials: 'include' });
-        if (res.ok) {
+        const res = await fetch('/api/me', { credentials:'include' });
+        if(res.ok) {
             const user = await res.json();
             currentUser = user;
             document.getElementById('authOverlay').style.display = 'none';
-            document.getElementById('userAvatar').innerText = user.name.slice(0, 2).toUpperCase();
+            document.getElementById('userAvatar').innerText = user.name.slice(0,2).toUpperCase();
             await loadDashboard();
         }
-    } catch (e) {
-        console.log('Not authenticated');
-    }
+    } catch(e) { console.log('Not authenticated'); }
 }
-
 init();
 </script>
 </body>
