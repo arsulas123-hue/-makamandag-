@@ -11,8 +11,8 @@ CORS(app, supports_credentials=True)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', secrets.token_hex(32))
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SECURE'] = True   # for HTTPS
 
-# Your PostgreSQL URL
 DATABASE_URL = "postgresql://makamandag_db_user:zcDibuXdlpEpcZNGEYLc9nqpgWwuTTfO@dpg-d7od7md7vvec739acfj0-a/makamandag_db"
 app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
@@ -122,19 +122,16 @@ def admin_required(f):
         return f(*args, **kwargs)
     return decorated
 
-# ---------- ML Functions (full working versions) ----------
+# ---------- ML Functions (full) ----------
 def forecast_spending(user_id, transactions, weeks=4):
     try:
-        # Get past average error from forecast_logs
         past = ForecastLog.query.filter_by(user_id=user_id).filter(ForecastLog.actual_amount != None).all()
         avg_error = np.mean([f.error for f in past]) if past else 0
-
         expenses = [t for t in transactions if t.tx_type == 'expense']
         if len(expenses) < 3:
             avg = np.mean([t.amount for t in expenses]) if expenses else 2000
             base = {f'Week {i+1}': round(avg * (0.9 + 0.2 * np.random.random())) for i in range(weeks)}
         else:
-            # Build weekly totals
             expenses_sorted = sorted(expenses, key=lambda x: x.tx_date)
             weekly = []
             current_week = expenses_sorted[0].tx_date.isocalendar()[1]
@@ -162,10 +159,7 @@ def forecast_spending(user_id, transactions, weeks=4):
             else:
                 avg = np.mean(weekly) if weekly else 2000
                 base = {f'Week {i+1}': round(avg) for i in range(weeks)}
-
         adjusted = {w: max(0, round(v + avg_error)) for w, v in base.items()}
-
-        # Store forecast for future correction
         today = datetime.date.today()
         for i, (week, amount) in enumerate(adjusted.items()):
             week_start = today + datetime.timedelta(days=7*i)
@@ -226,7 +220,6 @@ def generate_advice(user_id, transactions, budgets):
         else:
             if spent > 5000:
                 advice.append({'cat': cat, 'spent': spent, 'limit': None, 'pct': 0, 'status': 'warning', 'msg': f'high spending (₱{spent:,.2f}) - consider budget'})
-    # Prioritize categories user found helpful
     helpful = AdviceFeedback.query.filter_by(user_id=user_id, helpful=True).all()
     helpful_cats = set(fb.category for fb in helpful if fb.category)
     advice.sort(key=lambda x: (x['cat'] not in helpful_cats, x['status'] != 'over'), reverse=False)
@@ -350,7 +343,6 @@ def summary(user_id):
             monthly[key]['income'] += t.amount
         else:
             monthly[key]['expense'] += t.amount
-    # sort months descending, keep last 6
     sorted_months = sorted(monthly.items(), reverse=True)[:6]
     monthly_result = {k: v for k, v in sorted_months}
     return jsonify({'balance': total_income - total_expense, 'income': total_income, 'expense': total_expense, 'monthly': monthly_result})
