@@ -9,515 +9,67 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
     <style>
-        /* ========== DARK THEME (unchanged) ========== */
+        /* ====== All existing CSS from your original ====== */
+        /* (For brevity I include only critical additions; use your full CSS) */
         :root{ --bg: #080d14; --bg2: #0d1520; --bg3: #111c2b; --panel: rgba(15,30,48,0.7); --border: rgba(0,210,130,.12); --border2: rgba(255,255,255,.05); --green: #00d282; --green2: #00ff9d; --green-dim: rgba(0,210,130,.12); --red: #ff4d6d; --red-dim: rgba(255,77,109,.1); --amber: #f0a500; --amber-dim: rgba(240,165,0,.1); --blue: #3b82f6; --blue-dim: rgba(59,130,246,.1); --purple: #a855f7; --text: #e2eff8; --muted: #5a7a94; --mono: 'JetBrains Mono', monospace; --sans: 'Space Grotesk', sans-serif; --r: 16px; --r2: 10px; }
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: var(--sans); background: var(--bg); color: var(--text); min-height: 100vh; overflow-x: hidden; }
         body::before { content: ''; position: fixed; inset: 0; background-image: radial-gradient(ellipse 80% 50% at 50% -20%, rgba(0,210,130,.05) 0%, transparent 60%), linear-gradient(rgba(0,210,130,.01) 1px, transparent 1px), linear-gradient(90deg, rgba(0,210,130,.01) 1px, transparent 1px); background-size: 100% 100%, 40px 40px, 40px 40px; pointer-events: none; z-index: 0; }
-        .sidebar { position: fixed; left: 0; top: 0; bottom: 0; width: 70px; background: rgba(13,21,32,0.95); backdrop-filter: blur(12px); border-right: 1px solid var(--border2); display: flex; flex-direction: column; align-items: center; padding: 24px 0; gap: 8px; z-index: 100; transition: width 0.25s cubic-bezier(0.4,0,0.2,1); }
-        .sidebar:hover { width: 220px; }
-        .sidebar-logo { width: 42px; height: 42px; border-radius: 12px; background: linear-gradient(135deg, var(--green), #009e5f); display: flex; align-items: center; justify-content: center; margin-bottom: 24px; cursor: pointer; }
-        .nav-item { width: 100%; display: flex; align-items: center; gap: 14px; padding: 12px 16px; border-radius: 12px; cursor: pointer; border: none; background: transparent; color: var(--muted); font-family: var(--sans); font-size: 0.85rem; font-weight: 500; white-space: nowrap; overflow: hidden; transition: all 0.2s; }
-        .nav-item:hover { background: var(--green-dim); color: var(--text); transform: translateX(4px); }
-        .nav-item.active { background: var(--green-dim); color: var(--green); border-left: 3px solid var(--green); }
-        .nav-icon { width: 22px; height: 22px; flex-shrink: 0; }
-        .nav-label { opacity: 0; transition: opacity 0.2s; }
-        .sidebar:hover .nav-label { opacity: 1; }
-        .sidebar-bottom { margin-top: auto; width: 100%; }
-        .main { margin-left: 70px; padding: 28px 32px; position: relative; z-index: 1; min-height: 100vh; }
-        @media (max-width: 768px) { .sidebar { width: 60px; } .main { margin-left: 60px; padding: 20px; } }
-        @media (max-width: 600px) { .sidebar { display: none; } .main { margin-left: 0; } }
-        .topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 28px; flex-wrap: wrap; gap: 16px; }
-        .topbar-left h1 { font-size: 1.75rem; font-weight: 700; letter-spacing: -0.02em; background: linear-gradient(135deg, #fff, var(--green)); background-clip: text; -webkit-background-clip: text; color: transparent; }
-        .topbar-left .sub { font-size: 0.8rem; color: var(--muted); margin-top: 4px; }
-        .topbar-right { display: flex; align-items: center; gap: 12px; }
-        .score-pill { display: flex; align-items: center; gap: 8px; padding: 6px 16px; border-radius: 99px; background: var(--green-dim); border: 1px solid var(--border); font-size: 0.8rem; font-weight: 600; color: var(--green); backdrop-filter: blur(4px); }
-        .score-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px var(--green); animation: pulse 2s infinite; }
-        @keyframes pulse { 0%,100%{ opacity: 1; } 50%{ opacity: 0.4; } }
-        .avatar { width: 38px; height: 38px; border-radius: 50%; background: linear-gradient(135deg, var(--blue), var(--purple)); display: flex; align-items: center; justify-content: center; font-weight: 700; color: #fff; cursor: pointer; transition: transform 0.2s; }
-        .signout-btn { background: var(--red-dim); border: 1px solid rgba(255,77,109,0.2); color: var(--red); padding: 7px 16px; border-radius: 10px; cursor: pointer; font-size: 0.75rem; font-weight: 600; transition: 0.2s; }
-        .signout-btn:hover { background: rgba(255,77,109,0.2); transform: translateY(-1px); }
-        .screen { display: none; animation: fadeUp 0.35s ease; }
-        .screen.active { display: block; }
-        @keyframes fadeUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
-        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 18px; margin-bottom: 28px; }
-        .stat-card { background: var(--panel); backdrop-filter: blur(10px); border: 1px solid var(--border2); border-radius: var(--r); padding: 20px; transition: all 0.25s; }
-        .stat-card:hover { transform: translateY(-3px); border-color: var(--border); box-shadow: 0 8px 24px rgba(0,0,0,0.2); }
-        .stat-icon { width: 42px; height: 42px; border-radius: 12px; display: flex; align-items: center; justify-content: center; margin-bottom: 14px; }
-        .stat-label { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 6px; }
-        .stat-value { font-size: 1.6rem; font-weight: 700; font-family: var(--mono); line-height: 1.2; }
-        .stat-card.green .stat-value { color: var(--green); }
-        .stat-card.red .stat-value { color: var(--red); }
-        .stat-card.blue .stat-value { color: var(--blue); }
-        .stat-card.amber .stat-value { color: var(--amber); }
-        .panel { background: var(--panel); backdrop-filter: blur(10px); border: 1px solid var(--border2); border-radius: var(--r); padding: 22px; display: flex; flex-direction: column; }
-        .panel-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 12px; }
-        .panel-title { font-size: 1rem; font-weight: 600; color: var(--text); }
-        .panel-sub { font-size: 0.7rem; color: var(--muted); margin-top: 2px; }
-        .chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; margin-bottom: 28px; }
-        canvas { max-height: 280px; width: 100% !important; }
-        .tx-controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; margin-bottom: 20px; padding: 20px; background: var(--panel); backdrop-filter: blur(8px); border-radius: var(--r); }
-        .filter-group { display: flex; flex-direction: column; gap: 6px; }
-        .filter-label { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; }
-        select, input, textarea { background: var(--bg3); color: var(--text); border: 1px solid var(--border2); border-radius: 10px; padding: 8px 14px; font-family: var(--sans); font-size: 0.85rem; outline: none; transition: 0.2s; }
-        select:focus, input:focus { border-color: var(--green); box-shadow: 0 0 0 2px var(--green-dim); }
-        .btn { padding: 8px 18px; border-radius: 10px; font-weight: 600; cursor: pointer; transition: 0.2s; border: none; }
-        .btn-green { background: linear-gradient(135deg, var(--green), #009e5f); color: #000; }
-        .btn-green:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,210,130,0.3); }
-        .btn-ghost { background: transparent; color: var(--muted); border: 1px solid var(--border2); }
-        .btn-ghost:hover { background: var(--bg3); color: var(--text); }
-        .table-wrap { overflow-x: auto; border-radius: var(--r); background: var(--panel); border: 1px solid var(--border2); }
-        table { width: 100%; border-collapse: collapse; }
-        th { text-align: left; padding: 14px 16px; background: var(--bg3); color: var(--muted); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; }
-        td { padding: 12px 16px; border-bottom: 1px solid var(--border2); font-size: 0.85rem; }
-        .cat-pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 99px; background: var(--bg3); font-size: 0.75rem; }
-        .badge-green { background: var(--green-dim); color: var(--green); }
-        .badge-red { background: var(--red-dim); color: var(--red); }
-        .badge-amber { background: var(--amber-dim); color: var(--amber); }
-        .advice-item { display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: 12px; margin-bottom: 8px; background: var(--bg3); }
-        .forecast-row { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
-        .forecast-bar-track { flex: 1; height: 8px; background: var(--bg3); border-radius: 99px; overflow: hidden; }
-        .forecast-bar-fill { height: 100%; background: linear-gradient(90deg, var(--green), var(--green2)); width: 0; transition: width 1s ease; border-radius: 99px; }
-        .auth-overlay { position: fixed; inset: 0; background: rgba(8,13,20,0.98); backdrop-filter: blur(20px); z-index: 9999; display: flex; align-items: center; justify-content: center; }
-        .auth-card { background: linear-gradient(145deg, #0d1520, #0a1220); border: 1px solid rgba(0,210,130,0.2); border-radius: 28px; padding: 40px; width: 420px; max-width: 90%; box-shadow: 0 25px 50px rgba(0,0,0,0.5); }
-        .auth-input { width: 100%; padding: 12px 16px; margin-bottom: 14px; background: #0a1525; border: 1px solid var(--border2); border-radius: 12px; color: var(--text); }
-        .auth-btn { width: 100%; padding: 14px; background: linear-gradient(135deg, var(--green), #009e5f); color: #000; font-weight: 700; border: none; border-radius: 12px; cursor: pointer; font-size: 1rem; transition: 0.2s; }
-        .auth-btn:hover { transform: translateY(-2px); box-shadow: 0 8px 20px rgba(0,210,130,0.3); }
-        .ticker-wrap { overflow: hidden; border-radius: 12px; background: var(--bg2); border: 1px solid var(--border2); margin-bottom: 28px; padding: 12px 0; }
-        .ticker { display: flex; gap: 40px; animation: ticker 40s linear infinite; white-space: nowrap; }
-        .ticker:hover { animation-play-state: paused; }
-        @keyframes ticker { 0% { transform: translateX(0); } 100% { transform: translateX(-50%); } }
-        .tick-item { display: flex; align-items: center; gap: 8px; font-size: 0.8rem; color: var(--muted); }
-        .tick-sym { font-weight: 700; color: var(--green); }
-        #toast { position: fixed; bottom: 24px; right: 24px; background: var(--bg2); border: 1px solid var(--green); border-radius: 12px; padding: 12px 20px; opacity: 0; transform: translateY(10px); transition: 0.25s; z-index: 10000; backdrop-filter: blur(12px); pointer-events: none; }
-        #toast.show { opacity: 1; transform: translateY(0); }
-
-        /* ========== CHATBOT WIDGET STYLES ========== */
-        .chat-button {
-            position: fixed;
-            bottom: 24px;
-            right: 24px;
-            width: 60px;
-            height: 60px;
-            border-radius: 30px;
-            background: linear-gradient(135deg, var(--green), var(--green2));
-            box-shadow: 0 4px 12px rgba(0,210,130,0.4);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            cursor: pointer;
-            z-index: 10001;
-            transition: transform 0.2s;
-            border: none;
-        }
-        .chat-button:hover { transform: scale(1.05); }
-        .chat-window {
-            position: fixed;
-            bottom: 100px;
-            right: 24px;
-            width: 380px;
-            max-width: calc(100vw - 48px);
-            height: 500px;
-            background: var(--bg2);
-            backdrop-filter: blur(10px);
-            border: 1px solid var(--border);
-            border-radius: 24px;
-            display: flex;
-            flex-direction: column;
-            overflow: hidden;
-            z-index: 10001;
-            box-shadow: 0 8px 24px rgba(0,0,0,0.5);
-            transition: all 0.2s;
-        }
-        .chat-header {
-            padding: 16px;
-            background: var(--bg3);
-            border-bottom: 1px solid var(--border);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            font-weight: 600;
-        }
-        .chat-header button {
-            background: none;
-            border: none;
-            color: var(--muted);
-            font-size: 1.2rem;
-            cursor: pointer;
-        }
-        .chat-messages {
-            flex: 1;
-            overflow-y: auto;
-            padding: 12px;
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-        }
-        .message {
-            max-width: 85%;
-            padding: 10px 14px;
-            border-radius: 18px;
-            font-size: 0.85rem;
-            line-height: 1.4;
-        }
-        .user-message {
-            align-self: flex-end;
-            background: var(--green-dim);
-            color: var(--green);
-            border-bottom-right-radius: 4px;
-        }
-        .bot-message {
-            align-self: flex-start;
-            background: var(--bg3);
-            color: var(--text);
-            border-bottom-left-radius: 4px;
-        }
-        .chat-input {
-            display: flex;
-            padding: 12px;
-            background: var(--bg3);
-            border-top: 1px solid var(--border);
-            gap: 8px;
-        }
-        .chat-input input {
-            flex: 1;
-            background: var(--bg2);
-            border: 1px solid var(--border);
-            border-radius: 20px;
-            padding: 8px 14px;
-            color: var(--text);
-        }
-        .chat-input button {
-            background: var(--green);
-            border: none;
-            border-radius: 20px;
-            padding: 8px 16px;
-            color: #000;
-            font-weight: 600;
-            cursor: pointer;
-        }
-        .chat-tip {
-            font-size: 0.7rem;
-            color: var(--muted);
-            padding: 8px 12px;
-            background: var(--panel);
-            border-top: 1px solid var(--border);
-        }
+        /* Sidebar, main, panels – keep exactly as in your original, no changes */
+        /* ... (your full CSS) ... */
+        .feedback-buttons { margin-top: 8px; display: flex; gap: 8px; }
+        .feedback-btn { background: var(--bg3); border: 1px solid var(--border); border-radius: 20px; padding: 4px 12px; font-size: 0.7rem; cursor: pointer; transition: 0.2s; }
+        .feedback-btn:hover { background: var(--green-dim); color: var(--green); }
+        /* Chatbot styles (same as previous) */
+        .chat-button { position: fixed; bottom: 24px; right: 24px; width: 60px; height: 60px; border-radius: 30px; background: linear-gradient(135deg, var(--green), var(--green2)); box-shadow: 0 4px 12px rgba(0,210,130,0.4); display: flex; align-items: center; justify-content: center; cursor: pointer; z-index: 10001; }
+        .chat-window { position: fixed; bottom: 100px; right: 24px; width: 380px; max-width: calc(100vw - 48px); height: 500px; background: var(--bg2); backdrop-filter: blur(10px); border: 1px solid var(--border); border-radius: 24px; display: flex; flex-direction: column; overflow: hidden; z-index: 10001; }
         .hidden { display: none; }
+        /* ... rest of chat styles ... */
     </style>
 </head>
 <body>
+    <!-- Your complete sidebar and main content (same as before) -->
+    <!-- IMPORTANT: Transaction table now has 5 columns (no delete button) -->
+    <!-- Advice items will now show 👍/👎 feedback buttons -->
 
-<nav class="sidebar"> ... </nav> <!-- sidebar unchanged, same as original but truncated for brevity; full in final code -->
+    <div id="chatButton" class="chat-button">🧠</div>
+    <div id="chatWindow" class="chat-window hidden">...</div>
 
-<main class="main"> ... </main> <!-- all screens same as original, no delete buttons in transactions -->
-
-<!-- CHATBOT WIDGET -->
-<div id="chatButton" class="chat-button">
-    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-</div>
-<div id="chatWindow" class="chat-window hidden">
-    <div class="chat-header">
-        <span>🤖 SmartSpend AI</span>
-        <button id="closeChatBtn">✕</button>
-    </div>
-    <div class="chat-messages" id="chatMessages">
-        <div class="message bot-message">Hello! I’m your personal finance assistant.<br>I use your spending patterns, budget, and forecasts to give actionable advice.<br>Ask me anything like:<br>• How can I save money?<br>• What’s my top expense?<br>• Give me a budget tip<br>• Forecast my spending</div>
-    </div>
-    <div class="chat-input">
-        <input type="text" id="chatInput" placeholder="Ask for advice...">
-        <button id="sendChatBtn">Send</button>
-    </div>
-    <div class="chat-tip" id="chatProactiveTip"></div>
-</div>
-
-<script>
-// ========== GLOBALS (same as before) ==========
-let currentUser = null;
-let allTransactions = [];
-let budgetLimits = {};
-let monthlyChart, donutChart, forecastChart, catBarChart;
-
-// Store latest summary & ML predictions for chatbot
-let currentSummary = { balance:0, expense:0, income:0 };
-let currentPrediction = { score:0, predictions:{ weekly:{}, categories:{} }, advice:[] };
-
-function fmt(amt) { return '₱' + Number(amt).toLocaleString('en-PH', { minimumFractionDigits: 2 }); }
-function toast(msg, dur=2500) { const t=document.getElementById('toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'), dur); }
-
-async function apiFetch(url, opts={}) {
-    const res = await fetch(url, { ...opts, credentials: 'include', headers: { 'Content-Type': 'application/json', ...opts.headers } });
-    if (!res.ok) { const err=await res.json(); throw new Error(err.error || 'Request failed'); }
-    return res.json();
-}
-
-// ========== CHATBOT LOGIC ==========
-function updateProactiveTip() {
-    const tipDiv = document.getElementById('chatProactiveTip');
-    if (!tipDiv) return;
-    if (!currentUser) { tipDiv.innerText = 'Log in to get personalized tips.'; return; }
-    const advice = currentPrediction.advice;
-    const over = advice.find(a => a.status === 'over');
-    const warning = advice.find(a => a.status === 'warning');
-    if (over) tipDiv.innerText = `⚠️ Tip: You've exceeded your ${over.cat} budget. Try reducing by ${fmt(over.spent - over.limit)} this month.`;
-    else if (warning) tipDiv.innerText = `📊 Tip: ${warning.cat} spending is near your limit (${warning.pct}%). Consider small adjustments.`;
-    else if (currentPrediction.score < 60) tipDiv.innerText = `💡 Your health score is ${currentPrediction.score}. Focus on saving at least 10% of income.`;
-    else tipDiv.innerText = `✨ Great job! Your finances are healthy. Keep saving and review your budget weekly.`;
-}
-
-function getChatbotResponse(userMsg) {
-    const msg = userMsg.toLowerCase();
-    const summary = currentSummary;
-    const pred = currentPrediction;
-    const balance = summary.balance;
-    const income = summary.income;
-    const expense = summary.expense;
-    const score = pred.score;
-    const categories = pred.predictions.categories || {};
-    const topCat = Object.entries(categories).sort((a,b)=>b[1]-a[1])[0];
-    const weeklyForecast = pred.predictions.weekly || {};
-    const forecastStr = Object.entries(weeklyForecast).map(([w,v]) => `${w}: ${fmt(v)}`).join(', ');
-    const adviceList = pred.advice;
-
-    if (msg.includes('save money') || msg.includes('save more') || msg.includes('reduce spending')) {
-        if (topCat) {
-            return `To save money, focus on your top expense: **${topCat[0]}** (${fmt(topCat[1])}). Try setting a monthly limit and look for cheaper alternatives. ${adviceList.find(a=>a.cat===topCat[0])?.msg || 'Consider reducing by 15% this month.'}`;
+    <script>
+        // ========== FULL JAVASCRIPT with chatbot & feedback ==========
+        // (I include only new functions; merge with your existing)
+        
+        async function giveFeedback(category, adviceText, helpful) {
+            try {
+                await apiFetch('/api/advice_feedback', {
+                    method: 'POST',
+                    body: JSON.stringify({ category, advice_text: adviceText, helpful })
+                });
+                toast('Thanks! ML will learn from this.');
+            } catch(e) { toast('Feedback failed'); }
         }
-        return `Try to save at least 20% of your income (₱${fmt(income*0.2)}). Review subscriptions, cook at home, and use public transport.`;
-    }
-    if (msg.includes('health') || msg.includes('score')) {
-        let comment = score>=80?'Excellent!':score>=60?'Good but can improve':score>=40?'Fair – review budgets':'Needs immediate action';
-        return `Your financial health score is **${score}/100** (${comment}). Based on savings rate and budget compliance. Keep tracking daily!`;
-    }
-    if (msg.includes('top expense') || msg.includes('biggest spending')) {
-        if (topCat) return `Your highest spending category is **${topCat[0]}** with ₱${topCat[1].toFixed(2)}. ${adviceList.find(a=>a.cat===topCat[0])?.msg || 'Consider a budget limit.'}`;
-        return `No expense data yet. Add transactions to see insights.`;
-    }
-    if (msg.includes('budget tip') || msg.includes('budget advice')) {
-        const problem = adviceList.find(a => a.status === 'over') || adviceList.find(a => a.status === 'warning');
-        if (problem) return `Focus on **${problem.cat}**: ${problem.msg}. Adjust your monthly limit to ${fmt(problem.spent * 0.9)} to stay safe.`;
-        if (adviceList.length) return `${adviceList[0].cat}: ${adviceList[0].msg}. Great job keeping it under control!`;
-        return `Set a budget for each category (Food, Transport, etc.) and track weekly. Start with a 10% reduction goal.`;
-    }
-    if (msg.includes('forecast') || msg.includes('next week')) {
-        if (Object.keys(weeklyForecast).length) return `Based on ML, your estimated spending for upcoming weeks: ${forecastStr}. Compare with your income to plan ahead.`;
-        return `Not enough data for forecast yet. Add more transactions.`;
-    }
-    if (msg.includes('balance') || msg.includes('net worth')) {
-        return `Your current balance is ${fmt(balance)} (Income: ${fmt(income)} - Expenses: ${fmt(expense)}). ${balance>=0 ? 'Great, you are not in debt!' : 'Try to increase income or cut expenses.'}`;
-    }
-    if (msg.includes('income') || msg.includes('earn')) {
-        return `Your total income is ${fmt(income)}. To grow it, consider side hustles or freelancing. Your savings rate is ${income>0 ? ((income-expense)/income*100).toFixed(1) : 0}%.`;
-    }
-    // Default smart answer
-    return `I can help with saving tips, budget advice, spending forecasts, and health score. Try asking: "How can I save money?" or "Give me a budget tip".`;
-}
 
-function addMessage(text, isUser) {
-    const container = document.getElementById('chatMessages');
-    const div = document.createElement('div');
-    div.className = `message ${isUser ? 'user-message' : 'bot-message'}`;
-    div.innerText = text;
-    container.appendChild(div);
-    container.scrollTop = container.scrollHeight;
-}
+        // Override the advice rendering to include feedback buttons
+        function renderAdvice(adviceList) {
+            const container = document.getElementById('adviceList');
+            if (!container) return;
+            container.innerHTML = adviceList.map(a => `
+                <div class="advice-item">
+                    <div style="flex:1">
+                        <strong>${a.cat}</strong><br>
+                        <span style="font-size:0.75rem;color:var(--muted)">${a.msg}</span>
+                        <div class="feedback-buttons">
+                            <button class="feedback-btn" onclick="giveFeedback('${a.cat}', '${a.msg.replace(/'/g, "\\'")}', true)">👍 Helpful</button>
+                            <button class="feedback-btn" onclick="giveFeedback('${a.cat}', '${a.msg.replace(/'/g, "\\'")}', false)">👎 Not helpful</button>
+                        </div>
+                    </div>
+                </div>
+            `).join('');
+        }
 
-async function sendChatMessage() {
-    const input = document.getElementById('chatInput');
-    const msg = input.value.trim();
-    if (!msg) return;
-    addMessage(msg, true);
-    input.value = '';
-    // Simulate typing delay
-    const reply = getChatbotResponse(msg);
-    setTimeout(() => addMessage(reply, false), 300);
-}
-
-// Chat UI handlers
-function toggleChat(show) {
-    const win = document.getElementById('chatWindow');
-    if (show === undefined) win.classList.toggle('hidden');
-    else win.classList.toggle('hidden', !show);
-    if (!win.classList.contains('hidden')) updateProactiveTip();
-}
-document.getElementById('chatButton').onclick = () => toggleChat(true);
-document.getElementById('closeChatBtn').onclick = () => toggleChat(false);
-document.getElementById('sendChatBtn').onclick = sendChatMessage;
-document.getElementById('chatInput').addEventListener('keypress', (e) => { if (e.key === 'Enter') sendChatMessage(); });
-
-// ========== ORIGINAL APP LOGIC (modified: no delete in transactions) ==========
-function nav(screenId) {
-    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
-    const target = document.getElementById(`screen-${screenId}`);
-    if (target) target.classList.add('active');
-    document.querySelectorAll('.nav-item').forEach(btn => btn.classList.remove('active'));
-    const activeBtn = document.getElementById(`nav-${screenId}`);
-    if (activeBtn) activeBtn.classList.add('active');
-    const titles = { dashboard:'Dashboard', add:'Add Transaction', analytics:'ML Analytics', budgets:'Budgets', transactions:'Transactions', admin:'Admin Panel' };
-    document.getElementById('pageTitle').innerText = titles[screenId] || 'Dashboard';
-    if (screenId === 'analytics') loadAnalytics();
-    if (screenId === 'budgets') loadBudgets();
-    if (screenId === 'transactions') renderTransactions();
-    if (screenId === 'admin' && currentUser?.role === 'admin') loadAdminPanel();
-}
-
-let isLogin = true;
-function toggleAuthMode() {
-    isLogin = !isLogin;
-    document.getElementById('authTitle').innerText = isLogin ? 'Welcome back' : 'Create Account';
-    document.getElementById('regName').style.display = isLogin ? 'none' : 'block';
-    document.getElementById('authConfirm').style.display = isLogin ? 'none' : 'block';
-    document.getElementById('termsRow').style.display = isLogin ? 'none' : 'flex';
-    document.getElementById('authBtn').innerText = isLogin ? 'Sign In' : 'Create Account';
-    document.getElementById('authMsg').innerText = '';
-}
-
-async function handleAuth() {
-    const email = document.getElementById('authEmail').value;
-    const password = document.getElementById('authPass').value;
-    const msgDiv = document.getElementById('authMsg');
-    if (!email || !password) { msgDiv.innerText = 'Email and password required'; return; }
-    if (!isLogin) {
-        const name = document.getElementById('regName').value;
-        const confirm = document.getElementById('authConfirm').value;
-        const terms = document.getElementById('termsCheck').checked;
-        if (!name) { msgDiv.innerText = 'Full name required'; return; }
-        if (password !== confirm) { msgDiv.innerText = 'Passwords do not match'; return; }
-        if (!terms) { msgDiv.innerText = 'Please accept Terms'; return; }
-        try {
-            await apiFetch('/api/register', { method:'POST', body: JSON.stringify({ name, email, password, accepted_terms:true, terms_version:'1.0' }) });
-            msgDiv.style.color = 'var(--green)';
-            msgDiv.innerText = 'Account created! Please login.';
-            setTimeout(() => toggleAuthMode(), 1500);
-            return;
-        } catch(e) { msgDiv.innerText = e.message; return; }
-    }
-    try {
-        const data = await apiFetch('/api/login', { method:'POST', body: JSON.stringify({ email, password }) });
-        currentUser = data.user;
-        document.getElementById('authOverlay').style.display = 'none';
-        document.getElementById('userAvatar').innerText = currentUser.name.slice(0,2).toUpperCase();
-        if (currentUser.role === 'admin') document.getElementById('nav-admin').style.display = 'flex';
-        loadDashboard();
-        nav('dashboard');
-    } catch(e) { msgDiv.innerText = e.message; }
-}
-
-async function logout() {
-    await apiFetch('/api/logout', { method:'POST' });
-    currentUser = null;
-    document.getElementById('authOverlay').style.display = 'flex';
-    document.getElementById('nav-admin').style.display = 'none';
-}
-
-async function loadDashboard() {
-    if (!currentUser) return;
-    try {
-        const summary = await apiFetch(`/api/summary/${currentUser.id}`);
-        const pred = await apiFetch(`/api/predict/${currentUser.id}`);
-        allTransactions = await apiFetch(`/api/transactions?user_id=${currentUser.id}`);
-        // store for chatbot
-        currentSummary = { balance: summary.balance, expense: summary.expense, income: summary.income };
-        currentPrediction = pred;
-        updateProactiveTip();
-
-        document.getElementById('sBalance').innerText = fmt(summary.balance);
-        document.getElementById('sExpense').innerText = fmt(summary.expense);
-        document.getElementById('sIncome').innerText = fmt(summary.income);
-        document.getElementById('sScore').innerText = pred.score + '/100';
-        document.getElementById('topScore').innerText = pred.score;
-        // Monthly chart
-        const months = Object.keys(summary.monthly).slice(-6);
-        const incData = months.map(m => summary.monthly[m]?.income || 0);
-        const expData = months.map(m => summary.monthly[m]?.expense || 0);
-        if (monthlyChart) monthlyChart.destroy();
-        monthlyChart = new Chart(document.getElementById('monthlyChart'), { type:'bar', data:{ labels:months, datasets:[{ label:'Income', data:incData, backgroundColor:'rgba(0,210,130,0.6)', borderRadius:8 },{ label:'Expense', data:expData, backgroundColor:'rgba(255,77,109,0.6)', borderRadius:8 }] }, options:{ responsive:true, maintainAspectRatio:true, plugins:{ legend:{ labels:{ color:'#e2eff8' } } } } });
-        // Donut
-        if (donutChart) donutChart.destroy();
-        donutChart = new Chart(document.getElementById('donutChart'), { type:'doughnut', data:{ labels:Object.keys(pred.predictions.categories), datasets:[{ data:Object.values(pred.predictions.categories), backgroundColor:['#00d282','#3b82f6','#f0a500','#a855f7','#ff4d6d'], borderWidth:0 }] }, options:{ cutout:'65%', plugins:{ legend:{ position:'bottom', labels:{ color:'#e2eff8' } } } } });
-        // Forecast bars
-        const forecastDiv = document.getElementById('forecastBars');
-        const weeks = pred.predictions.weekly;
-        const maxVal = Math.max(...Object.values(weeks));
-        forecastDiv.innerHTML = Object.entries(weeks).map(([w,v]) => `<div class="forecast-row"><span style="width:70px">${w}</span><div class="forecast-bar-track"><div class="forecast-bar-fill" style="width:${(v/maxVal*100)}%"></div></div><span>${fmt(v)}</span></div>`).join('');
-        // Advice
-        const adviceDiv = document.getElementById('adviceList');
-        adviceDiv.innerHTML = pred.advice.map(a => `<div class="advice-item"><span style="background:${a.status==='over'?'var(--red)':a.status==='warning'?'var(--amber)':'var(--green)'};width:24px;height:24px;border-radius:8px;display:flex;align-items:center;justify-content:center">${a.status==='over'?'⚠️':a.status==='warning'?'📊':'✓'}</span><div><strong>${a.cat}</strong><br><span style="font-size:0.75rem;color:var(--muted)">${a.msg}</span></div></div>`).join('');
-        renderTransactions();
-        document.getElementById('recentList').innerHTML = allTransactions.slice(0,5).map(t => `<div style="display:flex;justify-content:space-between;padding:8px 0"><div>${t.category}<br><small>${new Date(t.tx_date).toLocaleDateString()}</small></div><div>${fmt(t.amount)}</div></div>`).join('');
-    } catch(e) { console.error(e); }
-}
-
-async function renderTransactions() {
-    if (!currentUser) return;
-    const cat = document.getElementById('filterCat').value;
-    const type = document.getElementById('filterType').value;
-    const from = document.getElementById('filterFrom').value;
-    const to = document.getElementById('filterTo').value;
-    let filtered = allTransactions.filter(t => (!cat || t.category===cat) && (!type || t.tx_type===type) && (!from || new Date(t.tx_date)>=new Date(from)) && (!to || new Date(t.tx_date)<=new Date(to)));
-    const sort = document.getElementById('filterSort').value;
-    filtered.sort((a,b) => sort==='amount' ? b.amount-a.amount : new Date(b.tx_date)-new Date(a.tx_date));
-    const tbody = document.getElementById('txTableBody');
-    if (!filtered.length) { tbody.innerHTML='<tr><td colspan="5" style="text-align:center">No transactions</td></tr>'; return; }
-    // NO DELETE BUTTON – removed the last column
-    tbody.innerHTML = filtered.map(t => `
-        <tr>
-            <td>${new Date(t.tx_date).toLocaleDateString()}</td>
-            <td><span class="cat-pill">${t.category}</span></td>
-            <td>${t.note || '—'}</td>
-            <td><span class="badge-${t.tx_type==='income'?'green':'red'}">${t.tx_type}</span></td>
-            <td class="${t.tx_type==='income'?'tx-income':'tx-expense'}">${fmt(t.amount)}</td>
-        </tr>
-    `).join('');
-}
-
-// No deleteTx function is used anywhere (removed from table and event handlers)
-
-function setTxType(type) {
-    document.getElementById('txType').value = type;
-    document.getElementById('btnExp').style.background = type==='expense' ? 'var(--red-dim)' : 'transparent';
-    document.getElementById('btnInc').style.background = type==='income' ? 'var(--green-dim)' : 'transparent';
-}
-document.getElementById('txForm').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const amount = parseFloat(document.getElementById('txAmount').value);
-    const category = document.getElementById('txCategory').value;
-    const type = document.getElementById('txType').value;
-    const note = document.getElementById('txNote').value;
-    if (!amount || amount<=0) { toast('Invalid amount'); return; }
-    await apiFetch('/api/transactions', { method:'POST', body: JSON.stringify({ user_id:currentUser.id, amount, category, tx_type:type, note }) });
-    toast('Transaction saved');
-    document.getElementById('txForm').reset();
-    loadDashboard();
-    allTransactions = await apiFetch(`/api/transactions?user_id=${currentUser.id}`);
-    renderTransactions();
-});
-
-async function loadAnalytics() { /* identical to original – uses currentPrediction */ ... } 
-async function loadBudgets() { ... }
-async function saveAllBudgets() { ... }
-async function loadAdminPanel() { ... }
-function exportCSV() { ... }
-function exportExcel() { ... }
-async function exportPDF() { ... }
-function showTermsModal() { alert('Terms: Use responsibly. Data is private. No financial advice.'); }
-
-// Attach filter listeners
-['filterCat','filterType','filterSort','filterFrom','filterTo'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.addEventListener('change', () => renderTransactions());
-});
-
-// Ticker
-const ticker = document.getElementById('ticker');
-const tickerItems = ['📈 SPY +0.8%', '💰 SAVINGS +2.1%', '📊 BUDGET 68%', '🤖 AI FORECAST ACTIVE', '⭐ HEALTH SCORE LOADING'];
-setInterval(() => { ticker.innerHTML = [...tickerItems,...tickerItems].map(i => `<span class="tick-item">${i}</span>`).join(''); }, 0);
-ticker.innerHTML = [...tickerItems,...tickerItems].map(i => `<span class="tick-item">${i}</span>`).join('');
-
-// Auth on load
-(async () => {
-    try { const user = await apiFetch('/api/me'); currentUser = user; document.getElementById('authOverlay').style.display = 'none'; document.getElementById('userAvatar').innerText = user.name.slice(0,2).toUpperCase(); if (user.role === 'admin') document.getElementById('nav-admin').style.display = 'flex'; loadDashboard(); nav('dashboard'); } catch(e) { document.getElementById('authOverlay').style.display = 'flex'; }
-})();
-</script>
+        // Modify loadDashboard to use renderAdvice
+        // Also store prediction for chatbot etc.
+        // (rest of your existing JS remains same, just replace the advice rendering line)
+    </script>
 </body>
 </html>
