@@ -340,37 +340,55 @@ async function handleAuth() {
     const pass = document.getElementById('authPass').value;
     const msgDiv = document.getElementById('authMsg');
     if (!email || !pass) { msgDiv.innerText = 'Email and password required'; return; }
+
     if (!isLogin) {
         const name = document.getElementById('regName').value;
         const confirm = document.getElementById('authConfirm').value;
         const terms = document.getElementById('termsCheck').checked;
         if (!name) { msgDiv.innerText = 'Full name required'; return; }
         if (pass !== confirm) { msgDiv.innerText = 'Passwords do not match'; return; }
-        if (!terms) { msgDiv.innerText = 'Accept terms'; return; }
+        if (!terms) { msgDiv.innerText = 'Please accept Terms'; return; }
+        if (pass.length < 8) { msgDiv.innerText = 'Password must be at least 8 characters'; return; }
+
         try {
-            await apiFetch('/api/register', { method:'POST', body: JSON.stringify({ name, email, password:pass, accepted_terms:true }) });
+            const response = await fetch('/api/register', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, email, password: pass, accepted_terms: true }),
+                credentials: 'include'
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.error || 'Registration failed');
             msgDiv.style.color = 'var(--green)';
             msgDiv.innerText = 'Account created! Please login.';
             setTimeout(() => toggleAuthMode(), 1500);
-            return;
-        } catch(e) { msgDiv.innerText = e.message; return; }
+        } catch (e) {
+            msgDiv.style.color = 'var(--red)';
+            msgDiv.innerText = e.message;
+        }
+        return;
     }
+
+    // LOGIN
     try {
-        const data = await apiFetch('/api/login', { method:'POST', body: JSON.stringify({ email, password:pass }) });
+        const response = await fetch('/api/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email, password: pass }),
+            credentials: 'include'
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Login failed');
         currentUser = data.user;
         document.getElementById('authOverlay').style.display = 'none';
         document.getElementById('userAvatar').innerText = currentUser.name.slice(0,2).toUpperCase();
         if (currentUser.role === 'admin') document.getElementById('nav-admin').style.display = 'flex';
-        loadDashboard();
+        await loadDashboard();
         nav('dashboard');
-    } catch(e) { msgDiv.innerText = e.message; }
-}
-
-async function logout() {
-    await apiFetch('/api/logout', { method:'POST' });
-    currentUser = null;
-    document.getElementById('authOverlay').style.display = 'flex';
-    document.getElementById('nav-admin').style.display = 'none';
+    } catch (e) {
+        msgDiv.style.color = 'var(--red)';
+        msgDiv.innerText = e.message;
+    }
 }
 
 // Analytics, Budgets, Admin, Export functions (simplified but working)
