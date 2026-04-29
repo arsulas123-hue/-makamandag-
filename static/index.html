@@ -1,45 +1,353 @@
 <!DOCTYPE html>
-<html>
-<head><title>Auth Test</title></head>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+    <title>SmartSpend — AI-Powered Personal Finance</title>
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <style>
+        *{ margin:0; padding:0; box-sizing:border-box; }
+        :root{ --bg:#080d14; --bg2:#0d1520; --bg3:#111c2b; --panel:rgba(15,30,48,0.7); --border:rgba(0,210,130,.12); --border2:rgba(255,255,255,.05); --green:#00d282; --green2:#00ff9d; --green-dim:rgba(0,210,130,.12); --red:#ff4d6d; --red-dim:rgba(255,77,109,.1); --amber:#f0a500; --amber-dim:rgba(240,165,0,.1); --blue:#3b82f6; --blue-dim:rgba(59,130,246,.1); --purple:#a855f7; --text:#e2eff8; --muted:#5a7a94; --mono:'JetBrains Mono',monospace; --sans:'Space Grotesk',sans-serif; --r:16px; }
+        body{ font-family:var(--sans); background:var(--bg); color:var(--text); min-height:100vh; }
+        .sidebar{ position:fixed; left:0; top:0; bottom:0; width:70px; background:rgba(13,21,32,0.95); backdrop-filter:blur(12px); border-right:1px solid var(--border2); display:flex; flex-direction:column; align-items:center; padding:24px 0; gap:8px; z-index:100; transition:width 0.25s; }
+        .sidebar:hover{ width:220px; }
+        .sidebar-logo{ width:42px; height:42px; border-radius:12px; background:linear-gradient(135deg,var(--green),#009e5f); display:flex; align-items:center; justify-content:center; margin-bottom:24px; cursor:pointer; }
+        .nav-item{ width:100%; display:flex; align-items:center; gap:14px; padding:12px 16px; border-radius:12px; cursor:pointer; border:none; background:transparent; color:var(--muted); font-size:0.85rem; font-weight:500; white-space:nowrap; overflow:hidden; transition:all 0.2s; }
+        .nav-item:hover{ background:var(--green-dim); color:var(--text); transform:translateX(4px); }
+        .nav-item.active{ background:var(--green-dim); color:var(--green); border-left:3px solid var(--green); }
+        .nav-label{ opacity:0; transition:opacity 0.2s; }
+        .sidebar:hover .nav-label{ opacity:1; }
+        .sidebar-bottom{ margin-top:auto; width:100%; }
+        .main{ margin-left:70px; padding:28px 32px; position:relative; z-index:1; min-height:100vh; }
+        @media (max-width:768px){ .sidebar{ width:60px; } .main{ margin-left:60px; padding:20px; } }
+        @media (max-width:600px){ .sidebar{ display:none; } .main{ margin-left:0; } }
+        .topbar{ display:flex; align-items:center; justify-content:space-between; margin-bottom:28px; flex-wrap:wrap; gap:16px; }
+        .score-pill{ display:flex; align-items:center; gap:8px; padding:6px 16px; border-radius:99px; background:var(--green-dim); border:1px solid var(--border); font-size:0.8rem; font-weight:600; color:var(--green); }
+        .score-dot{ width:8px; height:8px; border-radius:50%; background:var(--green); animation:pulse 2s infinite; }
+        @keyframes pulse{ 0%,100%{ opacity:1; } 50%{ opacity:0.4; } }
+        .avatar{ width:38px; height:38px; border-radius:50%; background:linear-gradient(135deg,var(--blue),var(--purple)); display:flex; align-items:center; justify-content:center; font-weight:700; cursor:pointer; }
+        .signout-btn{ background:var(--red-dim); border:1px solid rgba(255,77,109,0.2); color:var(--red); padding:7px 16px; border-radius:10px; cursor:pointer; font-size:0.75rem; font-weight:600; }
+        .screen{ display:none; animation:fadeUp 0.35s ease; }
+        .screen.active{ display:block; }
+        @keyframes fadeUp{ from{ opacity:0; transform:translateY(20px); } to{ opacity:1; transform:translateY(0); } }
+        .stats-grid{ display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:18px; margin-bottom:28px; }
+        .stat-card{ background:var(--panel); backdrop-filter:blur(10px); border:1px solid var(--border2); border-radius:var(--r); padding:20px; }
+        .stat-value{ font-size:1.5rem; font-weight:700; font-family:var(--mono); }
+        .stat-card.green .stat-value{ color:var(--green); }
+        .stat-card.red .stat-value{ color:var(--red); }
+        .stat-card.blue .stat-value{ color:var(--blue); }
+        .stat-card.amber .stat-value{ color:var(--amber); }
+        .panel{ background:var(--panel); backdrop-filter:blur(10px); border:1px solid var(--border2); border-radius:var(--r); padding:22px; }
+        .chart-grid{ display:grid; grid-template-columns:repeat(auto-fit,minmax(350px,1fr)); gap:20px; margin-bottom:28px; }
+        canvas{ max-height:250px; width:100% !important; }
+        input, select, .btn{ background:var(--bg3); color:var(--text); border:1px solid var(--border2); border-radius:10px; padding:8px 14px; font-size:0.85rem; outline:none; }
+        .btn{ cursor:pointer; transition:0.2s; font-weight:600; }
+        .btn-green{ background:linear-gradient(135deg,var(--green),#009e5f); color:#000; border:none; }
+        .table-wrap{ overflow-x:auto; border-radius:var(--r); background:var(--panel); border:1px solid var(--border2); }
+        table{ width:100%; border-collapse:collapse; }
+        th, td{ padding:12px 16px; text-align:left; border-bottom:1px solid var(--border2); }
+        .advice-item{ padding:12px; border-radius:12px; margin-bottom:8px; background:var(--bg3); }
+        .forecast-row{ display:flex; align-items:center; gap:12px; margin-bottom:12px; }
+        .forecast-bar-track{ flex:1; height:8px; background:var(--bg3); border-radius:99px; overflow:hidden; }
+        .forecast-bar-fill{ height:100%; background:linear-gradient(90deg,var(--green),var(--green2)); width:0; border-radius:99px; }
+        .auth-overlay{ position:fixed; inset:0; background:rgba(8,13,20,0.98); backdrop-filter:blur(20px); z-index:9999; display:flex; align-items:center; justify-content:center; }
+        .auth-card{ background:linear-gradient(145deg,#0d1520,#0a1220); border:1px solid rgba(0,210,130,0.2); border-radius:28px; padding:40px; width:400px; max-width:90%; }
+        .auth-input{ width:100%; padding:12px 16px; margin-bottom:14px; background:#0a1525; border:1px solid var(--border2); border-radius:12px; color:var(--text); }
+        .auth-btn{ width:100%; padding:14px; background:linear-gradient(135deg,var(--green),#009e5f); border:none; border-radius:12px; color:#000; font-weight:700; cursor:pointer; }
+        #toast{ position:fixed; bottom:24px; right:24px; background:var(--bg2); border:1px solid var(--green); border-radius:12px; padding:12px 20px; opacity:0; transition:0.25s; z-index:10000; }
+        #toast.show{ opacity:1; }
+        .chat-container{ position:fixed; bottom:24px; right:24px; z-index:10001; cursor:move; }
+        .chat-window{ width:350px; height:450px; background:var(--bg2); backdrop-filter:blur(10px); border:1px solid var(--green); border-radius:24px; display:flex; flex-direction:column; overflow:hidden; cursor:default; }
+        .chat-header{ padding:14px; background:var(--bg3); border-bottom:1px solid var(--border); display:flex; justify-content:space-between; cursor:move; }
+        .chat-header span{ font-weight:600; color:var(--green); }
+        .chat-header button{ background:none; border:none; color:var(--muted); cursor:pointer; margin-left:8px; }
+        .chat-messages{ flex:1; overflow-y:auto; padding:12px; display:flex; flex-direction:column; gap:8px; }
+        .message{ max-width:85%; padding:10px 14px; border-radius:18px; font-size:0.85rem; }
+        .user-message{ align-self:flex-end; background:var(--green-dim); color:var(--green); }
+        .bot-message{ align-self:flex-start; background:var(--bg3); color:var(--text); }
+        .chat-input{ display:flex; padding:12px; gap:8px; background:var(--bg3); border-top:1px solid var(--border); }
+        .chat-input input{ flex:1; background:var(--bg2); border-radius:20px; padding:8px 14px; }
+        .chat-input button{ background:var(--green); border:none; border-radius:20px; padding:8px 16px; color:#000; font-weight:600; cursor:pointer; }
+        .hidden{ display:none; }
+    </style>
+</head>
 <body>
-  <h2>Register Test</h2>
-  <input id="name" placeholder="Name"><br>
-  <input id="email" placeholder="Email"><br>
-  <input id="pass" type="password" placeholder="Password"><br>
-  <label><input id="terms" type="checkbox"> Accept Terms</label><br>
-  <button onclick="register()">Register</button>
-  <button onclick="login()">Login (admin@smartspend.com / admin123)</button>
-  <pre id="result"></pre>
 
-  <script>
-    async function register() {
-      const res = await fetch('/api/register', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({
-          name: document.getElementById('name').value,
-          email: document.getElementById('email').value,
-          password: document.getElementById('pass').value,
-          accepted_terms: document.getElementById('terms').checked
-        }),
-        credentials: 'include'
-      });
-      const data = await res.json();
-      document.getElementById('result').innerText = JSON.stringify(data, null, 2);
+<nav class="sidebar">
+    <div class="sidebar-logo"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#000"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg></div>
+    <button class="nav-item active" onclick="nav('dashboard')"><span class="nav-label">Dashboard</span></button>
+    <button class="nav-item" onclick="nav('add')"><span class="nav-label">Add</span></button>
+    <button class="nav-item" onclick="nav('analytics')"><span class="nav-label">Analytics</span></button>
+    <button class="nav-item" onclick="nav('budgets')"><span class="nav-label">Budgets</span></button>
+    <button class="nav-item" onclick="nav('transactions')"><span class="nav-label">History</span></button>
+    <div class="sidebar-bottom"><button class="nav-item" onclick="exportPDF()"><span class="nav-label">Export PDF</span></button></div>
+</nav>
+
+<main class="main">
+    <div class="topbar">
+        <div><h1 id="pageTitle">Dashboard</h1></div>
+        <div class="topbar-right"><div class="score-pill"><div class="score-dot"></div><span>Health: <strong id="topScore">—</strong></span></div><div class="avatar" id="userAvatar">SS</div><button class="signout-btn" onclick="logout()">Sign Out</button></div>
+    </div>
+    <div id="toast"></div>
+
+    <div class="screen active" id="screen-dashboard">
+        <div class="stats-grid">
+            <div class="stat-card green"><div class="stat-value" id="sBalance">—</div><div class="stat-label">Balance</div></div>
+            <div class="stat-card red"><div class="stat-value" id="sExpense">—</div><div class="stat-label">Expenses</div></div>
+            <div class="stat-card blue"><div class="stat-value" id="sIncome">—</div><div class="stat-label">Income</div></div>
+            <div class="stat-card amber"><div class="stat-value" id="sScore">—</div><div class="stat-label">ML Score</div></div>
+        </div>
+        <div class="chart-grid">
+            <div class="panel"><canvas id="monthlyChart" height="200"></canvas></div>
+            <div class="panel"><canvas id="donutChart" height="200"></canvas></div>
+        </div>
+        <div class="panel"><div id="adviceList"></div></div>
+    </div>
+
+    <div class="screen" id="screen-add">
+        <div class="stats-grid" style="grid-template-columns:1fr 1fr">
+            <div class="panel">
+                <div style="display:flex;gap:12px;margin-bottom:20px"><button id="btnExp" style="flex:1;background:var(--red-dim);color:var(--red)">Expense</button><button id="btnInc" style="flex:1;background:var(--green-dim);color:var(--green)">Income</button></div>
+                <form id="txForm"><input type="number" id="txAmount" placeholder="Amount" required><select id="txCategory"><option>Food & Dining</option><option>Transport</option><option>Groceries</option><option>Entertainment</option><option>Health</option><option>Salary</option></select><input type="text" id="txNote" placeholder="Note"><input type="hidden" id="txType" value="expense"><button type="submit" class="btn-green">Save</button></form>
+            </div>
+            <div class="panel"><div id="recentList"></div></div>
+        </div>
+    </div>
+
+    <div class="screen" id="screen-analytics"><div class="panel"><canvas id="forecastChart" height="200"></canvas></div><div class="panel"><canvas id="catBarChart" height="200"></canvas></div></div>
+    <div class="screen" id="screen-budgets"><div id="budgetInputs" class="stats-grid"></div><button class="btn-green" onclick="saveAllBudgets()">Save All</button></div>
+    <div class="screen" id="screen-transactions"><div class="table-wrap"><table><thead><tr><th>Date</th><th>Category</th><th>Note</th><th>Type</th><th>Amount</th></tr></thead><tbody id="txTableBody"></tbody></table></div></div>
+</main>
+
+<div id="chatContainer" class="chat-container">
+    <div class="chat-window">
+        <div class="chat-header" id="chatHeader"><span>🤖 SmartSpend AI</span><button id="closeChatBtn">✕</button></div>
+        <div class="chat-messages" id="chatMessages"><div class="message bot-message">Hi! Ask me about saving money, budget tips, or your finances!</div></div>
+        <div class="chat-input"><input id="chatInput" placeholder="Ask something..."><button id="sendChatBtn">Send</button></div>
+    </div>
+</div>
+
+<div id="authOverlay" class="auth-overlay">
+    <div class="auth-card">
+        <h2 id="authTitle">Welcome back</h2>
+        <input type="text" id="regName" placeholder="Full Name" style="display:none">
+        <input type="email" id="authEmail" placeholder="Email">
+        <input type="password" id="authPass" placeholder="Password">
+        <input type="password" id="authConfirm" placeholder="Confirm Password" style="display:none">
+        <div id="termsRow" style="display:none"><label><input type="checkbox" id="termsCheck"> Accept Terms</label></div>
+        <div id="authMsg" style="color:red;font-size:0.8rem"></div>
+        <button id="authBtn" class="auth-btn">Sign In</button>
+        <p id="toggleAuthLink" style="cursor:pointer;text-align:center;margin-top:16px;">Don't have an account? Register</p>
+    </div>
+</div>
+
+<script>
+let currentUser = null;
+let allTransactions = [];
+let currentPrediction = { score:0, predictions:{ weekly:{}, categories:{} }, advice:[] };
+let monthlyChart, donutChart, forecastChart, catBarChart;
+
+function fmt(amt) { return '₱' + Number(amt).toLocaleString('en-PH', { minimumFractionDigits: 2 }); }
+function toast(msg) { const t=document.getElementById('toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'), 2500); }
+
+async function apiFetch(url, opts={}) {
+    const res = await fetch(url, { ...opts, credentials: 'include', headers: { 'Content-Type': 'application/json' } });
+    if (!res.ok) { const err=await res.json(); throw new Error(err.error || 'Request failed'); }
+    return res.json();
+}
+
+// Chatbot
+document.getElementById('sendChatBtn').onclick = () => {
+    const input = document.getElementById('chatInput');
+    const msg = input.value.trim();
+    if(!msg) return;
+    const msgs = document.getElementById('chatMessages');
+    msgs.innerHTML += `<div class="message user-message">${msg}</div>`;
+    input.value = '';
+    msgs.scrollTop = msgs.scrollHeight;
+    setTimeout(() => {
+        let reply = "I can help with saving tips, budget advice, and your finances!";
+        const m = msg.toLowerCase();
+        if(m.includes('save')) reply = `Try reducing dining out by 20%. Your top expense is ${Object.keys(currentPrediction.predictions.categories)[0] || 'unknown'}.`;
+        else if(m.includes('health')) reply = `Your financial health score is ${currentPrediction.score}/100.`;
+        else if(m.includes('budget')) reply = currentPrediction.advice[0]?.msg || "Set budgets for each category to get insights!";
+        msgs.innerHTML += `<div class="message bot-message">${reply}</div>`;
+        msgs.scrollTop = msgs.scrollHeight;
+    }, 300);
+};
+document.getElementById('chatInput').addEventListener('keypress', e => { if(e.key==='Enter') document.getElementById('sendChatBtn').click(); });
+document.getElementById('closeChatBtn').onclick = () => document.getElementById('chatContainer').style.display = 'none';
+
+// Auth
+let isLogin = true;
+function toggleAuthMode() {
+    isLogin = !isLogin;
+    document.getElementById('authTitle').innerText = isLogin ? 'Welcome back' : 'Create Account';
+    document.getElementById('regName').style.display = isLogin ? 'none' : 'block';
+    document.getElementById('authConfirm').style.display = isLogin ? 'none' : 'block';
+    document.getElementById('termsRow').style.display = isLogin ? 'none' : 'flex';
+    document.getElementById('authBtn').innerText = isLogin ? 'Sign In' : 'Create Account';
+    document.getElementById('toggleAuthLink').innerHTML = isLogin ? "Don't have an account? Register" : "Already have an account? Sign In";
+}
+
+async function handleAuth() {
+    const email = document.getElementById('authEmail').value;
+    const pass = document.getElementById('authPass').value;
+    const msgDiv = document.getElementById('authMsg');
+    if (!email || !pass) { msgDiv.innerText = 'Email and password required'; return; }
+
+    if (!isLogin) {
+        const name = document.getElementById('regName').value;
+        const confirm = document.getElementById('authConfirm').value;
+        const terms = document.getElementById('termsCheck').checked;
+        if (!name) { msgDiv.innerText = 'Full name required'; return; }
+        if (pass !== confirm) { msgDiv.innerText = 'Passwords do not match'; return; }
+        if (!terms) { msgDiv.innerText = 'Accept terms'; return; }
+        if (pass.length < 8) { msgDiv.innerText = 'Password must be at least 8 characters'; return; }
+        try {
+            const res = await fetch('/api/register', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, email, password: pass, accepted_terms: true }),
+                credentials: 'include'
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error);
+            msgDiv.style.color = 'green';
+            msgDiv.innerText = 'Account created! Please login.';
+            setTimeout(() => toggleAuthMode(), 1500);
+        } catch(e) { msgDiv.innerText = e.message; }
+        return;
     }
-    async function login() {
-      const res = await fetch('/api/login', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({
-          email: 'admin@smartspend.com',
-          password: 'admin123'
-        }),
-        credentials: 'include'
-      });
-      const data = await res.json();
-      document.getElementById('result').innerText = JSON.stringify(data, null, 2);
+
+    try {
+        const res = await fetch('/api/login', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email, password: pass }),
+            credentials: 'include'
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error);
+        currentUser = data.user;
+        document.getElementById('authOverlay').style.display = 'none';
+        document.getElementById('userAvatar').innerText = currentUser.name.slice(0,2).toUpperCase();
+        await loadDashboard();
+        nav('dashboard');
+    } catch(e) { msgDiv.innerText = e.message; }
+}
+
+async function logout() {
+    await fetch('/api/logout', { method: 'POST', credentials: 'include' });
+    currentUser = null;
+    document.getElementById('authOverlay').style.display = 'flex';
+}
+
+function nav(screen) {
+    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+    document.getElementById(`screen-${screen}`).classList.add('active');
+    const titles = { dashboard:'Dashboard', add:'Add Transaction', analytics:'Analytics', budgets:'Budgets', transactions:'History' };
+    document.getElementById('pageTitle').innerText = titles[screen] || 'SmartSpend';
+    if(screen === 'transactions') renderTransactions();
+}
+
+async function loadDashboard() {
+    if (!currentUser) return;
+    try {
+        const summary = await apiFetch(`/api/summary/${currentUser.id}`);
+        const pred = await apiFetch(`/api/predict/${currentUser.id}`);
+        allTransactions = await apiFetch(`/api/transactions?user_id=${currentUser.id}`);
+        currentPrediction = pred;
+        document.getElementById('sBalance').innerText = fmt(summary.balance);
+        document.getElementById('sExpense').innerText = fmt(summary.expense);
+        document.getElementById('sIncome').innerText = fmt(summary.income);
+        document.getElementById('sScore').innerText = pred.score + '/100';
+        document.getElementById('topScore').innerText = pred.score;
+        if (monthlyChart) monthlyChart.destroy();
+        const months = Object.keys(summary.monthly).slice(-6);
+        monthlyChart = new Chart(document.getElementById('monthlyChart'), { type:'bar', data:{ labels:months, datasets:[{ label:'Income', data:months.map(m=>summary.monthly[m]?.income||0), backgroundColor:'rgba(0,210,130,0.6)' },{ label:'Expense', data:months.map(m=>summary.monthly[m]?.expense||0), backgroundColor:'rgba(255,77,109,0.6)' }] } });
+        if (donutChart) donutChart.destroy();
+        donutChart = new Chart(document.getElementById('donutChart'), { type:'doughnut', data:{ labels:Object.keys(pred.predictions.categories), datasets:[{ data:Object.values(pred.predictions.categories), backgroundColor:['#00d282','#3b82f6','#f0a500','#a855f7','#ff4d6d'] }] }, options:{ cutout:'65%' } });
+        document.getElementById('adviceList').innerHTML = pred.advice.map(a => `<div class="advice-item"><strong>${a.cat}</strong>: ${a.msg}</div>`).join('');
+        document.getElementById('recentList').innerHTML = allTransactions.slice(0,5).map(t => `<div>${t.category}: ${fmt(t.amount)}<br><small>${new Date(t.tx_date).toLocaleDateString()}</small></div>`).join('');
+        renderTransactions();
+        loadAnalytics();
+    } catch(e) { console.error(e); }
+}
+
+async function renderTransactions() {
+    if (!currentUser) return;
+    const tbody = document.getElementById('txTableBody');
+    tbody.innerHTML = allTransactions.slice(0,20).map(t => `<tr><td>${new Date(t.tx_date).toLocaleDateString()}</td><td>${t.category}</td><td>${t.note || '—'}</td><td>${t.tx_type}</td><td>${fmt(t.amount)}</td></tr>`).join('');
+}
+
+async function loadAnalytics() {
+    if (!currentUser) return;
+    const pred = currentPrediction;
+    if (forecastChart) forecastChart.destroy();
+    forecastChart = new Chart(document.getElementById('forecastChart'), { type:'line', data:{ labels:Object.keys(pred.predictions.weekly), datasets:[{ label:'Forecast', data:Object.values(pred.predictions.weekly), borderColor:'#00d282' }] } });
+    if (catBarChart) catBarChart.destroy();
+    catBarChart = new Chart(document.getElementById('catBarChart'), { type:'bar', data:{ labels:Object.keys(pred.predictions.categories), datasets:[{ label:'Spending', data:Object.values(pred.predictions.categories), backgroundColor:'#3b82f6' }] }, options:{ indexAxis:'y' } });
+}
+
+async function loadBudgets() {
+    if (!currentUser) return;
+    const budgets = await apiFetch(`/api/budgets/${currentUser.id}`);
+    const limits = Object.fromEntries(budgets.map(b=>[b.category, b.limit]));
+    const categories = ['Food & Dining','Transport','Groceries','Entertainment','Health'];
+    document.getElementById('budgetInputs').innerHTML = categories.map(cat => `<div><label>${cat}</label><input type="number" id="b_${cat.replace(/\s/g,'')}" value="${limits[cat]||''}" placeholder="Limit"></div>`).join('');
+}
+
+async function saveAllBudgets() {
+    const categories = ['Food & Dining','Transport','Groceries','Entertainment','Health'];
+    for (let cat of categories) {
+        const val = parseFloat(document.getElementById(`b_${cat.replace(/\s/g,'')}`).value);
+        if (!isNaN(val) && val>0) await apiFetch(`/api/budgets/${currentUser.id}`, { method:'POST', body: JSON.stringify({ category:cat, limit:val }) });
     }
-  </script>
+    toast('Budgets saved');
+}
+
+function exportPDF() { const { jsPDF } = window.jspdf; new jsPDF().text('SmartSpend Report',20,20).save('report.pdf'); toast('PDF ready'); }
+
+document.getElementById('txForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    await apiFetch('/api/transactions', { method:'POST', body: JSON.stringify({ user_id:currentUser.id, amount:parseFloat(document.getElementById('txAmount').value), category:document.getElementById('txCategory').value, tx_type:document.getElementById('txType').value, note:document.getElementById('txNote').value }) });
+    toast('Saved');
+    await loadDashboard();
+});
+function setTxType(t) { document.getElementById('txType').value = t; document.getElementById('btnExp').style.background = t==='expense'?'var(--red-dim)':'transparent'; document.getElementById('btnInc').style.background = t==='income'?'var(--green-dim)':'transparent'; }
+document.getElementById('btnExp').onclick = () => setTxType('expense');
+document.getElementById('btnInc').onclick = () => setTxType('income');
+document.getElementById('authBtn').onclick = handleAuth;
+document.getElementById('toggleAuthLink').onclick = toggleAuthMode;
+
+// Draggable chat
+const chatContainer = document.getElementById('chatContainer');
+const chatHeader = document.getElementById('chatHeader');
+let isDragging = false, offsetX, offsetY;
+chatHeader.addEventListener('mousedown', (e) => {
+    if(e.target.tagName === 'BUTTON') return;
+    isDragging = true;
+    offsetX = e.clientX - chatContainer.offsetLeft;
+    offsetY = e.clientY - chatContainer.offsetTop;
+    chatContainer.style.cursor = 'grabbing';
+});
+document.addEventListener('mousemove', (e) => {
+    if(!isDragging) return;
+    let left = e.clientX - offsetX, top = e.clientY - offsetY;
+    left = Math.min(Math.max(0, left), window.innerWidth - chatContainer.offsetWidth);
+    top = Math.min(Math.max(0, top), window.innerHeight - chatContainer.offsetHeight);
+    chatContainer.style.left = left + 'px';
+    chatContainer.style.top = top + 'px';
+    chatContainer.style.right = 'auto';
+    chatContainer.style.bottom = 'auto';
+});
+document.addEventListener('mouseup', () => { isDragging = false; chatContainer.style.cursor = ''; });
+
+(async () => {
+    try { const user = await apiFetch('/api/me'); currentUser = user; document.getElementById('authOverlay').style.display = 'none'; document.getElementById('userAvatar').innerText = user.name.slice(0,2).toUpperCase(); await loadDashboard(); nav('dashboard'); } catch(e) { document.getElementById('authOverlay').style.display = 'flex'; }
+})();
+</script>
 </body>
 </html>
