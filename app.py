@@ -1,4 +1,7 @@
-import os, datetime, hashlib, secrets
+import os
+import datetime
+import hashlib
+import secrets
 from functools import wraps
 from flask import Flask, request, jsonify, session, send_from_directory
 from flask_cors import CORS
@@ -69,8 +72,9 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated
 
-# ========== ML FUNCTIONS ==========
+# ========== ML FUNCTIONS (Enhanced with Investment Logic) ==========
 def calculate_health_score(transactions, budgets):
+    """Calculate financial health score based on savings rate and budget compliance"""
     try:
         expenses = [t for t in transactions if t['tx_type'] == 'expense']
         income = sum(t['amount'] for t in transactions if t['tx_type'] == 'income')
@@ -98,20 +102,42 @@ def calculate_health_score(transactions, budgets):
         return 70
 
 def forecast_spending(transactions):
-    weekly = {'Week 1': 2500, 'Week 2': 2400, 'Week 3': 2600, 'Week 4': 2300}
+    """AI-powered spending forecast based on user's historical data"""
     expenses = [t for t in transactions if t['tx_type'] == 'expense']
-    if len(expenses) > 5:
-        avg = sum(e['amount'] for e in expenses[-10:]) / min(len(expenses[-10:]), 10)
-        weekly = {f'Week {i+1}': round(avg * (0.9 + 0.1 * i)) for i in range(4)}
+    weekly = {'Week 1': 2500, 'Week 2': 2400, 'Week 3': 2600, 'Week 4': 2300}
+    
+    if len(expenses) > 3:
+        # Calculate weighted average with trend
+        recent = expenses[-min(len(expenses), 8):]
+        avg_recent = sum(e['amount'] for e in recent) / len(recent)
+        # Add slight upward/downward trend based on recent changes
+        if len(recent) >= 4:
+            first_half = sum(e['amount'] for e in recent[:len(recent)//2]) / (len(recent)//2)
+            second_half = sum(e['amount'] for e in recent[len(recent)//2:]) / (len(recent) - len(recent)//2)
+            trend_factor = second_half / first_half if first_half > 0 else 1.0
+        else:
+            trend_factor = 1.0
+        
+        weekly = {
+            f'Week {i+1}': round(avg_recent * (0.85 + 0.08 * i) * trend_factor)
+            for i in range(4)
+        }
     return weekly
 
 def generate_advice(transactions, budgets):
+    """Generate personalized financial advice including investment recommendations"""
     expenses = [t for t in transactions if t['tx_type'] == 'expense']
+    income = sum(t['amount'] for t in transactions if t['tx_type'] == 'income')
+    total_expense = sum(e['amount'] for e in expenses)
+    savings = income - total_expense
+    
     cat_spending = {}
     for e in expenses:
         cat_spending[e['category']] = cat_spending.get(e['category'], 0) + e['amount']
     
     advice = []
+    
+    # Budget-related advice
     for cat, spent in cat_spending.items():
         limit = budgets.get(cat, 0)
         if limit > 0:
@@ -125,7 +151,108 @@ def generate_advice(transactions, budgets):
         else:
             if spent > 5000:
                 advice.append({'cat': cat, 'msg': f'high spending (₱{spent:,.2f}). Consider setting a budget.'})
+    
+    # Investment advice based on savings
+    if savings > 0:
+        advice.append({
+            'cat': 'Investment',
+            'msg': f'You have ₱{savings:,.2f} surplus. Consider putting 30% into low-cost index funds (S&P500), 20% into high-yield savings, and 50% into skill development.'
+        })
+    else:
+        advice.append({
+            'cat': 'Warning',
+            'msg': f'Your expenses ({total_expense:,.2f}) exceed income ({income:,.2f}). Review discretionary spending.'
+        })
+    
+    # Stock market intelligence
+    advice.append({
+        'cat': 'Market Insight',
+        'msg': 'Current market conditions suggest dollar-cost averaging into diversified ETFs (VOO, VTI) for long-term growth.'
+    })
+    
     return advice
+
+def generate_chatbot_response(user_message, user_transactions, user_budgets):
+    """Generate intelligent chatbot response with market and investment insights"""
+    msg = user_message.lower()
+    
+    # Calculate user financial metrics
+    expenses = [t for t in user_transactions if t['tx_type'] == 'expense']
+    income_total = sum(t['amount'] for t in user_transactions if t['tx_type'] == 'income')
+    expense_total = sum(e['amount'] for e in expenses)
+    balance = income_total - expense_total
+    health_score = calculate_health_score(user_transactions, user_budgets)
+    forecast = forecast_spending(user_transactions)
+    avg_forecast = sum(forecast.values()) / 4
+    
+    # Category breakdown
+    cat_spending = {}
+    for e in expenses:
+        cat_spending[e['category']] = cat_spending.get(e['category'], 0) + e['amount']
+    top_category = max(cat_spending.items(), key=lambda x: x[1]) if cat_spending else ("None", 0)
+    
+    # Investment keywords
+    if any(word in msg for word in ['invest', 'stock', 'where to invest', 'crypto', 'etf', 'mutual fund', 'portfolio']):
+        surplus = balance
+        return f"📈 **AI Investment Strategy** (Based on your ₱{balance:,.2f} surplus, health score {health_score}/100):\n\n" + \
+               f"• **Recommended Allocation:**\n" + \
+               f"  - 40% to S&P500 ETF (VOO/SPY) - Historical return ~10% annually\n" + \
+               f"  - 30% to high-yield savings account (4-5% APY) for emergency fund\n" + \
+               f"  - 20% to blue-chip dividend stocks (JNJ, KO, PG)\n" + \
+               f"  - 10% to skill development or leisure\n\n" + \
+               f"• **Monthly Investment Potential:** ₱{max(0, round(surplus * 0.3)):,.2f}\n" + \
+               f"• **Compounding Estimate:** At 7% annual return, ₱{max(0, round(surplus * 0.3)):,.2f}/month grows to ₱{round(max(0, surplus * 0.3) * 12 * 12.5):,.2f} in 10 years.\n\n" + \
+               f"💡 *Dollar-cost averaging reduces risk. Start small, stay consistent.*"
+    
+    # Forecast/prediction keywords
+    elif any(word in msg for word in ['forecast', 'predict', 'next month', 'spending trend']):
+        return f"🤖 **Personalized ML Forecast** (Based on your {len(expenses)} transactions):\n\n" + \
+               f"• {', '.join([f'{k}: ₱{v:,.2f}' for k, v in forecast.items()])}\n\n" + \
+               f"• **Average Weekly Spend:** ₱{avg_forecast:,.2f}\n" + \
+               f"• **Top Category:** {top_category[0]} (₱{top_category[1]:,.2f})\n\n" + \
+               f"💡 *Reducing {top_category[0]} by 15% could free up ₱{round(top_category[1] * 0.15):,.2f} monthly for investments.*"
+    
+    # Chart/trend analysis
+    elif any(word in msg for word in ['chart', 'trend', 'category', 'spending pattern']):
+        return f"📊 **Real-time Spending Analysis:**\n\n" + \
+               f"• **Largest Expense Category:** {top_category[0]} (₱{top_category[1]:,.2f})\n" + \
+               f"• **Income vs Expense:** {'Surplus' if balance > 0 else 'Deficit'} of ₱{abs(balance):,.2f}\n" + \
+               f"• **Health Score:** {health_score}/100 ({'Excellent' if health_score > 80 else 'Good' if health_score > 60 else 'Needs improvement'})\n\n" + \
+               f"📈 *Technical Analysis: Your spending shows a {'positive' if income_total > expense_total else 'negative'} trend. Rebalancing {top_category[0]} could improve financial health.*"
+    
+    # Budget advice
+    elif any(word in msg for word in ['advice', 'tip', 'budget', 'save', 'saving']):
+        advice_list = generate_advice(user_transactions, user_budgets)
+        main_tip = advice_list[0] if advice_list else {'msg': 'Set up automatic transfers to savings.'}
+        return f"💡 **Smart Financial Tip:**\n\n{main_tip.get('msg', '')}\n\n" + \
+               f"• **Current Savings Rate:** {max(0, round((balance/income_total)*100 if income_total > 0 else 0))}%\n" + \
+               f"• **Recommended Action:** Automate 20% of income to investment accounts before spending.\n\n" + \
+               f"✨ *Consistency beats timing. Small daily habits create wealth.*"
+    
+    # Retirement planning
+    elif any(word in msg for word in ['retire', 'retirement', 'future']):
+        monthly_surplus = max(0, balance / 12)
+        years = 20
+        future_value = monthly_surplus * 12 * ((1 + 0.07) ** years - 1) / 0.07 if monthly_surplus > 0 else 0
+        return f"⏳ **Retirement Projection** (Based on your current finances):\n\n" + \
+               f"• **Monthly Surplus:** ₱{monthly_surplus:,.2f}\n" + \
+               f"• **20-Year Growth at 7%:** ₱{future_value:,.2f}\n\n" + \
+               f"• **Recommendation:** Increase savings rate to 25% for earlier retirement.\n" + \
+               f"• **Health Score Impact:** {health_score}/100 - {'Good progress!' if health_score > 70 else 'Consider expense reduction.'}"
+    
+    # Default response
+    else:
+        return f"✨ **Cognitive AI Report**\n\n" + \
+               f"• **Balance:** ₱{balance:,.2f}\n" + \
+               f"• **Health Score:** {health_score}/100\n" + \
+               f"• **Weekly Forecast:** ₱{avg_forecast:,.2f}\n" + \
+               f"• **Top Category:** {top_category[0]} (₱{top_category[1]:,.2f})\n\n" + \
+               f"💬 **Try asking:**\n" + \
+               f"  • 'Where to invest my money?'\n" + \
+               f"  • 'Show me spending forecast'\n" + \
+               f"  • 'Budget advice'\n" + \
+               f"  • 'Retirement planning'\n" + \
+               f"  • 'Stock market tips'"
 
 # ========== API ROUTES ==========
 @app.route('/api/health')
@@ -265,6 +392,22 @@ def predict(user_id):
         'predictions': {'weekly': forecast, 'categories': categories},
         'advice': advice
     })
+
+@app.route('/api/chatbot', methods=['POST'])
+@login_required
+def chatbot():
+    """Chatbot endpoint that provides investment and financial advice"""
+    data = request.json
+    user_message = data.get('message', '')
+    
+    # Get user's financial data
+    user_id = session['user_id']
+    txs = Transaction.query.filter_by(user_id=user_id).all()
+    txs_data = [{'amount': t.amount, 'tx_type': t.tx_type, 'category': t.category} for t in txs]
+    budgets = {b.category: b.limit_amount for b in Budget.query.filter_by(user_id=user_id).all()}
+    
+    response = generate_chatbot_response(user_message, txs_data, budgets)
+    return jsonify({'response': response})
 
 @app.route('/api/budgets/<int:user_id>', methods=['GET'])
 @login_required
