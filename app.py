@@ -121,8 +121,8 @@ def admin_required(f):
 
 # ---------- ADAPTIVE ML FUNCTIONS ----------
 def forecast_spending(user_id, transactions, weeks=4):
-    # Get past average error
-    past_forecasts = ForecastLog.query.filter_by(user_id=user_id, actual_amount!=None).all()
+    # Get past average error – FIXED SYNTAX
+    past_forecasts = ForecastLog.query.filter_by(user_id=user_id).filter(ForecastLog.actual_amount != None).all()
     avg_error = np.mean([f.error for f in past_forecasts]) if past_forecasts else 0
 
     expenses = [t for t in transactions if t.tx_type == 'expense']
@@ -158,14 +158,11 @@ def forecast_spending(user_id, transactions, weeks=4):
             avg = np.mean(weekly_totals) if weekly_totals else 2000
             base_pred = {f'Week {i+1}': round(avg) for i in range(weeks)}
 
-    # Adjust by past error
     adjusted_pred = {week: max(0, round(val + avg_error)) for week, val in base_pred.items()}
 
-    # Store forecast for future comparison
     today = datetime.date.today()
     for i, (week, amount) in enumerate(adjusted_pred.items()):
         week_start = today + datetime.timedelta(days=7*i)
-        # Avoid duplicates
         existing = ForecastLog.query.filter_by(user_id=user_id, week_start=week_start).first()
         if not existing:
             log_entry = ForecastLog(user_id=user_id, week_start=week_start, predicted_amount=amount)
