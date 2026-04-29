@@ -5,7 +5,6 @@ from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 import numpy as np
 from sklearn.linear_model import LinearRegression
-from apscheduler.schedulers.background import BackgroundScheduler
 
 app = Flask(__name__, static_folder='static')
 CORS(app, supports_credentials=True)
@@ -18,7 +17,7 @@ app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
-# ---------- Models ----------
+# ---------- Models (ALL) ----------
 class User(db.Model):
     __tablename__ = 'users'
     id = db.Column(db.Integer, primary_key=True)
@@ -62,7 +61,7 @@ class AuditLog(db.Model):
     detail = db.Column(db.String(500))
     created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
 
-# ---------- NEW TABLES FOR LEARNING ----------
+# ---------- NEW TABLES (optional, but needed for learning) ----------
 class ForecastLog(db.Model):
     __tablename__ = 'forecast_logs'
     id = db.Column(db.Integer, primary_key=True)
@@ -91,7 +90,7 @@ with app.app_context():
         db.session.add(admin)
         db.session.commit()
 
-# ---------- Helper functions ----------
+# ---------- Helpers ----------
 def hash_password(pwd):
     return hashlib.sha256(pwd.encode()).hexdigest()
 
@@ -119,9 +118,9 @@ def admin_required(f):
         return f(*args, **kwargs)
     return decorated
 
-# ---------- ADAPTIVE ML FUNCTIONS ----------
+# ---------- ML Functions (with fixed syntax) ----------
 def forecast_spending(user_id, transactions, weeks=4):
-    # Get past average error – FIXED SYNTAX
+    # Get past average error
     past_forecasts = ForecastLog.query.filter_by(user_id=user_id).filter(ForecastLog.actual_amount != None).all()
     avg_error = np.mean([f.error for f in past_forecasts]) if past_forecasts else 0
 
@@ -163,10 +162,8 @@ def forecast_spending(user_id, transactions, weeks=4):
     today = datetime.date.today()
     for i, (week, amount) in enumerate(adjusted_pred.items()):
         week_start = today + datetime.timedelta(days=7*i)
-        existing = ForecastLog.query.filter_by(user_id=user_id, week_start=week_start).first()
-        if not existing:
-            log_entry = ForecastLog(user_id=user_id, week_start=week_start, predicted_amount=amount)
-            db.session.add(log_entry)
+        if not ForecastLog.query.filter_by(user_id=user_id, week_start=week_start).first():
+            db.session.add(ForecastLog(user_id=user_id, week_start=week_start, predicted_amount=amount))
     db.session.commit()
     return adjusted_pred
 
@@ -216,67 +213,184 @@ def generate_advice(user_id, transactions, budgets):
         else:
             if spent > 5000:
                 advice.append({'cat': cat, 'spent': spent, 'limit': None, 'pct': 0, 'status': 'warning', 'msg': f'high spending (₱{spent:,.2f}) - consider budget'})
-    # Prioritize advice that user found helpful in the past
     helpful_feedback = AdviceFeedback.query.filter_by(user_id=user_id, helpful=True).all()
     helpful_cats = set(fb.category for fb in helpful_feedback if fb.category)
     advice.sort(key=lambda x: (x['cat'] not in helpful_cats, x['status'] != 'over'), reverse=False)
     return advice
 
-# ---------- API ROUTES (keep all your existing ones) ----------
-# ... (your existing /api/register, /api/login, /api/logout, /api/me, /api/transactions, /api/summary, /api/predict, /api/budgets, /api/admin/*)
-# Only changes: /api/predict now uses forecast_spending above; /api/advice_feedback is new.
+# ---------- API ROUTES ----------
+@app.route('/api/register', methods=['POST'])
+def register():
+    data = request.json
+    name = data.get('name')
+    email = data.get('email')
+    password = data.get('password')
+    accepted_terms = data.get('accepted_terms', False)
+    if User.query.filter_by(email=email).first():
+        return jsonify({'error': 'Email exists'}), 400
+    hashed = hash_password(password)
+    user_count = User.query.count()
+    role = 'admin' if user_count == 0 else 'user'
+    new_user = User(name=name, email=email, password=hashed, role=role, accepted_terms=accepted_terms)
+    db.session.add(new_user)
+    db.session.commit()
+    return jsonify({'message': 'User created'}), 201
+
+@app.route('/api/login', methods=['POST'])
+def login():
+    data = request.json
+    email = data.get('email')
+    password = data.get('password')
+    user = User.query.filter_by(email=email).first()
+    if not user or user.password != hash_password(password):
+        return jsonify({'error': 'Invalid credentials'}), 401
+    session['user_id'] = user.id
+    return jsonify({'user': {'id': user.id, 'name': user.name, 'email': user.email, 'role': user.role}})
+
+@app.route('/api/logout', methods=['POST'])
+def logout():
+    session.clear()
+    return jsonify({'message': 'Logged out'})
+
+@app.route('/api/me')
+def me():
+    if 'user_id' not in session:
+        return jsonify({'error': 'Not authenticated'}), 401
+    user = User.query.get(session['user_id'])
+    return jsonify({'id': user.id, 'name': user.name, 'email': user.email, 'role': user.role})
+
+@app.route('/api/transactions', methods=['GET'])
+@login_required
+def get_transactions():
+    user_id = request.args.get('user_id', type=int)
+    if user_id != session['user_id']:
+        return jsonify({'error': 'Access denied'}), 403
+    txns = Transaction.query.filter_by(user_id=user_id).order_by(Transaction.tx_date.desc()).all()
+    return jsonify([{'tx_id': t.id, 'amount': t.amount, 'category': t.category, 'tx_type': t.tx_type, 'note': t.note, 'tx_date': t.tx_date.isoformat()} for t in txns])
+
+@app.route('/api/transactions', methods=['POST'])
+@login_required
+def add_transaction():
+    data = request.json
+    tx = Transaction(user_id=session['user_id'], amount=data['amount'], category=data['category'], tx_type=data['tx_type'], note=data.get('note',''))
+    db.session.add(tx)
+    db.session.commit()
+    return jsonify({'message': 'Saved'}), 201
+
+@app.route('/api/transactions/<int:tx_id>', methods=['DELETE'])
+@login_required
+def delete_transaction(tx_id):
+    tx = Transaction.query.get(tx_id)
+    if tx and tx.user_id == session['user_id']:
+        db.session.delete(tx)
+        db.session.commit()
+    return jsonify({'message': 'Deleted'})
+
+@app.route('/api/summary/<int:user_id>')
+@login_required
+def summary(user_id):
+    if user_id != session['user_id']:
+        return jsonify({'error': 'Access denied'}), 403
+    txns = Transaction.query.filter_by(user_id=user_id).all()
+    total_income = sum(t.amount for t in txns if t.tx_type == 'income')
+    total_expense = sum(t.amount for t in txns if t.tx_type == 'expense')
+    monthly = {}
+    for t in txns:
+        key = t.tx_date.strftime('%Y-%m')
+        if key not in monthly:
+            monthly[key] = {'income':0, 'expense':0}
+        if t.tx_type == 'income':
+            monthly[key]['income'] += t.amount
+        else:
+            monthly[key]['expense'] += t.amount
+    return jsonify({'balance': total_income - total_expense, 'income': total_income, 'expense': total_expense, 'monthly': monthly})
+
+@app.route('/api/predict/<int:user_id>')
+@login_required
+def predict(user_id):
+    if user_id != session['user_id']:
+        return jsonify({'error': 'Access denied'}), 403
+    txns = Transaction.query.filter_by(user_id=user_id).all()
+    budgets = {b.category: b.limit_amount for b in Budget.query.filter_by(user_id=user_id).all()}
+    score = calculate_health_score(user_id, txns, budgets)
+    forecast = forecast_spending(user_id, txns)
+    categories = {}
+    for t in txns:
+        if t.tx_type == 'expense':
+            categories[t.category] = categories.get(t.category, 0) + t.amount
+    advice = generate_advice(user_id, txns, budgets)
+    return jsonify({'score': score, 'predictions': {'weekly': forecast, 'categories': categories}, 'advice': advice})
+
+@app.route('/api/budgets/<int:user_id>', methods=['GET'])
+@login_required
+def get_budgets(user_id):
+    if user_id != session['user_id']:
+        return jsonify({'error': 'Access denied'}), 403
+    budgets = Budget.query.filter_by(user_id=user_id).all()
+    return jsonify([{'category': b.category, 'limit': b.limit_amount} for b in budgets])
+
+@app.route('/api/budgets/<int:user_id>', methods=['POST'])
+@login_required
+def set_budget(user_id):
+    if user_id != session['user_id']:
+        return jsonify({'error': 'Access denied'}), 403
+    data = request.json
+    budget = Budget.query.filter_by(user_id=user_id, category=data['category']).first()
+    if budget:
+        budget.limit_amount = data['limit']
+    else:
+        budget = Budget(user_id=user_id, category=data['category'], limit_amount=data['limit'])
+        db.session.add(budget)
+    db.session.commit()
+    return jsonify({'message': 'Budget saved'})
 
 @app.route('/api/advice_feedback', methods=['POST'])
 @login_required
 def advice_feedback():
     data = request.json
-    helpful = data.get('helpful')
-    category = data.get('category')
-    advice_text = data.get('advice_text')
-    feedback = AdviceFeedback(
-        user_id=session['user_id'],
-        category=category,
-        advice_text=advice_text,
-        helpful=helpful
-    )
-    db.session.add(feedback)
+    fb = AdviceFeedback(user_id=session['user_id'], category=data.get('category'), advice_text=data.get('advice_text'), helpful=data.get('helpful'))
+    db.session.add(fb)
     db.session.commit()
-    log_audit(session['user_id'], 'advice_feedback', request.remote_addr, f'{category} helpful={helpful}')
     return jsonify({'message': 'Feedback recorded'})
 
-# ---------- WEEKLY FORECAST CORRECTION JOB ----------
-def update_forecast_errors():
-    with app.app_context():
-        one_week_ago = datetime.date.today() - datetime.timedelta(days=7)
-        forecasts = ForecastLog.query.filter(
-            ForecastLog.week_start <= one_week_ago,
-            ForecastLog.actual_amount == None
-        ).all()
-        for f in forecasts:
-            week_end = f.week_start + datetime.timedelta(days=7)
-            actual = db.session.query(db.func.sum(Transaction.amount)).filter(
-                Transaction.user_id == f.user_id,
-                Transaction.tx_type == 'expense',
-                Transaction.tx_date >= f.week_start,
-                Transaction.tx_date < week_end
-            ).scalar() or 0
-            f.actual_amount = actual
-            f.error = actual - f.predicted_amount
+# Admin routes (simplified)
+@app.route('/api/admin/stats')
+@admin_required
+def admin_stats():
+    return jsonify({'total_users': User.query.count(), 'total_transactions': Transaction.query.count()})
+
+@app.route('/api/admin/users')
+@admin_required
+def admin_users():
+    users = User.query.all()
+    return jsonify([{'id': u.id, 'name': u.name, 'email': u.email, 'role': u.role} for u in users])
+
+@app.route('/api/admin/users/<int:uid>/toggle', methods=['POST'])
+@admin_required
+def admin_toggle(uid):
+    user = User.query.get(uid)
+    if user:
+        user.is_active = not user.is_active
         db.session.commit()
-        print(f"Updated {len(forecasts)} forecast records")
+    return jsonify({'message': 'Toggled'})
 
-# Start scheduler (only once)
-scheduler = BackgroundScheduler()
-scheduler.add_job(func=update_forecast_errors, trigger="interval", days=7)
-scheduler.start()
+@app.route('/api/admin/users/<int:uid>/role', methods=['POST'])
+@admin_required
+def admin_role(uid):
+    data = request.json
+    user = User.query.get(uid)
+    if user:
+        user.role = data['role']
+        db.session.commit()
+    return jsonify({'message': 'Role updated'})
 
-# ---------- Serve Frontend ----------
+# Serve static frontend
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def serve_index(path):
     if path.startswith('api/'):
         return jsonify({'error': 'API endpoint not found'}), 404
-    if path and os.path.exists(os.path.join(app.static_folder, path)) and not os.path.isdir(os.path.join(app.static_folder, path)):
+    if path and os.path.exists(os.path.join(app.static_folder, path)):
         return send_from_directory(app.static_folder, path)
     return send_from_directory(app.static_folder, 'index.html')
 
