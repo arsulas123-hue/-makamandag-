@@ -104,6 +104,7 @@
         .chat-input button:hover { transform: scale(1.05); }
         .ml-badge { background: linear-gradient(135deg, var(--purple), var(--blue)); padding: 2px 8px; border-radius: 12px; font-size: 0.7rem; font-weight: 600; margin-left: 8px; }
         .empty-state { text-align: center; padding: 40px 20px; color: var(--muted); }
+        .flex-form { display: flex; flex-direction: column; gap: 16px; }
     </style>
 </head>
 <body>
@@ -126,7 +127,8 @@
         </div>
     </div>
     <div id="toast"></div>
-    <!-- Dashboard -->
+
+    <!-- DASHBOARD SCREEN -->
     <div class="screen active" id="screen-dashboard">
         <div class="stats-grid">
             <div class="stat-card green"><div class="stat-value" id="sBalance">—</div><div class="stat-label">Balance</div></div>
@@ -142,40 +144,59 @@
             <div class="panel"><div class="panel-header"><div class="panel-title">ML Spending Forecast (4 weeks) <span class="ml-badge">LIVE ML MODEL</span></div><span style="background:var(--green-dim);color:var(--green);padding:4px 12px;border-radius:99px;">AI Powered</span></div><div id="forecastBars"></div></div>
             <div class="panel"><div class="panel-header"><div class="panel-title">Budget Intelligence - AI Advice</div></div><div id="adviceList"></div></div>
         </div>
+        <div class="panel" style="margin-top: 20px;"><div class="panel-header"><div class="panel-title">Recent Transactions</div></div><div id="recentList"></div></div>
     </div>
-    <!-- Inside the "Add Transaction" screen (screen-add) -->
-<div class="stats-grid" style="grid-template-columns: 1fr 1fr;">
-    <!-- Left side: existing transaction form (unchanged) -->
-    <div class="panel"> ... </div>
 
-    <!-- Right side: NEW Budget Engine (flowchart implementation) -->
-    <div class="panel">
-        <div class="panel-header">
-            <div class="panel-title">🧠 AI Budget Engine (Flowchart)</div>
-            <span class="ml-badge">ML v2.0</span>
+    <!-- ADD TRANSACTION SCREEN -->
+    <div class="screen" id="screen-add">
+        <div class="stats-grid">
+            <div class="panel">
+                <div class="panel-header"><div class="panel-title">➕ New Transaction</div></div>
+                <form id="txForm" class="flex-form">
+                    <input type="number" id="txAmount" placeholder="Amount (₱)" step="0.01" required>
+                    <select id="txCategory" required>
+                        <option value="Food & Dining">Food & Dining</option>
+                        <option value="Transport">Transport</option>
+                        <option value="Groceries">Groceries</option>
+                        <option value="Entertainment">Entertainment</option>
+                        <option value="Health">Health</option>
+                        <option value="Other">Other</option>
+                    </select>
+                    <div style="display:flex; gap:10px;">
+                        <button type="button" id="btnInc" style="flex:1;">Income</button>
+                        <button type="button" id="btnExp" style="flex:1;">Expense</button>
+                    </div>
+                    <input type="hidden" id="txType" value="expense">
+                    <input type="text" id="txNote" placeholder="Note (optional)">
+                    <button type="submit" class="btn-green">Save Transaction</button>
+                </form>
+            </div>
+            <div class="panel">
+                <div class="panel-header"><div class="panel-title">🧠 AI Budget Engine (Flowchart)</div><span class="ml-badge">ML v2.0</span></div>
+                <div id="budgetEngineStatus">⚙️ Set your profile to generate smart scenarios</div>
+                <div style="margin-top: 16px;">
+                    <label>Social Status</label>
+                    <select id="socialStatus" class="budget-input">
+                        <option value="Low">Low Class</option>
+                        <option value="Middle" selected>Middle Class</option>
+                        <option value="Upper">Upper Class</option>
+                    </select>
+                </div>
+                <div style="margin-top: 12px;">
+                    <label>Spending Mindset</label>
+                    <select id="spendingMindset" class="budget-input">
+                        <option value="Saver">Saver 💰</option>
+                        <option value="Neutral" selected>Neutral ⚖️</option>
+                        <option value="Spender">Spender 💸</option>
+                    </select>
+                </div>
+                <button id="saveProfileBtn" class="btn-green" style="margin: 16px 0;">Save Profile & Generate Scenarios</button>
+                <div id="scenariosContainer" style="margin-top: 20px;"></div>
+            </div>
         </div>
-        <div id="budgetEngineStatus">⚙️ Set your profile to generate smart scenarios</div>
-        <div style="margin-top: 16px;">
-            <label>Social Status</label>
-            <select id="socialStatus" class="budget-input">
-                <option value="Low">Low Class</option>
-                <option value="Middle" selected>Middle Class</option>
-                <option value="Upper">Upper Class</option>
-            </select>
-        </div>
-        <div style="margin-top: 12px;">
-            <label>Spending Mindset</label>
-            <select id="spendingMindset" class="budget-input">
-                <option value="Saver">Saver 💰</option>
-                <option value="Neutral" selected>Neutral ⚖️</option>
-                <option value="Spender">Spender 💸</option>
-            </select>
-        </div>
-        <button id="saveProfileBtn" class="btn-green" style="margin: 16px 0;">Save Profile & Generate Scenarios</button>
-        <div id="scenariosContainer" style="margin-top: 20px;"></div>
     </div>
-</div>
-    <!-- Analytics -->
+
+    <!-- ANALYTICS SCREEN -->
     <div class="screen" id="screen-analytics">
         <div class="chart-grid">
             <div class="panel"><div class="panel-header"><div class="panel-title">Weekly Spending Forecast <span class="ml-badge">ML PREDICTION</span></div></div><canvas id="forecastChart" height="200"></canvas></div>
@@ -183,18 +204,26 @@
         </div>
         <div class="panel"><div class="panel-header"><div class="panel-title">ML Intelligence Report</div></div><div id="fullAdvice"></div></div>
     </div>
-    <!-- Budgets -->
+
+    <!-- BUDGETS SCREEN -->
     <div class="screen" id="screen-budgets">
         <div class="panel">
             <div class="panel-header"><div class="panel-title">Monthly Budget Limits</div><button class="btn-green" id="saveBudgetsBtn">Save All</button></div>
             <div id="budgetInputs" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px;"></div>
         </div>
     </div>
-    <!-- Transactions History -->
+
+    <!-- TRANSACTIONS HISTORY SCREEN -->
     <div class="screen" id="screen-transactions">
-        <div class="table-wrap"><table><thead><tr><th>Date</th><th>Category</th><th>Note</th><th>Type</th><th>Amount</th></tr></thead><tbody id="txTableBody"></tbody></table></div>
+        <div class="table-wrap">
+            <table>
+                <thead><tr><th>Date</th><th>Category</th><th>Note</th><th>Type</th><th>Amount</th></tr></thead>
+                <tbody id="txTableBody"></tbody>
+            </table>
+        </div>
     </div>
-    <!-- Auth Overlay -->
+
+    <!-- AUTH OVERLAY -->
     <div id="authOverlay" class="auth-overlay">
         <div class="auth-card">
             <h2 id="authTitle">Welcome back</h2>
@@ -208,7 +237,8 @@
             <div id="toggleAuthLink" class="auth-link">Don't have an account? Register</div>
         </div>
     </div>
-    <!-- Chatbot -->
+
+    <!-- CHATBOT -->
     <div id="chatContainer" class="chat-container">
         <div class="chat-window">
             <div class="chat-header" id="chatHeader"><span>🤖 SmartSpend AI Assistant <span class="ml-badge">ML POWERED</span></span><button id="closeChatBtn">✕</button></div>
@@ -217,6 +247,7 @@
         </div>
     </div>
 </main>
+
 <script>
 let currentUser = null;
 let allTransactions = [];
@@ -271,8 +302,6 @@ function addWasteAlert() {
     }
 }
 
-    // Inside your main <script> section, add:
-
 async function saveProfileAndGenerate() {
     const social = document.getElementById('socialStatus').value;
     const mindset = document.getElementById('spendingMindset').value;
@@ -311,7 +340,6 @@ async function displayScenarios() {
         `;
         container.appendChild(card);
     }
-    // Attach event listeners for preview/approve
     document.querySelectorAll('.preview-scenario').forEach(btn => {
         btn.addEventListener('click', (e) => {
             const limits = JSON.parse(btn.dataset.limits);
@@ -326,7 +354,7 @@ async function displayScenarios() {
                 body: JSON.stringify({ limits })
             });
             toast('Budgets applied! Analytics & forecast updated.');
-            await loadDashboard();   // refresh charts and advice
+            await loadDashboard();
             navigate('dashboard');
         });
     });
@@ -340,10 +368,6 @@ function showBudgetPreview(limits) {
     alert(msg);
 }
 
-// Bind the new button
-document.getElementById('saveProfileBtn').addEventListener('click', saveProfileAndGenerate);
-
-// Also load existing profile on page load (inside init or loadDashboard)
 async function loadUserProfile() {
     if (!currentUser) return;
     try {
@@ -352,7 +376,27 @@ async function loadUserProfile() {
         document.getElementById('spendingMindset').value = profile.spending_mindset;
     } catch(e) {}
 }
-// Call loadUserProfile after successful login.
+
+async function loadBudgets() {
+    if(!currentUser) return;
+    const budgets = await apiFetch(`/api/budgets/${currentUser.id}`);
+    const limits = Object.fromEntries(budgets.map(b => [b.category, b.limit]));
+    const categories = ['Food & Dining', 'Transport', 'Groceries', 'Entertainment', 'Health'];
+    const container = document.getElementById('budgetInputs');
+    if(!container) return;
+    container.innerHTML = categories.map(cat => `<div><label>${cat}</label><input type="number" id="budget_${cat.replace(/\s/g,'')}" value="${limits[cat]||''}" placeholder="Limit" style="width:100%"></div>`).join('');
+    document.getElementById('saveBudgetsBtn').onclick = async () => {
+        for(const cat of categories) {
+            const val = parseFloat(document.getElementById(`budget_${cat.replace(/\s/g,'')}`).value);
+            if(val && val>0) await apiFetch(`/api/budgets/${currentUser.id}`, { method: 'POST', body: JSON.stringify({ category: cat, limit: val }) });
+        }
+        toast('Budgets saved!');
+        await loadDashboard();
+    };
+}
+
+document.getElementById('saveProfileBtn').addEventListener('click', saveProfileAndGenerate);
+
 async function loadDashboard() {
     if (!currentUser) return;
     try {
@@ -376,6 +420,7 @@ async function loadDashboard() {
             monthlyCtx.clearRect(0,0, document.getElementById('monthlyChart').width, document.getElementById('monthlyChart').height);
             const donutCtx = document.getElementById('donutChart').getContext('2d');
             donutCtx.clearRect(0,0, document.getElementById('donutChart').width, document.getElementById('donutChart').height);
+            document.getElementById('recentList').innerHTML = '<div class="empty-state">No recent transactions</div>';
             return;
         }
 
@@ -426,21 +471,7 @@ async function loadAnalytics() {
     catBarChart = new Chart(document.getElementById('catBarChart'), { type: 'bar', data: { labels: Object.keys(pred.predictions.categories), datasets: [{ label: 'Total Spent', data: Object.values(pred.predictions.categories), backgroundColor: '#3b82f6', borderRadius: 8 }] }, options: { indexAxis: 'y' } });
     document.getElementById('fullAdvice').innerHTML = pred.advice.map(a => `<div class="advice-item"><strong>${a.cat}</strong><br>${a.msg}</div>`).join('');
 }
-async function loadBudgets() {
-    if(!currentUser) return;
-    const budgets = await apiFetch(`/api/budgets/${currentUser.id}`);
-    const limits = Object.fromEntries(budgets.map(b => [b.category, b.limit]));
-    const categories = ['Food & Dining', 'Transport', 'Groceries', 'Entertainment', 'Health'];
-    document.getElementById('budgetInputs').innerHTML = categories.map(cat => `<div><label>${cat}</label><input type="number" id="budget_${cat.replace(/\s/g,'')}" value="${limits[cat]||''}" placeholder="Limit" style="width:100%"></div>`).join('');
-    document.getElementById('saveBudgetsBtn').onclick = async () => {
-        for(const cat of categories) {
-            const val = parseFloat(document.getElementById(`budget_${cat.replace(/\s/g,'')}`).value);
-            if(val && val>0) await apiFetch(`/api/budgets/${currentUser.id}`, { method: 'POST', body: JSON.stringify({ category: cat, limit: val }) });
-        }
-        toast('Budgets saved!');
-        await loadDashboard();
-    };
-}
+
 // Chatbot
 document.getElementById('sendChatBtn').addEventListener('click', async () => {
     const input = document.getElementById('chatInput');
@@ -457,7 +488,9 @@ document.getElementById('sendChatBtn').addEventListener('click', async () => {
     container.scrollTop = container.scrollHeight;
 });
 document.getElementById('chatInput').addEventListener('keypress', (e) => { if(e.key==='Enter') document.getElementById('sendChatBtn').click(); });
-// Navigation & events
+document.getElementById('closeChatBtn').addEventListener('click', () => { document.getElementById('chatContainer').style.display = 'none'; });
+
+// Navigation
 document.querySelectorAll('.nav-item').forEach(btn => btn.addEventListener('click', () => { const screen = btn.getAttribute('data-nav'); if(screen) navigate(screen); }));
 function navigate(screenId) {
     document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
@@ -471,6 +504,8 @@ function navigate(screenId) {
     if(screenId === 'budgets') loadBudgets();
     if(screenId === 'transactions') renderTransactions();
 }
+
+// Transaction form buttons
 document.getElementById('btnExp').addEventListener('click', () => { document.getElementById('txType').value = 'expense'; document.getElementById('btnExp').style.opacity='1'; document.getElementById('btnInc').style.opacity='0.5'; });
 document.getElementById('btnInc').addEventListener('click', () => { document.getElementById('txType').value = 'income'; document.getElementById('btnInc').style.opacity='1'; document.getElementById('btnExp').style.opacity='0.5'; });
 document.getElementById('txForm').addEventListener('submit', async (e) => {
@@ -478,10 +513,11 @@ document.getElementById('txForm').addEventListener('submit', async (e) => {
     const data = { amount: parseFloat(document.getElementById('txAmount').value), category: document.getElementById('txCategory').value, tx_type: document.getElementById('txType').value, note: document.getElementById('txNote').value };
     try { await apiFetch('/api/transactions', { method:'POST', body: JSON.stringify(data) }); toast('Transaction saved!'); document.getElementById('txForm').reset(); await loadDashboard(); } catch(e) { toast('Error'); }
 });
+
+// Auth
 document.getElementById('signoutBtn').addEventListener('click', logout);
 document.getElementById('toggleAuthLink').addEventListener('click', toggleAuthMode);
 document.getElementById('authBtn').addEventListener('click', handleAuth);
-document.getElementById('closeChatBtn').addEventListener('click', () => { document.getElementById('chatContainer').style.display = 'none'; });
 function toggleAuthMode() {
     isLogin = !isLogin;
     document.getElementById('authTitle').innerText = isLogin ? 'Welcome back' : 'Create Account';
@@ -522,6 +558,7 @@ async function handleAuth() {
         currentUser = data.user;
         document.getElementById('authOverlay').style.display = 'none';
         document.getElementById('userAvatar').innerText = currentUser.name.slice(0,2).toUpperCase();
+        await loadUserProfile();
         await loadDashboard();
         navigate('dashboard');
     } catch(e) { msgDiv.innerText = e.message; }
@@ -541,9 +578,12 @@ async function init() {
             currentUser = user;
             document.getElementById('authOverlay').style.display = 'none';
             document.getElementById('userAvatar').innerText = user.name.slice(0,2).toUpperCase();
+            await loadUserProfile();
             await loadDashboard();
+        } else {
+            document.getElementById('authOverlay').style.display = 'flex';
         }
-    } catch(e) { console.log('Not authenticated'); }
+    } catch(e) { console.log('Not authenticated'); document.getElementById('authOverlay').style.display = 'flex'; }
 }
 init();
 </script>
