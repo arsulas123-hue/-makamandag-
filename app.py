@@ -43,7 +43,8 @@ class Transaction(db.Model):
     amount = db.Column(db.Float, nullable=False)
     category = db.Column(db.String(50), nullable=False)
     tx_type = db.Column(db.String(10), nullable=False)       # 'income' or 'expense'
-    is_need = db.Column(db.Boolean, default=False)          # marks need vs want
+    is_need = db.Column(db.Boolean, default=False)           # manually set need/want
+    priority = db.Column(db.Integer, default=0)             # 0 = Low, 1 = Medium, 2 = High, 3 = Critical
     note = db.Column(db.String(200))
     tx_date = db.Column(db.DateTime, default=datetime.datetime.utcnow)
 
@@ -66,12 +67,18 @@ class UserProfile(db.Model):
 # ========== CREATE TABLES & MIGRATIONS ==========
 with app.app_context():
     db.create_all()
-    # Add is_need column to transactions if it doesn't exist (SQLite workaround)
+    # Add is_need column if missing
     try:
         db.session.execute('ALTER TABLE transactions ADD COLUMN is_need BOOLEAN DEFAULT 0')
         db.session.commit()
     except Exception:
-        pass  # column already exists
+        pass
+    # Add priority column if missing
+    try:
+        db.session.execute('ALTER TABLE transactions ADD COLUMN priority INTEGER DEFAULT 0')
+        db.session.commit()
+    except Exception:
+        pass
 
     if not User.query.filter_by(email='admin@smartspend.com').first():
         hashed = hashlib.sha256('admin123'.encode()).hexdigest()
@@ -102,7 +109,13 @@ def get_user_profile(user_id):
         'wants_needs': json.loads(profile.wants_needs_json) if profile.wants_needs_json else {}
     }
 
-# ---------- ML Functions (enhanced with needs priority) ----------
+# ---------- ML Functions (enhanced with priority) ----------
+def _priority_penalty(priority):
+    """Lower priority => higher penalty multiplier for overspending."""
+    # priority 0 (low) -> 2.0, 1 (medium) -> 1.5, 2 (high) -> 0.8, 3 (critical) -> 0.3
+    penalties = {0: 2.0, 1: 1.5, 2: 0.8, 3: 0.3}
+    return penalties.get(priority, 1.5)
+
 def calculate_health_score(transactions, budgets):
     income = sum(t['amount'] for t in transactions if t['tx_type'] == 'income')
     expense = sum(t['amount'] for t in transactions if t['tx_type'] == 'expense')
@@ -111,24 +124,21 @@ def calculate_health_score(transactions, budgets):
     savings_rate = max(0, min(1, (income - expense) / income))
     score = savings_rate * 100
 
-    # Budget adherence penalty (needs vs wants)
     cat_spending = {}
-    need_spending = {}
     for t in transactions:
         if t['tx_type'] == 'expense':
             cat_spending[t['category']] = cat_spending.get(t['category'], 0) + t['amount']
-            if t.get('is_need', False):
-                need_spending[t['category']] = need_spending.get(t['category'], 0) + t['amount']
 
     budget_penalty = 0
     for cat, limit in budgets.items():
         spent = cat_spending.get(cat, 0)
         if limit > 0 and spent > limit:
             over_ratio = (spent - limit) / limit
-            # Penalize more if the overspending is on a want (not a need)
-            is_need_category = cat in need_spending and need_spending[cat] > spent * 0.7
-            penalty_multiplier = 0.5 if is_need_category else 1.5
-            budget_penalty += over_ratio * 10 * penalty_multiplier
+            # Find the lowest priority (worst case) spent in that category to apply penalty
+            cat_priorities = [t.get('priority', 0) for t in transactions if t['category'] == cat and t['tx_type'] == 'expense']
+            worst_priority = min(cat_priorities) if cat_priorities else 0
+            multiplier = _priority_penalty(worst_priority)
+            budget_penalty += over_ratio * 10 * multiplier
     if budgets:
         score = max(0, min(100, score - budget_penalty))
     return int(score)
@@ -167,22 +177,29 @@ def generate_advice(transactions, budgets, user_profile):
         spent = cat_spending.get(cat, 0)
         if limit > 0:
             if spent > limit:
-                advice.append({"cat": cat, "msg": f"⚠️ Overspent by ₱{spent-limit:.2f}. Reduce or adjust budget."})
+                # Show priority of the biggest overspent category
+                cat_prios = [t.get('priority', 0) for t in transactions if t['category'] == cat and t['tx_type'] == 'expense']
+                worst_prio = min(cat_prios) if cat_prios else 0
+                prio_label = {0: 'Low', 1: 'Medium', 2: 'High', 3: 'Critical'}.get(worst_prio, 'Low')
+                advice.append({
+                    "cat": cat,
+                    "msg": f"⚠️ Overspent by ₱{spent-limit:.2f} (Priority: {prio_label}). Reduce or adjust budget."
+                })
             elif spent < limit * 0.7:
-                advice.append({"cat": cat, "msg": f"✅ Great! You underspent by ₱{limit-spent:.2f}. Consider saving the difference."})
+                advice.append({"cat": cat, "msg": f"✅ Great! Underspent by ₱{limit-spent:.2f}. Consider saving."})
             else:
                 advice.append({"cat": cat, "msg": f"✔️ On track. Spent ₱{spent:.2f} of ₱{limit:.2f} budget."})
     if not advice:
         advice.append({"cat": "General", "msg": "No budget limits set. Set budgets to get personalized advice."})
 
-    # Additional AI insight based on mindset
+    # Additional insight based on mindset
     mindset = user_profile.get('spending_mindset', 'Neutral')
     if mindset == 'Saver' and cat_spending:
         total = sum(cat_spending.values())
         if total > 0:
-            advice.append({"cat": "Mindset", "msg": f"🧠 You are a Saver. Try to invest {min(30, int((total/5000)*10))}% of your surplus."})
+            advice.append({"cat": "Mindset", "msg": f"🧠 Saver mode. Aim for {min(30, int((total/5000)*10))}% of surplus to investments."})
     elif mindset == 'Spender':
-        advice.append({"cat": "Mindset", "msg": "💸 Spender alert! Consider the 30‑day rule before non‑essential purchases."})
+        advice.append({"cat": "Mindset", "msg": "💸 Spender alert! Use priority to rank expenses before spending."})
     return advice
 
 def generate_scenarios(user_id, transactions, budgets):
@@ -194,17 +211,13 @@ def generate_scenarios(user_id, transactions, budgets):
     social = profile['social_status']
     mindset = profile['spending_mindset']
     cat_spend = {}
-    # Separate needs and wants spending
     need_spend = {}
-    want_spend = {}
     for e in expenses:
         cat = e['category']
         amt = e['amount']
         cat_spend[cat] = cat_spend.get(cat, 0) + amt
         if e.get('is_need', False):
             need_spend[cat] = need_spend.get(cat, 0) + amt
-        else:
-            want_spend[cat] = want_spend.get(cat, 0) + amt
 
     default_cats = ['Food & Dining', 'Transport', 'Groceries', 'Entertainment', 'Health']
 
@@ -212,27 +225,22 @@ def generate_scenarios(user_id, transactions, budgets):
         limits = {}
         for cat in default_cats:
             spent = cat_spend.get(cat, 0)
-            # Needs get higher budget allocation
             if cat in need_spend:
                 multiplier = essential_mult
-            elif cat in want_spend:
-                multiplier = disc_mult
             else:
-                multiplier = disc_mult  # default to discretionary
+                multiplier = disc_mult
             if cat in ['Food & Dining', 'Groceries', 'Health']:
                 suggested = max(spent * multiplier, 2000) if spent > 0 else 3000
             else:
                 suggested = max(spent * multiplier, 1000) if spent > 0 else 2000
             limits[cat] = round(suggested)
 
-        # Adjust for social status
         if social == 'Low':
             limits['Entertainment'] = limits.get('Entertainment', 1500) * 0.6
             limits['Transport'] = limits.get('Transport', 2000) * 0.8
         elif social == 'Upper':
             limits['Entertainment'] = limits.get('Entertainment', 3000) * 1.5
             limits['Health'] = limits.get('Health', 3000) * 1.3
-        # Adjust for mindset
         if mindset == 'Saver':
             for cat in ['Entertainment', 'Transport']:
                 limits[cat] = limits.get(cat, 2000) * 0.7
@@ -370,18 +378,22 @@ def transactions():
         txns = Transaction.query.filter_by(user_id=user_id).order_by(Transaction.tx_date.desc()).all()
         return jsonify([{
             'id': t.id, 'amount': t.amount, 'category': t.category, 'tx_type': t.tx_type,
-            'is_need': t.is_need, 'note': t.note, 'tx_date': t.tx_date.isoformat()
+            'is_need': t.is_need, 'priority': t.priority,
+            'note': t.note, 'tx_date': t.tx_date.isoformat()
         } for t in txns])
     else:
         data = request.json
         if not data or 'amount' not in data or 'category' not in data or 'tx_type' not in data:
             return jsonify({'error': 'Invalid transaction data'}), 400
+        if data['tx_type'] == 'expense' and 'priority' not in data:
+            data['priority'] = 0  # default low priority if not supplied
         txn = Transaction(
             user_id=user_id,
             amount=data['amount'],
             category=data['category'],
             tx_type=data['tx_type'],
             is_need=data.get('is_need', False),
+            priority=data.get('priority', 0),
             note=data.get('note', ''),
             tx_date=datetime.datetime.utcnow()
         )
@@ -424,7 +436,7 @@ def predict(user_id):
     if not txns:
         return jsonify({'has_data': False, 'score': None, 'predictions': {}, 'advice': []})
     tx_list = [{'amount': t.amount, 'category': t.category, 'tx_type': t.tx_type,
-                'is_need': t.is_need, 'tx_date': t.tx_date} for t in txns]
+                'is_need': t.is_need, 'priority': t.priority, 'tx_date': t.tx_date} for t in txns]
     budgets = Budget.query.filter_by(user_id=user_id).all()
     budget_dict = {b.category: b.limit_amount for b in budgets}
     profile = get_user_profile(user_id)
@@ -451,7 +463,7 @@ def budget_scenarios(user_id):
     if not txns:
         return jsonify({'scenarios': []})
     tx_list = [{'amount': t.amount, 'category': t.category, 'tx_type': t.tx_type,
-                'is_need': t.is_need, 'tx_date': t.tx_date} for t in txns]
+                'is_need': t.is_need, 'priority': t.priority, 'tx_date': t.tx_date} for t in txns]
     budgets = Budget.query.filter_by(user_id=user_id).all()
     budget_dict = {b.category: b.limit_amount for b in budgets}
     scenarios = generate_scenarios(user_id, tx_list, budget_dict)
@@ -473,7 +485,6 @@ def budget_longevity(user_id):
             total_expense += t.amount
     if total_expense == 0:
         return jsonify({'error': 'No expense data yet'}), 400
-
     now = datetime.datetime.utcnow()
     thirty_days_ago = now - datetime.timedelta(days=30)
     recent_expenses = [t for t in txns if t.tx_type == 'expense' and t.tx_date >= thirty_days_ago]
@@ -483,13 +494,11 @@ def budget_longevity(user_id):
         avg_daily = total_expense / 30.0
     if avg_daily <= 0:
         return jsonify({'error': 'No spending to project'}), 400
-
     days_left = balance / avg_daily if avg_daily > 0 else 0
     hours_left = days_left * 24
     weeks_left = days_left / 7
     months_left = days_left / 30.44
     years_left = days_left / 365.25
-
     return jsonify({
         'balance': balance,
         'avg_daily_spend': round(avg_daily, 2),
@@ -503,45 +512,56 @@ def budget_longevity(user_id):
 @app.route('/api/chatbot', methods=['POST'])
 @login_required
 def chatbot():
-    """Simple ML‑augmented chatbot that answers based on user's financial data."""
     data = request.json
     user_msg = data.get('message', '').lower()
     user_id = session['user_id']
 
-    # Fetch user's financial context
     txns = Transaction.query.filter_by(user_id=user_id).all()
     if not txns:
-        return jsonify({'response': "You don't have any transactions yet. Add some income/expenses and I'll give you personalized advice!"})
+        return jsonify({'response': "You don't have any transactions yet. Add some to get personalized advice!"})
 
     income = sum(t.amount for t in txns if t.tx_type == 'income')
     expense = sum(t.amount for t in txns if t.tx_type == 'expense')
     savings = income - expense
     savings_rate = (savings / income * 100) if income > 0 else 0
 
-    # Simple keyword matching
+    def _prio_label(p):
+        return {0: 'Low', 1: 'Medium', 2: 'High', 3: 'Critical'}.get(p, 'Low')
+
     if 'health score' in user_msg or 'score' in user_msg:
         budgets = Budget.query.filter_by(user_id=user_id).all()
         budget_dict = {b.category: b.limit_amount for b in budgets}
-        tx_list = [{'amount': t.amount, 'category': t.category, 'tx_type': t.tx_type, 'is_need': t.is_need} for t in txns]
+        tx_list = [{'amount': t.amount, 'category': t.category, 'tx_type': t.tx_type, 'is_need': t.is_need, 'priority': t.priority} for t in txns]
         score = calculate_health_score(tx_list, budget_dict)
-        return jsonify({'response': f"Your current ML Health Score is {score}/100. { 'Great job! Keep saving.' if score >= 70 else 'Try to reduce discretionary spending and increase savings.' }"})
+        return jsonify({'response': f"ML Health Score: {score}/100. { 'Great job!' if score >= 70 else 'Work on reducing low-priority expenses.' }"})
 
     elif 'forecast' in user_msg or 'future' in user_msg:
         tx_list = [{'amount': t.amount, 'category': t.category, 'tx_type': t.tx_type, 'tx_date': t.tx_date} for t in txns]
         forecast = forecast_spending(tx_list)
         weeks = ', '.join([f"{k}: ₱{v:,.2f}" for k,v in forecast.items()])
-        return jsonify({'response': f"ML spending forecast for the next 4 weeks: {weeks}. Adjust your budget to stay on track."})
+        return jsonify({'response': f"ML forecast: {weeks}. Prioritize high-priority needs this month."})
 
     elif 'invest' in user_msg or 'investment' in user_msg:
-        return jsonify({'response': f"Based on your savings rate ({savings_rate:.1f}%), consider putting {int(savings_rate*0.3)}% of savings into low‑cost index funds. I recommend starting with ₱{max(500, int(savings*0.2)):,.0f}."})
+        return jsonify({'response': f"With {savings_rate:.1f}% savings rate, consider ₱{max(500, int(savings*0.2)):,.0f} in index funds. High priority spending should be covered first."})
 
     elif 'needs' in user_msg or 'wants' in user_msg:
         needs = sum(t.amount for t in txns if t.tx_type == 'expense' and t.is_need)
         wants = expense - needs
-        return jsonify({'response': f"Your spending: Needs = ₱{needs:,.2f} ({needs/expense*100:.1f}%), Wants = ₱{wants:,.2f} ({wants/expense*100:.1f}%). Aim for at least 50% on needs, 30% on wants, 20% savings."})
+        return jsonify({'response': f"Needs: ₱{needs:,.2f}, Wants: ₱{wants:,.2f}. Set priorities to auto‑classify needs."})
+
+    elif 'priority' in user_msg or 'ranking' in user_msg:
+        # Show expenses by priority
+        prios = {}
+        for t in txns:
+            if t.tx_type == 'expense':
+                p = t.priority
+                prios.setdefault(p, 0)
+                prios[p] += t.amount
+        msg = "Spending by priority: " + ", ".join([f"{_prio_label(p)}: ₱{amt:,.2f}" for p, amt in sorted(prios.items())])
+        return jsonify({'response': msg + ". Higher priority = more essential. Cut low priority first."})
 
     else:
-        return jsonify({'response': f"I can help with: 'health score', 'forecast', 'investment advice', or 'needs vs wants'. Your current savings rate is {savings_rate:.1f}%."})
+        return jsonify({'response': f"I can help with: 'health score', 'forecast', 'investment advice', 'needs vs wants', 'priority / ranking'. Your savings rate: {savings_rate:.1f}%."})
 
 @app.route('/api/export/csv')
 @login_required
@@ -550,20 +570,21 @@ def export_csv():
     txns = Transaction.query.filter_by(user_id=user_id).order_by(Transaction.tx_date.desc()).all()
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(['Date', 'Category', 'Type', 'Amount', 'Need/Want', 'Note'])
+    writer.writerow(['Date', 'Category', 'Type', 'Amount', 'Need/Want', 'Priority', 'Note'])
     for t in txns:
-        writer.writerow([t.tx_date.strftime('%Y-%m-%d'), t.category, t.tx_type, t.amount, 'Need' if t.is_need else 'Want', t.note])
+        writer.writerow([t.tx_date.strftime('%Y-%m-%d'), t.category, t.tx_type, t.amount,
+                         'Need' if t.is_need else 'Want', _prio_label(t.priority), t.note])
     response = Response(output.getvalue(), mimetype='text/csv')
     response.headers['Content-Disposition'] = 'attachment; filename=smartspend_export.csv'
     return response
 
-# ========== FRONTEND (Single HTML file) ==========
+# ========== FRONTEND (Single HTML file - updated with priority) ==========
 HTML_PAGE = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SmartSpend · AI-Powered Finance</title>
     <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
@@ -600,6 +621,7 @@ HTML_PAGE = """
         .panel { background: var(--panel); backdrop-filter: blur(10px); border: 1px solid var(--border2); border-radius: var(--r); padding: 22px; margin-bottom: 20px; }
         .panel-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 12px; }
         .btn-green { background: linear-gradient(135deg, var(--green), #009e5f); color: #000; border: none; padding: 10px 18px; border-radius: 10px; cursor: pointer; font-weight: 600; }
+        input, select, button { font-family: inherit; }
         input, select { background: var(--bg3); color: var(--text); border: 1px solid var(--border2); border-radius: 10px; padding: 10px 14px; outline: none; }
         .flex-form { display: flex; flex-direction: column; gap: 16px; }
         .forecast-row { display: flex; align-items: center; gap: 14px; margin-bottom: 14px; }
@@ -652,29 +674,68 @@ HTML_PAGE = """
         <div class="panel"><div class="panel-header">AI Advice</div><div id="adviceList"></div></div>
     </div>
 
-    <!-- ADD TRANSACTION -->
+    <!-- ADD TRANSACTION (with priority) -->
     <div class="screen" id="screen-add">
         <div class="stats-grid">
             <div class="panel"><div class="panel-header">➕ Add Income</div><form id="incomeForm" class="flex-form"><input type="number" id="incomeAmount" placeholder="Amount (₱)" step="0.01" required><input type="text" id="incomeNote" placeholder="Note"><button type="submit" class="btn-green">Record Income</button></form></div>
-            <div class="panel"><div class="panel-header">📝 Record Expense (with Needs/Wants)</div><form id="expenseForm" class="flex-form"><input type="number" id="expenseAmount" placeholder="Amount (₱)" step="0.01" required><select id="expenseCategory"><option>Food & Dining</option><option>Transport</option><option>Groceries</option><option>Entertainment</option><option>Health</option><option>Other</option></select><label><input type="checkbox" id="isNeed"> ✅ Mark as NEED</label><input type="text" id="expenseNote" placeholder="Note"><button type="submit" class="btn-green">Record Expense</button></form></div>
+            <div class="panel"><div class="panel-header">📝 Record Expense (with Needs/Wants & Priority)</div>
+                <form id="expenseForm" class="flex-form">
+                    <input type="number" id="expenseAmount" placeholder="Amount (₱)" step="0.01" required>
+                    <select id="expenseCategory">
+                        <option>Food & Dining</option><option>Transport</option><option>Groceries</option>
+                        <option>Entertainment</option><option>Health</option><option>Other</option>
+                    </select>
+                    <div style="display:flex; gap:10px; align-items:center;">
+                        <label><input type="checkbox" id="isNeed"> ✅ NEED</label>
+                        <label style="margin-left:12px;">Priority:
+                            <select id="expensePriority">
+                                <option value="0">Low</option>
+                                <option value="1" selected>Medium</option>
+                                <option value="2">High</option>
+                                <option value="3">Critical</option>
+                            </select>
+                        </label>
+                    </div>
+                    <input type="text" id="expenseNote" placeholder="Note">
+                    <button type="submit" class="btn-green">Record Expense</button>
+                </form>
+            </div>
         </div>
-        <div class="panel"><div class="panel-header">🧠 AI Budget Engine</div><div style="display:flex; gap:16px;"><select id="socialStatus"><option>Low</option><option selected>Middle</option><option>Upper</option></select><select id="spendingMindset"><option>Saver</option><option selected>Neutral</option><option>Spender</option></select><button id="saveProfileBtn" class="btn-green">Save & Generate Scenarios</button></div><div id="scenariosContainer" style="margin-top:20px;"></div></div>
+        <div class="panel">
+            <div class="panel-header">🧠 AI Budget Engine</div>
+            <div style="display:flex; gap:16px;">
+                <select id="socialStatus"><option>Low</option><option selected>Middle</option><option>Upper</option></select>
+                <select id="spendingMindset"><option>Saver</option><option selected>Neutral</option><option>Spender</option></select>
+                <button id="saveProfileBtn" class="btn-green">Save & Generate Scenarios</button>
+            </div>
+            <div id="scenariosContainer" style="margin-top:20px;"></div>
+        </div>
     </div>
 
     <!-- ANALYTICS -->
-    <div class="screen" id="screen-analytics"><div class="panel"><div class="panel-header">⏳ Budget Longevity</div><div id="longevityContainer">Loading...</div></div><div class="panel"><div class="panel-header">Weekly Forecast</div><canvas id="forecastChart" height="200"></canvas></div><div class="panel"><div class="panel-header">Category Breakdown</div><canvas id="catBarChart" height="200"></canvas></div></div>
+    <div class="screen" id="screen-analytics">
+        <div class="panel"><div class="panel-header">⏳ Budget Longevity</div><div id="longevityContainer">Loading...</div></div>
+        <div class="panel"><div class="panel-header">Weekly Forecast</div><canvas id="forecastChart" height="200"></canvas></div>
+        <div class="panel"><div class="panel-header">Category Breakdown</div><canvas id="catBarChart" height="200"></canvas></div>
+    </div>
 
     <!-- BUDGETS -->
-    <div class="screen" id="screen-budgets"><div class="panel"><div class="panel-header">Monthly Budget Limits <button id="saveBudgetsBtn" class="btn-green">Save All</button></div><div id="budgetInputs" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:16px;"></div></div></div>
+    <div class="screen" id="screen-budgets">
+        <div class="panel"><div class="panel-header">Monthly Budget Limits <button id="saveBudgetsBtn" class="btn-green">Save All</button></div>
+            <div id="budgetInputs" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:16px;"></div>
+        </div>
+    </div>
 
-    <!-- HISTORY -->
-    <div class="screen" id="screen-transactions"><div class="table-wrap"><table><thead><tr><th>Date</th><th>Category</th><th>Need?</th><th>Note</th><th>Type</th><th>Amount</th></tr></thead><tbody id="txTableBody"></tbody></table></div></div>
+    <!-- HISTORY (shows priority) -->
+    <div class="screen" id="screen-transactions">
+        <div class="table-wrap"><table><thead><tr><th>Date</th><th>Category</th><th>Need?</th><th>Priority</th><th>Note</th><th>Type</th><th>Amount</th></tr></thead><tbody id="txTableBody"></tbody></table></div>
+    </div>
 
     <!-- AUTH -->
     <div id="authOverlay" class="auth-overlay"><div class="auth-card"><h2 id="authTitle">Welcome back</h2><input type="text" id="regName" class="auth-input" placeholder="Full Name" style="display:none"><input type="email" id="authEmail" class="auth-input" placeholder="Email"><input type="password" id="authPass" class="auth-input" placeholder="Password"><input type="password" id="authConfirm" class="auth-input" placeholder="Confirm Password" style="display:none"><div id="termsRow" style="display:none;"><label><input type="checkbox" id="termsCheck"> Accept Terms</label></div><div id="authMsg" style="color:#ff4d6d;"></div><button id="authBtn" class="auth-btn">Sign In</button><div id="toggleAuthLink" class="auth-link" style="cursor:pointer; margin-top:12px;">Don't have an account? Register</div></div></div>
 
     <!-- CHATBOT -->
-    <div id="chatContainer" class="chat-container"><div class="chat-window"><div class="chat-header" id="chatHeader">🤖 SmartSpend AI <span class="ml-badge">ML</span><button id="closeChatBtn">✕</button></div><div class="chat-messages" id="chatMessages"><div class="message bot-message">✨ Ask me: 'health score', 'forecast', 'investment advice' or 'needs vs wants'</div></div><div class="chat-input"><input id="chatInput" placeholder="Ask..."><button id="sendChatBtn">Send</button></div></div></div>
+    <div id="chatContainer" class="chat-container"><div class="chat-window"><div class="chat-header" id="chatHeader">🤖 SmartSpend AI <span class="ml-badge">ML</span><button id="closeChatBtn">✕</button></div><div class="chat-messages" id="chatMessages"><div class="message bot-message">✨ Ask: 'health score', 'forecast', 'investment', 'needs vs wants', 'priority / ranking'.</div></div><div class="chat-input"><input id="chatInput" placeholder="Ask..."><button id="sendChatBtn">Send</button></div></div></div>
 </main>
 
 <script>
@@ -684,6 +745,8 @@ let monthlyChart, forecastChart, catBarChart, isLogin = true;
 function fmt(amt) { return '₱' + Number(amt).toLocaleString('en-PH', { minimumFractionDigits:2 }); }
 function toast(msg) { let t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2500); }
 async function apiFetch(url, opts={}) { let res = await fetch(url, {...opts, credentials:'include', headers:{'Content-Type':'application/json'}}); if(!res.ok) throw new Error((await res.json()).error); return res.json(); }
+
+const PRIO_MAP = {'0':'Low','1':'Medium','2':'High','3':'Critical'};
 
 async function loadDashboard() {
     if(!currentUser) return;
@@ -712,11 +775,15 @@ async function loadDashboard() {
     } catch(e) { toast('Error loading data'); }
 }
 
+function renderTransactions() {
+    document.getElementById('txTableBody').innerHTML = allTransactions.slice(0,50).map(t=>`<tr><td>${new Date(t.tx_date).toLocaleDateString()}</td><td>${t.category}</td><td>${t.is_need ? '✅Need' : '⚪Want'}</td><td>${PRIO_MAP[t.priority]||''}</td><td>${t.note||''}</td><td>${t.tx_type}</td><td>${fmt(t.amount)}</td></tr>`).join('');
+}
+
 async function loadAnalytics() {
     if(!currentUser) return;
     try {
         let longevity = await apiFetch(`/api/longevity/${currentUser.id}`);
-        document.getElementById('longevityContainer').innerHTML = `<div style="background:var(--bg3); padding:16px; border-radius:12px;">💰 Balance: ${fmt(longevity.balance)}<br>📉 Avg Daily: ${fmt(longevity.avg_daily_spend)}<br>📅 Days left: ${longevity.days} | Weeks: ${longevity.weeks}</div>`;
+        document.getElementById('longevityContainer').innerHTML = `<div style="background:var(--bg3);padding:16px;border-radius:12px;">💰 Balance: ${fmt(longevity.balance)}<br>📉 Avg Daily: ${fmt(longevity.avg_daily_spend)}<br>📅 Days left: ${longevity.days} | Weeks: ${longevity.weeks}</div>`;
     } catch(e) { document.getElementById('longevityContainer').innerHTML = 'Add expenses first.'; }
     if(currentPrediction.has_data) {
         if(forecastChart) forecastChart.destroy();
@@ -724,10 +791,6 @@ async function loadAnalytics() {
         if(catBarChart) catBarChart.destroy();
         catBarChart = new Chart(document.getElementById('catBarChart'), { type:'bar', data:{ labels:Object.keys(currentPrediction.predictions.categories), datasets:[{ label:'Spent', data:Object.values(currentPrediction.predictions.categories), backgroundColor:'#3b82f6' }] }, options:{ indexAxis:'y' } });
     }
-}
-
-function renderTransactions() {
-    document.getElementById('txTableBody').innerHTML = allTransactions.slice(0,50).map(t=>`<tr><td>${new Date(t.tx_date).toLocaleDateString()}</td><td>${t.category}</td><td>${t.is_need ? '✅ Need' : '⚪ Want'}</td><td>${t.note||''}</td><td>${t.tx_type}</td><td>${fmt(t.amount)}</td></tr>`).join('');
 }
 
 async function saveProfileAndGenerate() {
@@ -757,8 +820,20 @@ async function loadBudgets() {
     document.getElementById('saveBudgetsBtn').onclick = async ()=>{ for(let cat of categories) { let val = parseFloat(document.getElementById(`budget_${cat.replace(/\\s/g,'')}`).value); if(val && val>0) await apiFetch(`/api/budgets/${currentUser.id}`, { method:'POST', body:JSON.stringify({ category:cat, limit:val }) }); } toast('Budgets saved'); await loadDashboard(); };
 }
 
-document.getElementById('incomeForm').addEventListener('submit', async(e)=>{ e.preventDefault(); let amount = parseFloat(document.getElementById('incomeAmount').value); let note = document.getElementById('incomeNote').value; await apiFetch('/api/transactions', { method:'POST', body:JSON.stringify({ amount, category:'Income', tx_type:'income', note }) }); toast('Income recorded'); document.getElementById('incomeForm').reset(); await loadDashboard(); });
-document.getElementById('expenseForm').addEventListener('submit', async(e)=>{ e.preventDefault(); let amount = parseFloat(document.getElementById('expenseAmount').value); let category = document.getElementById('expenseCategory').value; let isNeed = document.getElementById('isNeed').checked; let note = document.getElementById('expenseNote').value; await apiFetch('/api/transactions', { method:'POST', body:JSON.stringify({ amount, category, tx_type:'expense', is_need:isNeed, note }) }); toast('Expense recorded'); document.getElementById('expenseForm').reset(); document.getElementById('isNeed').checked = false; await loadDashboard(); });
+document.getElementById('incomeForm').addEventListener('submit', async(e)=>{ e.preventDefault(); await apiFetch('/api/transactions', { method:'POST', body:JSON.stringify({ amount: parseFloat(document.getElementById('incomeAmount').value), category:'Income', tx_type:'income', note: document.getElementById('incomeNote').value }) }); toast('Income recorded'); document.getElementById('incomeForm').reset(); await loadDashboard(); });
+document.getElementById('expenseForm').addEventListener('submit', async(e)=>{
+    e.preventDefault();
+    let amount = parseFloat(document.getElementById('expenseAmount').value);
+    let category = document.getElementById('expenseCategory').value;
+    let isNeed = document.getElementById('isNeed').checked;
+    let priority = parseInt(document.getElementById('expensePriority').value);
+    let note = document.getElementById('expenseNote').value;
+    await apiFetch('/api/transactions', { method:'POST', body:JSON.stringify({ amount, category, tx_type:'expense', is_need:isNeed, priority, note }) });
+    toast('Expense recorded');
+    document.getElementById('expenseForm').reset(); document.getElementById('isNeed').checked = false;
+    document.getElementById('expensePriority').value = '1';
+    await loadDashboard();
+});
 
 document.querySelectorAll('.nav-item').forEach(btn=>btn.addEventListener('click',()=>{ let scr = btn.dataset.nav; if(scr) navigate(scr); }));
 function navigate(screenId) { document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active')); document.getElementById(`screen-${screenId}`).classList.add('active'); document.getElementById('pageTitle').innerText = screenId.charAt(0).toUpperCase()+screenId.slice(1); if(screenId === 'analytics') loadAnalytics(); if(screenId === 'budgets') loadBudgets(); }
