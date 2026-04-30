@@ -3,8 +3,10 @@ import datetime
 import hashlib
 import secrets
 import json
+import csv
+import io
 from functools import wraps
-from flask import Flask, request, jsonify, session, send_from_directory
+from flask import Flask, request, jsonify, session, send_from_directory, Response
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 
@@ -41,7 +43,7 @@ class Transaction(db.Model):
     amount = db.Column(db.Float, nullable=False)
     category = db.Column(db.String(50), nullable=False)
     tx_type = db.Column(db.String(10), nullable=False)       # 'income' or 'expense'
-    is_need = db.Column(db.Boolean, default=False)          # NEW: marks need vs want
+    is_need = db.Column(db.Boolean, default=False)          # marks need vs want
     note = db.Column(db.String(200))
     tx_date = db.Column(db.DateTime, default=datetime.datetime.utcnow)
 
@@ -59,7 +61,7 @@ class UserProfile(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), unique=True, nullable=False)
     social_status = db.Column(db.String(20), nullable=False, default='Middle')
     spending_mindset = db.Column(db.String(20), nullable=False, default='Neutral')
-    wants_needs_json = db.Column(db.Text, default='{}')
+    wants_needs_json = db.Column(db.Text, default='{}')   # optional custom mapping
 
 # ========== CREATE TABLES & MIGRATIONS ==========
 with app.app_context():
@@ -100,29 +102,34 @@ def get_user_profile(user_id):
         'wants_needs': json.loads(profile.wants_needs_json) if profile.wants_needs_json else {}
     }
 
-# ---------- ML Functions (updated with needs priority) ----------
+# ---------- ML Functions (enhanced with needs priority) ----------
 def calculate_health_score(transactions, budgets):
     income = sum(t['amount'] for t in transactions if t['tx_type'] == 'income')
     expense = sum(t['amount'] for t in transactions if t['tx_type'] == 'expense')
     if income == 0:
         return 0
-    savings_rate = (income - expense) / income
-    score = max(0, min(100, savings_rate * 100))
+    savings_rate = max(0, min(1, (income - expense) / income))
+    score = savings_rate * 100
 
+    # Budget adherence penalty (needs vs wants)
     cat_spending = {}
+    need_spending = {}
     for t in transactions:
         if t['tx_type'] == 'expense':
             cat_spending[t['category']] = cat_spending.get(t['category'], 0) + t['amount']
+            if t.get('is_need', False):
+                need_spending[t['category']] = need_spending.get(t['category'], 0) + t['amount']
+
     budget_penalty = 0
-    total_budget = 0
     for cat, limit in budgets.items():
         spent = cat_spending.get(cat, 0)
-        if limit > 0:
-            total_budget += limit
-            if spent > limit:
-                over = (spent - limit) / limit
-                budget_penalty += over * 10
-    if total_budget > 0:
+        if limit > 0 and spent > limit:
+            over_ratio = (spent - limit) / limit
+            # Penalize more if the overspending is on a want (not a need)
+            is_need_category = cat in need_spending and need_spending[cat] > spent * 0.7
+            penalty_multiplier = 0.5 if is_need_category else 1.5
+            budget_penalty += over_ratio * 10 * penalty_multiplier
+    if budgets:
         score = max(0, min(100, score - budget_penalty))
     return int(score)
 
@@ -150,7 +157,7 @@ def forecast_spending(transactions):
         forecast[f"Week {i}"] = round(avg * (0.95 + i * 0.02), 2)
     return forecast
 
-def generate_advice(transactions, budgets):
+def generate_advice(transactions, budgets, user_profile):
     advice = []
     cat_spending = {}
     for t in transactions:
@@ -167,6 +174,15 @@ def generate_advice(transactions, budgets):
                 advice.append({"cat": cat, "msg": f"✔️ On track. Spent ₱{spent:.2f} of ₱{limit:.2f} budget."})
     if not advice:
         advice.append({"cat": "General", "msg": "No budget limits set. Set budgets to get personalized advice."})
+
+    # Additional AI insight based on mindset
+    mindset = user_profile.get('spending_mindset', 'Neutral')
+    if mindset == 'Saver' and cat_spending:
+        total = sum(cat_spending.values())
+        if total > 0:
+            advice.append({"cat": "Mindset", "msg": f"🧠 You are a Saver. Try to invest {min(30, int((total/5000)*10))}% of your surplus."})
+    elif mindset == 'Spender':
+        advice.append({"cat": "Mindset", "msg": "💸 Spender alert! Consider the 30‑day rule before non‑essential purchases."})
     return advice
 
 def generate_scenarios(user_id, transactions, budgets):
@@ -199,26 +215,34 @@ def generate_scenarios(user_id, transactions, budgets):
             # Needs get higher budget allocation
             if cat in need_spend:
                 multiplier = essential_mult
-            else:
+            elif cat in want_spend:
                 multiplier = disc_mult
+            else:
+                multiplier = disc_mult  # default to discretionary
             if cat in ['Food & Dining', 'Groceries', 'Health']:
                 suggested = max(spent * multiplier, 2000) if spent > 0 else 3000
             else:
                 suggested = max(spent * multiplier, 1000) if spent > 0 else 2000
             limits[cat] = round(suggested)
+
+        # Adjust for social status
         if social == 'Low':
             limits['Entertainment'] = limits.get('Entertainment', 1500) * 0.6
+            limits['Transport'] = limits.get('Transport', 2000) * 0.8
         elif social == 'Upper':
             limits['Entertainment'] = limits.get('Entertainment', 3000) * 1.5
             limits['Health'] = limits.get('Health', 3000) * 1.3
+        # Adjust for mindset
         if mindset == 'Saver':
             for cat in ['Entertainment', 'Transport']:
                 limits[cat] = limits.get(cat, 2000) * 0.7
         elif mindset == 'Spender':
             for cat in ['Entertainment', 'Food & Dining']:
                 limits[cat] = limits.get(cat, 3000) * 1.4
+
         for cat in limits:
             limits[cat] = max(100, int(limits[cat]))
+
         suggested_savings = income * savings_mult if income > 0 else savings * savings_mult
         suggested_investment = suggested_savings * invest_mult
         return {
@@ -228,6 +252,7 @@ def generate_scenarios(user_id, transactions, budgets):
             'investment_goal': round(suggested_investment),
             'expected_savings_rate': round(savings_mult * 100)
         }
+
     cons = build_scenario('Conservative (Safe)', 0.25, 0.6, 1.2, 0.7)
     bal = build_scenario('Balanced (Moderate)', 0.20, 0.7, 1.0, 1.0)
     agg = build_scenario('Aggressive (Growth)', 0.15, 0.9, 0.9, 1.3)
@@ -402,13 +427,14 @@ def predict(user_id):
                 'is_need': t.is_need, 'tx_date': t.tx_date} for t in txns]
     budgets = Budget.query.filter_by(user_id=user_id).all()
     budget_dict = {b.category: b.limit_amount for b in budgets}
+    profile = get_user_profile(user_id)
     health_score = calculate_health_score(tx_list, budget_dict)
     weekly_forecast = forecast_spending(tx_list)
     cat_spending = {}
     for t in tx_list:
         if t['tx_type'] == 'expense':
             cat_spending[t['category']] = cat_spending.get(t['category'], 0) + t['amount']
-    advice = generate_advice(tx_list, budget_dict)
+    advice = generate_advice(tx_list, budget_dict, profile)
     return jsonify({
         'has_data': True,
         'score': health_score,
@@ -434,7 +460,6 @@ def budget_scenarios(user_id):
 @app.route('/api/longevity/<int:user_id>')
 @login_required
 def budget_longevity(user_id):
-    """Calculate how long current balance will last based on average daily spending."""
     if session['user_id'] != user_id:
         return jsonify({'error': 'Forbidden'}), 403
     txns = Transaction.query.filter_by(user_id=user_id).all()
@@ -449,14 +474,12 @@ def budget_longevity(user_id):
     if total_expense == 0:
         return jsonify({'error': 'No expense data yet'}), 400
 
-    # Get average daily expense (last 30 days)
     now = datetime.datetime.utcnow()
     thirty_days_ago = now - datetime.timedelta(days=30)
     recent_expenses = [t for t in txns if t.tx_type == 'expense' and t.tx_date >= thirty_days_ago]
     if recent_expenses:
         avg_daily = sum(e.amount for e in recent_expenses) / 30.0
     else:
-        # fallback to total expense / 30 (rough)
         avg_daily = total_expense / 30.0
     if avg_daily <= 0:
         return jsonify({'error': 'No spending to project'}), 400
@@ -477,11 +500,64 @@ def budget_longevity(user_id):
         'years': round(max(0, years_left), 2)
     })
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+@app.route('/api/chatbot', methods=['POST'])
+@login_required
+def chatbot():
+    """Simple ML‑augmented chatbot that answers based on user's financial data."""
+    data = request.json
+    user_msg = data.get('message', '').lower()
+    user_id = session['user_id']
 
-# ========== HTML FRONTEND (Updated) ==========
+    # Fetch user's financial context
+    txns = Transaction.query.filter_by(user_id=user_id).all()
+    if not txns:
+        return jsonify({'response': "You don't have any transactions yet. Add some income/expenses and I'll give you personalized advice!"})
+
+    income = sum(t.amount for t in txns if t.tx_type == 'income')
+    expense = sum(t.amount for t in txns if t.tx_type == 'expense')
+    savings = income - expense
+    savings_rate = (savings / income * 100) if income > 0 else 0
+
+    # Simple keyword matching
+    if 'health score' in user_msg or 'score' in user_msg:
+        budgets = Budget.query.filter_by(user_id=user_id).all()
+        budget_dict = {b.category: b.limit_amount for b in budgets}
+        tx_list = [{'amount': t.amount, 'category': t.category, 'tx_type': t.tx_type, 'is_need': t.is_need} for t in txns]
+        score = calculate_health_score(tx_list, budget_dict)
+        return jsonify({'response': f"Your current ML Health Score is {score}/100. { 'Great job! Keep saving.' if score >= 70 else 'Try to reduce discretionary spending and increase savings.' }"})
+
+    elif 'forecast' in user_msg or 'future' in user_msg:
+        tx_list = [{'amount': t.amount, 'category': t.category, 'tx_type': t.tx_type, 'tx_date': t.tx_date} for t in txns]
+        forecast = forecast_spending(tx_list)
+        weeks = ', '.join([f"{k}: ₱{v:,.2f}" for k,v in forecast.items()])
+        return jsonify({'response': f"ML spending forecast for the next 4 weeks: {weeks}. Adjust your budget to stay on track."})
+
+    elif 'invest' in user_msg or 'investment' in user_msg:
+        return jsonify({'response': f"Based on your savings rate ({savings_rate:.1f}%), consider putting {int(savings_rate*0.3)}% of savings into low‑cost index funds. I recommend starting with ₱{max(500, int(savings*0.2)):,.0f}."})
+
+    elif 'needs' in user_msg or 'wants' in user_msg:
+        needs = sum(t.amount for t in txns if t.tx_type == 'expense' and t.is_need)
+        wants = expense - needs
+        return jsonify({'response': f"Your spending: Needs = ₱{needs:,.2f} ({needs/expense*100:.1f}%), Wants = ₱{wants:,.2f} ({wants/expense*100:.1f}%). Aim for at least 50% on needs, 30% on wants, 20% savings."})
+
+    else:
+        return jsonify({'response': f"I can help with: 'health score', 'forecast', 'investment advice', or 'needs vs wants'. Your current savings rate is {savings_rate:.1f}%."})
+
+@app.route('/api/export/csv')
+@login_required
+def export_csv():
+    user_id = session['user_id']
+    txns = Transaction.query.filter_by(user_id=user_id).order_by(Transaction.tx_date.desc()).all()
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(['Date', 'Category', 'Type', 'Amount', 'Need/Want', 'Note'])
+    for t in txns:
+        writer.writerow([t.tx_date.strftime('%Y-%m-%d'), t.category, t.tx_type, t.amount, 'Need' if t.is_need else 'Want', t.note])
+    response = Response(output.getvalue(), mimetype='text/csv')
+    response.headers['Content-Disposition'] = 'attachment; filename=smartspend_export.csv'
+    return response
+
+# ========== FRONTEND (Single HTML file) ==========
 HTML_PAGE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -493,53 +569,60 @@ HTML_PAGE = """
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        :root {
-            --bg: #0a0f1a; --bg2: #0f1622; --bg3: #151e2d;
-            --panel: rgba(21, 30, 45, 0.9); --border: rgba(0, 210, 130, 0.2);
-            --border2: rgba(255, 255, 255, 0.05); --green: #00d282;
-            --green-dim: rgba(0, 210, 130, 0.15); --red: #ff4d6d;
-            --blue: #3b82f6; --purple: #a855f7;
-            --muted: #6c86a0; --text: #e2eff8;
-            --sans: 'Space Grotesk', sans-serif; --r: 16px;
-        }
-        body { font-family: var(--sans); background: var(--bg); color: var(--text); }
-        .sidebar { position: fixed; left: 0; top: 0; bottom: 0; width: 80px; background: rgba(15,22,34,0.98); backdrop-filter: blur(12px); border-right: 1px solid var(--border2); display: flex; flex-direction: column; align-items: center; padding: 24px 0; gap: 10px; z-index: 100; transition: width 0.3s; }
+        :root { --bg: #0a0f1a; --bg2: #0f1622; --bg3: #151e2d; --panel: rgba(21, 30, 45, 0.9); --border: rgba(0, 210, 130, 0.2); --border2: rgba(255, 255, 255, 0.05); --green: #00d282; --green2: #00ff9d; --green-dim: rgba(0, 210, 130, 0.15); --red: #ff4d6d; --amber: #f0a500; --blue: #3b82f6; --purple: #a855f7; --muted: #6c86a0; --text: #e2eff8; --mono: 'JetBrains Mono', monospace; --sans: 'Space Grotesk', sans-serif; --r: 16px; }
+        body { font-family: var(--sans); background: var(--bg); color: var(--text); min-height: 100vh; }
+        .sidebar { position: fixed; left: 0; top: 0; bottom: 0; width: 80px; background: rgba(15, 22, 34, 0.98); backdrop-filter: blur(12px); border-right: 1px solid var(--border2); display: flex; flex-direction: column; align-items: center; padding: 24px 0; gap: 10px; z-index: 100; transition: width 0.3s; }
         .sidebar:hover { width: 240px; }
         .sidebar-logo { width: 48px; height: 48px; border-radius: 14px; background: linear-gradient(135deg, var(--green), #009e5f); display: flex; align-items: center; justify-content: center; margin-bottom: 28px; cursor: pointer; }
-        .nav-item { width: 100%; display: flex; align-items: center; gap: 16px; padding: 12px 24px; border-radius: 12px; cursor: pointer; background: transparent; color: var(--muted); white-space: nowrap; overflow: hidden; transition: all 0.2s; }
+        .nav-item { width: 100%; display: flex; align-items: center; gap: 16px; padding: 12px 24px; border-radius: 12px; cursor: pointer; border: none; background: transparent; color: var(--muted); font-size: 0.9rem; font-weight: 500; white-space: nowrap; overflow: hidden; transition: all 0.2s; }
         .nav-item:hover { background: var(--green-dim); color: var(--text); transform: translateX(6px); }
         .nav-item.active { background: var(--green-dim); color: var(--green); border-left: 3px solid var(--green); }
         .nav-label { opacity: 0; transition: opacity 0.2s; }
         .sidebar:hover .nav-label { opacity: 1; }
         .sidebar-bottom { margin-top: auto; width: 100%; }
-        .main { margin-left: 80px; padding: 24px 32px; }
+        .main { margin-left: 80px; padding: 24px 32px; position: relative; }
         @media (max-width: 768px) { .sidebar { width: 70px; } .main { margin-left: 70px; padding: 20px; } }
         @media (max-width: 600px) { .sidebar { display: none; } .main { margin-left: 0; } }
-        .topbar { display: flex; justify-content: space-between; margin-bottom: 28px; flex-wrap: wrap; gap: 16px; }
-        .topbar h1 { background: linear-gradient(135deg, #fff, var(--green)); background-clip: text; -webkit-background-clip: text; color: transparent; }
+        .topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 28px; flex-wrap: wrap; gap: 16px; }
+        .topbar h1 { font-size: 1.75rem; font-weight: 700; background: linear-gradient(135deg, #fff, var(--green)); background-clip: text; -webkit-background-clip: text; color: transparent; }
         .score-pill { display: flex; align-items: center; gap: 10px; padding: 8px 20px; border-radius: 99px; background: var(--green-dim); border: 1px solid var(--border); font-size: 0.85rem; font-weight: 600; }
+        .score-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); animation: pulse 2s infinite; }
+        @keyframes pulse { 0%,100%{ opacity:1; } 50%{ opacity:0.4; } }
         .avatar { width: 42px; height: 42px; border-radius: 50%; background: linear-gradient(135deg, var(--blue), var(--purple)); display: flex; align-items: center; justify-content: center; font-weight: 700; cursor: pointer; }
-        .signout-btn { background: rgba(255,77,109,0.2); border: 1px solid rgba(255,77,109,0.2); color: var(--red); padding: 8px 18px; border-radius: 10px; cursor: pointer; }
+        .signout-btn { background: rgba(255,77,109,0.2); border: 1px solid rgba(255,77,109,0.2); color: var(--red); padding: 8px 18px; border-radius: 10px; cursor: pointer; font-size: 0.8rem; font-weight: 600; }
         .screen { display: none; animation: fadeUp 0.35s ease; }
         .screen.active { display: block; }
         @keyframes fadeUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
         .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 20px; margin-bottom: 28px; }
         .stat-card { background: var(--panel); backdrop-filter: blur(10px); border: 1px solid var(--border2); border-radius: var(--r); padding: 22px; transition: all 0.25s; }
-        .stat-value { font-size: 1.8rem; font-weight: 700; font-family: monospace; }
+        .stat-value { font-size: 1.8rem; font-weight: 700; font-family: var(--mono); }
+        .stat-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-top: 8px; }
         .panel { background: var(--panel); backdrop-filter: blur(10px); border: 1px solid var(--border2); border-radius: var(--r); padding: 22px; margin-bottom: 20px; }
         .panel-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 12px; }
         .btn-green { background: linear-gradient(135deg, var(--green), #009e5f); color: #000; border: none; padding: 10px 18px; border-radius: 10px; cursor: pointer; font-weight: 600; }
         input, select { background: var(--bg3); color: var(--text); border: 1px solid var(--border2); border-radius: 10px; padding: 10px 14px; outline: none; }
         .flex-form { display: flex; flex-direction: column; gap: 16px; }
-        .need-checkbox { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
-        .longevity-card { background: var(--bg3); border-radius: 12px; padding: 16px; margin-top: 16px; }
-        .longevity-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px,1fr)); gap: 12px; margin-top: 12px; }
+        .forecast-row { display: flex; align-items: center; gap: 14px; margin-bottom: 14px; }
+        .forecast-week { width: 70px; font-weight: 600; color: var(--green); }
+        .forecast-bar-track { flex: 1; height: 8px; background: var(--bg3); border-radius: 99px; overflow: hidden; }
+        .forecast-bar-fill { height: 100%; background: linear-gradient(90deg, var(--green), var(--green2)); width: 0; border-radius: 99px; transition: width 1s ease; }
+        .advice-item { padding: 14px; border-radius: 12px; margin-bottom: 10px; background: var(--bg3); transition: all 0.2s; }
+        .waste-alert { background: rgba(255,77,109,0.2); border-left: 3px solid var(--red); }
+        #toast { position: fixed; bottom: 24px; right: 24px; background: var(--bg2); border: 1px solid var(--green); border-radius: 12px; padding: 12px 24px; opacity: 0; transition: 0.25s; z-index: 10000; }
+        #toast.show { opacity: 1; }
         .auth-overlay { position: fixed; inset: 0; background: rgba(8,13,20,0.98); backdrop-filter: blur(20px); z-index: 9999; display: flex; align-items: center; justify-content: center; }
         .auth-card { background: linear-gradient(145deg, #0d1520, #0a1220); border: 1px solid rgba(0,210,130,0.2); border-radius: 28px; padding: 40px; width: 400px; max-width: 90%; }
-        .auth-input { width: 100%; margin-bottom: 14px; background: #0a1525; }
-        .auth-btn { width: 100%; padding: 14px; background: linear-gradient(135deg, #00d282, #009e5f); border: none; border-radius: 12px; color: #000; font-weight: 700; cursor: pointer; }
-        .toast { position: fixed; bottom: 24px; right: 24px; background: var(--bg2); border: 1px solid var(--green); border-radius: 12px; padding: 12px 24px; opacity: 0; transition: 0.25s; z-index: 10000; }
-        .toast.show { opacity: 1; }
+        .chat-container { position: fixed; bottom: 24px; right: 24px; z-index: 10001; }
+        .chat-window { width: 380px; height: 480px; background: var(--bg2); backdrop-filter: blur(10px); border: 1px solid var(--green); border-radius: 24px; display: flex; flex-direction: column; overflow: hidden; }
+        .chat-header { padding: 14px 18px; background: var(--bg3); border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; cursor: move; }
+        .chat-messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+        .message { max-width: 85%; padding: 10px 14px; border-radius: 18px; font-size: 0.85rem; }
+        .user-message { align-self: flex-end; background: var(--green-dim); color: var(--green); border-bottom-right-radius: 4px; }
+        .bot-message { align-self: flex-start; background: var(--bg3); color: var(--text); border-bottom-left-radius: 4px; }
+        .chat-input { display: flex; padding: 14px; gap: 10px; background: var(--bg3); border-top: 1px solid var(--border); }
+        .ml-badge { background: linear-gradient(135deg, var(--purple), var(--blue)); padding: 2px 8px; border-radius: 12px; font-size: 0.7rem; font-weight: 600; margin-left: 8px; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid var(--border2); }
     </style>
 </head>
 <body>
@@ -550,17 +633,10 @@ HTML_PAGE = """
     <button class="nav-item" data-nav="analytics"><span class="nav-label">Analytics</span></button>
     <button class="nav-item" data-nav="budgets"><span class="nav-label">Budgets</span></button>
     <button class="nav-item" data-nav="transactions"><span class="nav-label">History</span></button>
-    <div class="sidebar-bottom"><button class="nav-item" id="exportBtn"><span class="nav-label">Export</span></button></div>
+    <div class="sidebar-bottom"><button class="nav-item" id="exportBtn"><span class="nav-label">Export CSV</span></button></div>
 </nav>
 <main class="main">
-    <div class="topbar">
-        <h1 id="pageTitle">Dashboard</h1>
-        <div class="topbar-right" style="display:flex; gap:16px; align-items:center;">
-            <div class="score-pill">Health: <strong id="topScore">—</strong></div>
-            <div class="avatar" id="userAvatar">US</div>
-            <button class="signout-btn" id="signoutBtn">Sign Out</button>
-        </div>
-    </div>
+    <div class="topbar"><h1 id="pageTitle">Dashboard</h1><div class="topbar-right" style="display:flex; gap:16px; align-items:center;"><div class="score-pill"><div class="score-dot"></div><span>Health: <strong id="topScore">—</strong><span class="ml-badge">ML</span></span></div><div class="avatar" id="userAvatar">US</div><button class="signout-btn" id="signoutBtn">Sign Out</button></div></div>
     <div id="toast" class="toast"></div>
 
     <!-- DASHBOARD -->
@@ -572,101 +648,42 @@ HTML_PAGE = """
             <div class="stat-card"><div class="stat-value" id="sScore">—</div><div class="stat-label">ML Health Score</div></div>
         </div>
         <div class="panel"><div class="panel-header">Income vs Expense Trend</div><canvas id="monthlyChart" height="200"></canvas></div>
-        <div class="panel"><div class="panel-header">Spending Forecast (4 weeks)</div><div id="forecastBars"></div></div>
+        <div class="panel"><div class="panel-header">ML Spending Forecast (4 weeks)</div><div id="forecastBars"></div></div>
         <div class="panel"><div class="panel-header">AI Advice</div><div id="adviceList"></div></div>
     </div>
 
-    <!-- ADD TRANSACTION (UPDATED) -->
+    <!-- ADD TRANSACTION -->
     <div class="screen" id="screen-add">
         <div class="stats-grid">
-            <div class="panel">
-                <div class="panel-header">➕ Add Income</div>
-                <form id="incomeForm" class="flex-form">
-                    <input type="number" id="incomeAmount" placeholder="Amount (₱)" step="0.01" required>
-                    <input type="text" id="incomeNote" placeholder="Note (optional)">
-                    <button type="submit" class="btn-green">Record Income</button>
-                </form>
-            </div>
-            <div class="panel">
-                <div class="panel-header">📝 Record Expense (with Needs/Wants)</div>
-                <form id="expenseForm" class="flex-form">
-                    <input type="number" id="expenseAmount" placeholder="Amount (₱)" step="0.01" required>
-                    <select id="expenseCategory" required>
-                        <option value="Food & Dining">Food & Dining</option>
-                        <option value="Transport">Transport</option>
-                        <option value="Groceries">Groceries</option>
-                        <option value="Entertainment">Entertainment</option>
-                        <option value="Health">Health</option>
-                        <option value="Other">Other</option>
-                    </select>
-                    <label class="need-checkbox"><input type="checkbox" id="isNeed"> ✅ Mark as NEED (essential, higher budget priority)</label>
-                    <input type="text" id="expenseNote" placeholder="Note (optional)">
-                    <button type="submit" class="btn-green">Record Expense</button>
-                </form>
-            </div>
+            <div class="panel"><div class="panel-header">➕ Add Income</div><form id="incomeForm" class="flex-form"><input type="number" id="incomeAmount" placeholder="Amount (₱)" step="0.01" required><input type="text" id="incomeNote" placeholder="Note"><button type="submit" class="btn-green">Record Income</button></form></div>
+            <div class="panel"><div class="panel-header">📝 Record Expense (with Needs/Wants)</div><form id="expenseForm" class="flex-form"><input type="number" id="expenseAmount" placeholder="Amount (₱)" step="0.01" required><select id="expenseCategory"><option>Food & Dining</option><option>Transport</option><option>Groceries</option><option>Entertainment</option><option>Health</option><option>Other</option></select><label><input type="checkbox" id="isNeed"> ✅ Mark as NEED</label><input type="text" id="expenseNote" placeholder="Note"><button type="submit" class="btn-green">Record Expense</button></form></div>
         </div>
-        <div class="panel">
-            <div class="panel-header">🧠 AI Budget Engine</div>
-            <div style="display:flex; gap:16px; flex-wrap:wrap;">
-                <select id="socialStatus"><option>Low</option><option selected>Middle</option><option>Upper</option></select>
-                <select id="spendingMindset"><option>Saver</option><option selected>Neutral</option><option>Spender</option></select>
-                <button id="saveProfileBtn" class="btn-green">Save & Generate Scenarios</button>
-            </div>
-            <div id="scenariosContainer" style="margin-top:20px;"></div>
-        </div>
+        <div class="panel"><div class="panel-header">🧠 AI Budget Engine</div><div style="display:flex; gap:16px;"><select id="socialStatus"><option>Low</option><option selected>Middle</option><option>Upper</option></select><select id="spendingMindset"><option>Saver</option><option selected>Neutral</option><option>Spender</option></select><button id="saveProfileBtn" class="btn-green">Save & Generate Scenarios</button></div><div id="scenariosContainer" style="margin-top:20px;"></div></div>
     </div>
 
     <!-- ANALYTICS -->
-    <div class="screen" id="screen-analytics">
-        <div class="panel">
-            <div class="panel-header">⏳ Budget Longevity</div>
-            <div id="longevityContainer">Loading...</div>
-        </div>
-        <div class="panel"><div class="panel-header">Weekly Forecast</div><canvas id="forecastChart" height="200"></canvas></div>
-        <div class="panel"><div class="panel-header">Category Breakdown</div><canvas id="catBarChart" height="200"></canvas></div>
-    </div>
+    <div class="screen" id="screen-analytics"><div class="panel"><div class="panel-header">⏳ Budget Longevity</div><div id="longevityContainer">Loading...</div></div><div class="panel"><div class="panel-header">Weekly Forecast</div><canvas id="forecastChart" height="200"></canvas></div><div class="panel"><div class="panel-header">Category Breakdown</div><canvas id="catBarChart" height="200"></canvas></div></div>
 
     <!-- BUDGETS -->
-    <div class="screen" id="screen-budgets">
-        <div class="panel"><div class="panel-header">Monthly Budget Limits <button id="saveBudgetsBtn" class="btn-green">Save All</button></div>
-        <div id="budgetInputs" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:16px;"></div></div>
-    </div>
+    <div class="screen" id="screen-budgets"><div class="panel"><div class="panel-header">Monthly Budget Limits <button id="saveBudgetsBtn" class="btn-green">Save All</button></div><div id="budgetInputs" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:16px;"></div></div></div>
 
     <!-- HISTORY -->
-    <div class="screen" id="screen-transactions">
-        <div class="table-wrap"><table><thead><tr><th>Date</th><th>Category</th><th>Need?</th><th>Note</th><th>Type</th><th>Amount</th></tr></thead><tbody id="txTableBody"></tbody></table></div>
-    </div>
+    <div class="screen" id="screen-transactions"><div class="table-wrap"><table><thead><tr><th>Date</th><th>Category</th><th>Need?</th><th>Note</th><th>Type</th><th>Amount</th></tr></thead><tbody id="txTableBody"></tbody></table></div></div>
 
     <!-- AUTH -->
-    <div id="authOverlay" class="auth-overlay">
-        <div class="auth-card"><h2 id="authTitle">Welcome back</h2>
-        <input type="text" id="regName" class="auth-input" placeholder="Full Name" style="display:none">
-        <input type="email" id="authEmail" class="auth-input" placeholder="Email">
-        <input type="password" id="authPass" class="auth-input" placeholder="Password">
-        <input type="password" id="authConfirm" class="auth-input" placeholder="Confirm Password" style="display:none">
-        <div id="termsRow" style="display:none;"><label><input type="checkbox" id="termsCheck"> Accept Terms</label></div>
-        <div id="authMsg" style="color:#ff4d6d;"></div>
-        <button id="authBtn" class="auth-btn">Sign In</button>
-        <div id="toggleAuthLink" class="auth-link" style="cursor:pointer; margin-top:12px;">Don't have an account? Register</div>
-        </div>
-    </div>
+    <div id="authOverlay" class="auth-overlay"><div class="auth-card"><h2 id="authTitle">Welcome back</h2><input type="text" id="regName" class="auth-input" placeholder="Full Name" style="display:none"><input type="email" id="authEmail" class="auth-input" placeholder="Email"><input type="password" id="authPass" class="auth-input" placeholder="Password"><input type="password" id="authConfirm" class="auth-input" placeholder="Confirm Password" style="display:none"><div id="termsRow" style="display:none;"><label><input type="checkbox" id="termsCheck"> Accept Terms</label></div><div id="authMsg" style="color:#ff4d6d;"></div><button id="authBtn" class="auth-btn">Sign In</button><div id="toggleAuthLink" class="auth-link" style="cursor:pointer; margin-top:12px;">Don't have an account? Register</div></div></div>
+
+    <!-- CHATBOT -->
+    <div id="chatContainer" class="chat-container"><div class="chat-window"><div class="chat-header" id="chatHeader">🤖 SmartSpend AI <span class="ml-badge">ML</span><button id="closeChatBtn">✕</button></div><div class="chat-messages" id="chatMessages"><div class="message bot-message">✨ Ask me: 'health score', 'forecast', 'investment advice' or 'needs vs wants'</div></div><div class="chat-input"><input id="chatInput" placeholder="Ask..."><button id="sendChatBtn">Send</button></div></div></div>
 </main>
 
 <script>
-let currentUser = null;
-let allTransactions = [];
-let currentSummary = { balance:0, expense:0, income:0 };
-let currentPrediction = { has_data:false, score:null, predictions:{ weekly:{}, categories:{} }, advice:[] };
-let monthlyChart, forecastChart, catBarChart;
-let isLogin = true;
+let currentUser = null, allTransactions = [], currentSummary = { balance:0, expense:0, income:0 }, currentPrediction = { has_data:false, score:null, predictions:{ weekly:{}, categories:{} }, advice:[] };
+let monthlyChart, forecastChart, catBarChart, isLogin = true;
 
 function fmt(amt) { return '₱' + Number(amt).toLocaleString('en-PH', { minimumFractionDigits:2 }); }
 function toast(msg) { let t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2500); }
-async function apiFetch(url, opts={}) {
-    let res = await fetch(url, {...opts, credentials:'include', headers:{'Content-Type':'application/json'}});
-    if(!res.ok) throw new Error((await res.json()).error || 'Request failed');
-    return res.json();
-}
+async function apiFetch(url, opts={}) { let res = await fetch(url, {...opts, credentials:'include', headers:{'Content-Type':'application/json'}}); if(!res.ok) throw new Error((await res.json()).error); return res.json(); }
 
 async function loadDashboard() {
     if(!currentUser) return;
@@ -674,8 +691,7 @@ async function loadDashboard() {
         let summary = await apiFetch(`/api/summary/${currentUser.id}`);
         let pred = await apiFetch(`/api/predict/${currentUser.id}`);
         allTransactions = await apiFetch(`/api/transactions?user_id=${currentUser.id}`);
-        currentSummary = summary;
-        currentPrediction = pred;
+        currentSummary = summary; currentPrediction = pred;
         document.getElementById('sBalance').innerText = fmt(summary.balance);
         document.getElementById('sExpense').innerText = fmt(summary.expense);
         document.getElementById('sIncome').innerText = fmt(summary.income);
@@ -685,16 +701,11 @@ async function loadDashboard() {
         if(pred.has_data) {
             let weeks = pred.predictions.weekly;
             let maxVal = Math.max(...Object.values(weeks),1);
-            document.getElementById('forecastBars').innerHTML = Object.entries(weeks).map(([w,v])=>`<div>${w}: ${fmt(v)}</div>`).join('');
-            document.getElementById('adviceList').innerHTML = pred.advice.map(a=>`<div>🔹 ${a.cat}: ${a.msg}</div>`).join('');
+            document.getElementById('forecastBars').innerHTML = Object.entries(weeks).map(([w,v])=>`<div class="forecast-row"><span class="forecast-week">${w}</span><div class="forecast-bar-track"><div class="forecast-bar-fill" style="width:${(v/maxVal*100)}%"></div></div><span>${fmt(v)}</span></div>`).join('');
+            document.getElementById('adviceList').innerHTML = pred.advice.map(a=>`<div class="advice-item"><strong>${a.cat}:</strong> ${a.msg}</div>`).join('');
             if(monthlyChart) monthlyChart.destroy();
             let months = Object.keys(summary.monthly).slice(-6);
-            monthlyChart = new Chart(document.getElementById('monthlyChart'), {
-                type:'bar', data:{ labels:months, datasets:[
-                    { label:'Income', data:months.map(m=>summary.monthly[m]?.income||0), backgroundColor:'rgba(0,210,130,0.6)' },
-                    { label:'Expense', data:months.map(m=>summary.monthly[m]?.expense||0), backgroundColor:'rgba(255,77,109,0.6)' }
-                ]}
-            });
+            monthlyChart = new Chart(document.getElementById('monthlyChart'), { type:'bar', data:{ labels:months, datasets:[{ label:'Income', data:months.map(m=>summary.monthly[m]?.income||0), backgroundColor:'rgba(0,210,130,0.6)' },{ label:'Expense', data:months.map(m=>summary.monthly[m]?.expense||0), backgroundColor:'rgba(255,77,109,0.6)' }] } });
         }
         renderTransactions();
         loadAnalytics();
@@ -705,20 +716,13 @@ async function loadAnalytics() {
     if(!currentUser) return;
     try {
         let longevity = await apiFetch(`/api/longevity/${currentUser.id}`);
-        document.getElementById('longevityContainer').innerHTML = `<div class="longevity-card"><strong>💰 Current Balance:</strong> ${fmt(longevity.balance)}<br>
-        <strong>📉 Avg Daily Spend:</strong> ${fmt(longevity.avg_daily_spend)}<br><div class="longevity-grid">
-        <div>⏱️ Hours: ${longevity.hours}</div><div>📅 Days: ${longevity.days}</div><div>📆 Weeks: ${longevity.weeks}</div>
-        <div>🗓️ Months: ${longevity.months}</div><div>📅 Years: ${longevity.years}</div></div></div>`;
-    } catch(e) { document.getElementById('longevityContainer').innerHTML = '<div class="panel">Add some expenses first.</div>'; }
+        document.getElementById('longevityContainer').innerHTML = `<div style="background:var(--bg3); padding:16px; border-radius:12px;">💰 Balance: ${fmt(longevity.balance)}<br>📉 Avg Daily: ${fmt(longevity.avg_daily_spend)}<br>📅 Days left: ${longevity.days} | Weeks: ${longevity.weeks}</div>`;
+    } catch(e) { document.getElementById('longevityContainer').innerHTML = 'Add expenses first.'; }
     if(currentPrediction.has_data) {
         if(forecastChart) forecastChart.destroy();
-        forecastChart = new Chart(document.getElementById('forecastChart'), {
-            type:'line', data:{ labels:Object.keys(currentPrediction.predictions.weekly), datasets:[{ label:'Forecast', data:Object.values(currentPrediction.predictions.weekly), borderColor:'#00d282' }] }
-        });
+        forecastChart = new Chart(document.getElementById('forecastChart'), { type:'line', data:{ labels:Object.keys(currentPrediction.predictions.weekly), datasets:[{ label:'ML Forecast', data:Object.values(currentPrediction.predictions.weekly), borderColor:'#00d282' }] } });
         if(catBarChart) catBarChart.destroy();
-        catBarChart = new Chart(document.getElementById('catBarChart'), {
-            type:'bar', data:{ labels:Object.keys(currentPrediction.predictions.categories), datasets:[{ label:'Spent', data:Object.values(currentPrediction.predictions.categories), backgroundColor:'#3b82f6' }] }, options:{ indexAxis:'y' }
-        });
+        catBarChart = new Chart(document.getElementById('catBarChart'), { type:'bar', data:{ labels:Object.keys(currentPrediction.predictions.categories), datasets:[{ label:'Spent', data:Object.values(currentPrediction.predictions.categories), backgroundColor:'#3b82f6' }] }, options:{ indexAxis:'y' } });
     }
 }
 
@@ -737,17 +741,12 @@ async function saveProfileAndGenerate() {
     container.innerHTML = '<h4>ML Scenarios</h4>';
     for(let s of res.scenarios) {
         let div = document.createElement('div');
-        div.className = 'panel';
-        div.innerHTML = `<strong>${s.name}</strong><br>Savings Goal: ${fmt(s.savings_goal)} | Investment: ${fmt(s.investment_goal)}<br>
-        <button class="btn-green" onclick='applyBudgets(${JSON.stringify(s.budget_limits)})'>Apply Budgets</button>`;
+        div.className = 'advice-item';
+        div.innerHTML = `<strong>${s.name}</strong><br>Savings Goal: ${fmt(s.savings_goal)} | Investment: ${fmt(s.investment_goal)}<br><button class="btn-green" onclick='applyBudgets(${JSON.stringify(s.budget_limits)})'>Apply Budgets</button>`;
         container.appendChild(div);
     }
 }
-window.applyBudgets = async (limits) => {
-    await apiFetch(`/api/budgets/bulk/${currentUser.id}`, { method:'POST', body:JSON.stringify({ limits }) });
-    toast('Budgets applied!');
-    await loadDashboard();
-};
+window.applyBudgets = async (limits) => { await apiFetch(`/api/budgets/bulk/${currentUser.id}`, { method:'POST', body:JSON.stringify({ limits }) }); toast('Budgets applied!'); await loadDashboard(); };
 
 async function loadBudgets() {
     let budgets = await apiFetch(`/api/budgets/${currentUser.id}`);
@@ -755,97 +754,29 @@ async function loadBudgets() {
     let categories = ['Food & Dining','Transport','Groceries','Entertainment','Health'];
     let html = categories.map(cat=>`<div><label>${cat}</label><input type="number" id="budget_${cat.replace(/\\s/g,'')}" value="${limits[cat]||''}" placeholder="Limit"></div>`).join('');
     document.getElementById('budgetInputs').innerHTML = html;
-    document.getElementById('saveBudgetsBtn').onclick = async ()=>{
-        for(let cat of categories) {
-            let val = parseFloat(document.getElementById(`budget_${cat.replace(/\\s/g,'')}`).value);
-            if(val && val>0) await apiFetch(`/api/budgets/${currentUser.id}`, { method:'POST', body:JSON.stringify({ category:cat, limit:val }) });
-        }
-        toast('Budgets saved');
-        await loadDashboard();
-    };
+    document.getElementById('saveBudgetsBtn').onclick = async ()=>{ for(let cat of categories) { let val = parseFloat(document.getElementById(`budget_${cat.replace(/\\s/g,'')}`).value); if(val && val>0) await apiFetch(`/api/budgets/${currentUser.id}`, { method:'POST', body:JSON.stringify({ category:cat, limit:val }) }); } toast('Budgets saved'); await loadDashboard(); };
 }
 
-// Income & Expense forms
-document.getElementById('incomeForm').addEventListener('submit', async(e)=>{
-    e.preventDefault();
-    let amount = parseFloat(document.getElementById('incomeAmount').value);
-    let note = document.getElementById('incomeNote').value;
-    await apiFetch('/api/transactions', { method:'POST', body:JSON.stringify({ amount, category:'Income', tx_type:'income', note }) });
-    toast('Income recorded');
-    document.getElementById('incomeForm').reset();
-    await loadDashboard();
-});
-document.getElementById('expenseForm').addEventListener('submit', async(e)=>{
-    e.preventDefault();
-    let amount = parseFloat(document.getElementById('expenseAmount').value);
-    let category = document.getElementById('expenseCategory').value;
-    let isNeed = document.getElementById('isNeed').checked;
-    let note = document.getElementById('expenseNote').value;
-    await apiFetch('/api/transactions', { method:'POST', body:JSON.stringify({ amount, category, tx_type:'expense', is_need:isNeed, note }) });
-    toast('Expense recorded');
-    document.getElementById('expenseForm').reset();
-    document.getElementById('isNeed').checked = false;
-    await loadDashboard();
-});
+document.getElementById('incomeForm').addEventListener('submit', async(e)=>{ e.preventDefault(); let amount = parseFloat(document.getElementById('incomeAmount').value); let note = document.getElementById('incomeNote').value; await apiFetch('/api/transactions', { method:'POST', body:JSON.stringify({ amount, category:'Income', tx_type:'income', note }) }); toast('Income recorded'); document.getElementById('incomeForm').reset(); await loadDashboard(); });
+document.getElementById('expenseForm').addEventListener('submit', async(e)=>{ e.preventDefault(); let amount = parseFloat(document.getElementById('expenseAmount').value); let category = document.getElementById('expenseCategory').value; let isNeed = document.getElementById('isNeed').checked; let note = document.getElementById('expenseNote').value; await apiFetch('/api/transactions', { method:'POST', body:JSON.stringify({ amount, category, tx_type:'expense', is_need:isNeed, note }) }); toast('Expense recorded'); document.getElementById('expenseForm').reset(); document.getElementById('isNeed').checked = false; await loadDashboard(); });
 
-// Navigation
 document.querySelectorAll('.nav-item').forEach(btn=>btn.addEventListener('click',()=>{ let scr = btn.dataset.nav; if(scr) navigate(scr); }));
-function navigate(screenId) {
-    document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
-    document.getElementById(`screen-${screenId}`).classList.add('active');
-    if(screenId === 'analytics') loadAnalytics();
-    if(screenId === 'budgets') loadBudgets();
-    document.getElementById('pageTitle').innerText = screenId.charAt(0).toUpperCase()+screenId.slice(1);
-}
+function navigate(screenId) { document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active')); document.getElementById(`screen-${screenId}`).classList.add('active'); document.getElementById('pageTitle').innerText = screenId.charAt(0).toUpperCase()+screenId.slice(1); if(screenId === 'analytics') loadAnalytics(); if(screenId === 'budgets') loadBudgets(); }
+
 document.getElementById('saveProfileBtn').addEventListener('click', saveProfileAndGenerate);
-
-// Auth
+document.getElementById('exportBtn').addEventListener('click', ()=>{ window.location.href = '/api/export/csv'; });
 document.getElementById('signoutBtn').addEventListener('click', async()=>{ await fetch('/api/logout',{method:'POST',credentials:'include'}); location.reload(); });
-document.getElementById('toggleAuthLink').addEventListener('click',()=>{
-    isLogin=!isLogin;
-    document.getElementById('authTitle').innerText = isLogin ? 'Welcome back' : 'Create Account';
-    document.getElementById('regName').style.display = isLogin ? 'none' : 'block';
-    document.getElementById('authConfirm').style.display = isLogin ? 'none' : 'block';
-    document.getElementById('termsRow').style.display = isLogin ? 'none' : 'block';
-    document.getElementById('authBtn').innerText = isLogin ? 'Sign In' : 'Create Account';
-    document.getElementById('toggleAuthLink').innerHTML = isLogin ? "Don't have an account? Register" : "Already have an account? Sign In";
-});
-document.getElementById('authBtn').addEventListener('click', async()=>{
-    let email = document.getElementById('authEmail').value;
-    let pass = document.getElementById('authPass').value;
-    if(!isLogin) {
-        let name = document.getElementById('regName').value;
-        let confirm = document.getElementById('authConfirm').value;
-        let terms = document.getElementById('termsCheck').checked;
-        if(pass !== confirm) { document.getElementById('authMsg').innerText='Passwords mismatch'; return; }
-        if(!terms) { document.getElementById('authMsg').innerText='Accept terms'; return; }
-        await fetch('/api/register', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ name, email, password:pass, accepted_terms:true }), credentials:'include' });
-        document.getElementById('authMsg').innerText='Account created! Please login.';
-        setTimeout(()=>document.getElementById('toggleAuthLink').click(),1500);
-        return;
-    }
-    let res = await fetch('/api/login', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ email, password:pass }), credentials:'include' });
-    if(res.ok) {
-        let data = await res.json();
-        currentUser = data.user;
-        document.getElementById('authOverlay').style.display = 'none';
-        document.getElementById('userAvatar').innerText = currentUser.name.slice(0,2).toUpperCase();
-        await loadDashboard();
-        navigate('dashboard');
-    } else { document.getElementById('authMsg').innerText='Invalid credentials'; }
-});
-
-async function init() {
-    let res = await fetch('/api/me', { credentials:'include' });
-    if(res.ok) {
-        currentUser = await res.json();
-        document.getElementById('authOverlay').style.display = 'none';
-        document.getElementById('userAvatar').innerText = currentUser.name.slice(0,2).toUpperCase();
-        await loadDashboard();
-    } else { document.getElementById('authOverlay').style.display = 'flex'; }
-}
+document.getElementById('toggleAuthLink').addEventListener('click',()=>{ isLogin=!isLogin; document.getElementById('authTitle').innerText = isLogin ? 'Welcome back' : 'Create Account'; document.getElementById('regName').style.display = isLogin ? 'none' : 'block'; document.getElementById('authConfirm').style.display = isLogin ? 'none' : 'block'; document.getElementById('termsRow').style.display = isLogin ? 'none' : 'block'; document.getElementById('authBtn').innerText = isLogin ? 'Sign In' : 'Create Account'; document.getElementById('toggleAuthLink').innerHTML = isLogin ? "Don't have an account? Register" : "Already have an account? Sign In"; });
+document.getElementById('authBtn').addEventListener('click', async()=>{ let email = document.getElementById('authEmail').value; let pass = document.getElementById('authPass').value; if(!isLogin) { let name = document.getElementById('regName').value; let confirm = document.getElementById('authConfirm').value; let terms = document.getElementById('termsCheck').checked; if(pass !== confirm) { document.getElementById('authMsg').innerText='Passwords mismatch'; return; } if(!terms) { document.getElementById('authMsg').innerText='Accept terms'; return; } await fetch('/api/register', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ name, email, password:pass, accepted_terms:true }), credentials:'include' }); document.getElementById('authMsg').innerText='Account created! Please login.'; setTimeout(()=>document.getElementById('toggleAuthLink').click(),1500); return; } let res = await fetch('/api/login', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ email, password:pass }), credentials:'include' }); if(res.ok) { let data = await res.json(); currentUser = data.user; document.getElementById('authOverlay').style.display = 'none'; document.getElementById('userAvatar').innerText = currentUser.name.slice(0,2).toUpperCase(); await loadDashboard(); navigate('dashboard'); } else { document.getElementById('authMsg').innerText='Invalid credentials'; } });
+document.getElementById('sendChatBtn').addEventListener('click', async()=>{ let input = document.getElementById('chatInput'); let msg = input.value.trim(); if(!msg) return; input.value = ''; let container = document.getElementById('chatMessages'); container.innerHTML += `<div class="message user-message">${msg}</div>`; container.scrollTop = container.scrollHeight; let res = await fetch('/api/chatbot', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ message:msg }), credentials:'include' }); let data = await res.json(); container.innerHTML += `<div class="message bot-message">${data.response}</div>`; container.scrollTop = container.scrollHeight; });
+document.getElementById('closeChatBtn').addEventListener('click', ()=> document.getElementById('chatContainer').style.display = 'none');
+async function init() { let res = await fetch('/api/me', { credentials:'include' }); if(res.ok) { currentUser = await res.json(); document.getElementById('authOverlay').style.display = 'none'; document.getElementById('userAvatar').innerText = currentUser.name.slice(0,2).toUpperCase(); await loadDashboard(); } else { document.getElementById('authOverlay').style.display = 'flex'; } }
 init();
 </script>
 </body>
 </html>
 """
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
