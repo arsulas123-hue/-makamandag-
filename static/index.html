@@ -143,29 +143,38 @@
             <div class="panel"><div class="panel-header"><div class="panel-title">Budget Intelligence - AI Advice</div></div><div id="adviceList"></div></div>
         </div>
     </div>
-    <!-- Add Transaction -->
-    <div class="screen" id="screen-add">
-        <div class="stats-grid" style="grid-template-columns: 1fr 1fr">
-            <div class="panel">
-                <div class="panel-header"><div class="panel-title">New Transaction</div></div>
-                <div style="display: flex; gap: 12px; margin-bottom: 20px;">
-                    <button id="btnExp" style="flex:1; background: var(--red-dim); color: var(--red); padding: 10px; border: none; border-radius: 10px; cursor: pointer;">Expense</button>
-                    <button id="btnInc" style="flex:1; background: var(--green-dim); color: var(--green); padding: 10px; border: none; border-radius: 10px; cursor: pointer;">Income</button>
-                </div>
-                <form id="txForm">
-                    <input type="number" id="txAmount" placeholder="Amount (₱)" required style="width:100%; margin-bottom:12px">
-                    <select id="txCategory" style="width:100%; margin-bottom:12px">
-                        <option>Food & Dining</option><option>Transport</option><option>Groceries</option>
-                        <option>Entertainment</option><option>Health</option><option>Salary</option><option>Freelance</option>
-                    </select>
-                    <input type="text" id="txNote" placeholder="Note (optional)" style="width:100%; margin-bottom:12px">
-                    <input type="hidden" id="txType" value="expense">
-                    <button type="submit" class="btn-green" style="width:100%">Save Transaction</button>
-                </form>
-            </div>
-            <div class="panel"><div class="panel-header"><div class="panel-title">Recent Activity</div></div><div id="recentList"></div></div>
+    <!-- Inside the "Add Transaction" screen (screen-add) -->
+<div class="stats-grid" style="grid-template-columns: 1fr 1fr;">
+    <!-- Left side: existing transaction form (unchanged) -->
+    <div class="panel"> ... </div>
+
+    <!-- Right side: NEW Budget Engine (flowchart implementation) -->
+    <div class="panel">
+        <div class="panel-header">
+            <div class="panel-title">🧠 AI Budget Engine (Flowchart)</div>
+            <span class="ml-badge">ML v2.0</span>
         </div>
+        <div id="budgetEngineStatus">⚙️ Set your profile to generate smart scenarios</div>
+        <div style="margin-top: 16px;">
+            <label>Social Status</label>
+            <select id="socialStatus" class="budget-input">
+                <option value="Low">Low Class</option>
+                <option value="Middle" selected>Middle Class</option>
+                <option value="Upper">Upper Class</option>
+            </select>
+        </div>
+        <div style="margin-top: 12px;">
+            <label>Spending Mindset</label>
+            <select id="spendingMindset" class="budget-input">
+                <option value="Saver">Saver 💰</option>
+                <option value="Neutral" selected>Neutral ⚖️</option>
+                <option value="Spender">Spender 💸</option>
+            </select>
+        </div>
+        <button id="saveProfileBtn" class="btn-green" style="margin: 16px 0;">Save Profile & Generate Scenarios</button>
+        <div id="scenariosContainer" style="margin-top: 20px;"></div>
     </div>
+</div>
     <!-- Analytics -->
     <div class="screen" id="screen-analytics">
         <div class="chart-grid">
@@ -261,6 +270,89 @@ function addWasteAlert() {
         if (existing) existing.remove();
     }
 }
+
+    // Inside your main <script> section, add:
+
+async function saveProfileAndGenerate() {
+    const social = document.getElementById('socialStatus').value;
+    const mindset = document.getElementById('spendingMindset').value;
+    try {
+        await apiFetch('/api/user/profile', {
+            method: 'POST',
+            body: JSON.stringify({ social_status: social, spending_mindset: mindset })
+        });
+        toast('Profile saved. Generating scenarios...');
+        await displayScenarios();
+    } catch(e) { toast('Error saving profile'); }
+}
+
+async function displayScenarios() {
+    if (!currentUser) return;
+    const res = await apiFetch(`/api/budget/scenarios/${currentUser.id}`);
+    const scenarios = res.scenarios;
+    const container = document.getElementById('scenariosContainer');
+    if (!scenarios || scenarios.length === 0) {
+        container.innerHTML = '<div class="advice-item">No data yet. Add transactions first.</div>';
+        return;
+    }
+    container.innerHTML = '<h4 style="margin-bottom: 12px;">🎯 ML‑Generated Scenarios (Step 3)</h4>';
+    for (let s of scenarios) {
+        const card = document.createElement('div');
+        card.className = 'advice-item';
+        card.style.cursor = 'pointer';
+        card.innerHTML = `
+            <strong>${s.name}</strong><br>
+            💾 Savings Goal: ₱${s.savings_goal.toLocaleString()} | 📈 Investment: ₱${s.investment_goal.toLocaleString()}<br>
+            <span style="font-size: 0.75rem;">Expected savings rate: ${s.expected_savings_rate}%</span>
+            <div style="margin-top: 8px;">
+                <button class="btn-green preview-scenario" data-limits='${JSON.stringify(s.budget_limits)}'>Preview Budget Limits</button>
+                <button class="btn approve-scenario" data-limits='${JSON.stringify(s.budget_limits)}' style="background: var(--blue); margin-left: 8px;">✅ Approve & Apply</button>
+            </div>
+        `;
+        container.appendChild(card);
+    }
+    // Attach event listeners for preview/approve
+    document.querySelectorAll('.preview-scenario').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            const limits = JSON.parse(btn.dataset.limits);
+            showBudgetPreview(limits);
+        });
+    });
+    document.querySelectorAll('.approve-scenario').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+            const limits = JSON.parse(btn.dataset.limits);
+            await apiFetch(`/api/budgets/bulk/${currentUser.id}`, {
+                method: 'POST',
+                body: JSON.stringify({ limits })
+            });
+            toast('Budgets applied! Analytics & forecast updated.');
+            await loadDashboard();   // refresh charts and advice
+            navigate('dashboard');
+        });
+    });
+}
+
+function showBudgetPreview(limits) {
+    let msg = 'Proposed Monthly Budgets:\n';
+    for (let [cat, limit] of Object.entries(limits)) {
+        msg += `${cat}: ₱${limit.toLocaleString()}\n`;
+    }
+    alert(msg);
+}
+
+// Bind the new button
+document.getElementById('saveProfileBtn').addEventListener('click', saveProfileAndGenerate);
+
+// Also load existing profile on page load (inside init or loadDashboard)
+async function loadUserProfile() {
+    if (!currentUser) return;
+    try {
+        const profile = await apiFetch('/api/user/profile');
+        document.getElementById('socialStatus').value = profile.social_status;
+        document.getElementById('spendingMindset').value = profile.spending_mindset;
+    } catch(e) {}
+}
+// Call loadUserProfile after successful login.
 async function loadDashboard() {
     if (!currentUser) return;
     try {
