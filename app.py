@@ -46,14 +46,13 @@ class Budget(db.Model):
     limit_amount = db.Column(db.Float, nullable=False)
     __table_args__ = (db.UniqueConstraint('user_id', 'category'),)
 
-# NEW: User profile for social status & mindset
 class UserProfile(db.Model):
     __tablename__ = 'user_profiles'
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), unique=True, nullable=False)
-    social_status = db.Column(db.String(20), nullable=False, default='Middle')  # Low/Middle/Upper
-    spending_mindset = db.Column(db.String(20), nullable=False, default='Neutral')  # Saver/Neutral/Spender
-    wants_needs_json = db.Column(db.Text, default='{}')  # store custom priorities
+    social_status = db.Column(db.String(20), nullable=False, default='Middle')
+    spending_mindset = db.Column(db.String(20), nullable=False, default='Neutral')
+    wants_needs_json = db.Column(db.Text, default='{}')
 
 # ========== CREATE TABLES ==========
 with app.app_context():
@@ -65,7 +64,7 @@ with app.app_context():
         db.session.commit()
         print("✅ Admin created: admin@smartspend.com / admin123")
 
-# ========== HELPERS (unchanged, but used in scenarios) ==========
+# ========== HELPERS ==========
 def hash_password(pwd):
     return hashlib.sha256(pwd.encode()).hexdigest()
 
@@ -77,7 +76,6 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated
 
-# ---------- ML Engine with Social & Mindset factors ----------
 def get_user_profile(user_id):
     profile = UserProfile.query.filter_by(user_id=user_id).first()
     if not profile:
@@ -88,84 +86,105 @@ def get_user_profile(user_id):
         'wants_needs': json.loads(profile.wants_needs_json) if profile.wants_needs_json else {}
     }
 
-def generate_scenarios(user_id, transactions, budgets):
-    """Return 3 scenarios: conservative, balanced, aggressive."""
-    # Calculate base stats from user's actual data
-    expenses = [t for t in transactions if t['tx_type'] == 'expense']
+# ---------- ML Functions ----------
+def calculate_health_score(transactions, budgets):
+    """Compute health score (0-100) based on savings rate and budget adherence."""
     income = sum(t['amount'] for t in transactions if t['tx_type'] == 'income')
-    total_expense = sum(e['amount'] for e in expenses)
-    savings = max(0, income - total_expense)
-    savings_rate = (savings / income * 100) if income > 0 else 0
+    expense = sum(t['amount'] for t in transactions if t['tx_type'] == 'expense')
+    if income == 0:
+        return 0
+    savings_rate = (income - expense) / income
+    score = max(0, min(100, savings_rate * 100))  # base on savings rate
+    
+    # Budget adherence factor
+    cat_spending = {}
+    for t in transactions:
+        if t['tx_type'] == 'expense':
+            cat_spending[t['category']] = cat_spending.get(t['category'], 0) + t['amount']
+    budget_penalty = 0
+    total_budget = 0
+    for cat, limit in budgets.items():
+        spent = cat_spending.get(cat, 0)
+        if limit > 0:
+            total_budget += limit
+            if spent > limit:
+                over = (spent - limit) / limit
+                budget_penalty += over * 10  # max penalty per category
+    if total_budget > 0:
+        score = max(0, min(100, score - budget_penalty))
+    return int(score)
 
-    profile = get_user_profile(user_id)
-    social = profile['social_status']
-    mindset = profile['spending_mindset']
+def forecast_spending(transactions):
+    """Return weekly forecast for next 4 weeks using simple moving average."""
+    expenses = [t for t in transactions if t['tx_type'] == 'expense']
+    if not expenses:
+        return {"Week 1": 0, "Week 2": 0, "Week 3": 0, "Week 4": 0}
+    # group by week
+    weekly = {}
+    for t in expenses:
+        date = t['tx_date'] if isinstance(t['tx_date'], datetime.datetime) else datetime.datetime.fromisoformat(t['tx_date'])
+        week_num = date.isocalendar()[1]
+        year = date.year
+        key = f"{year}-W{week_num}"
+        weekly[key] = weekly.get(key, 0) + t['amount']
+    weekly_vals = list(weekly.values())
+    if len(weekly_vals) < 2:
+        avg = sum(weekly_vals) / max(1, len(weekly_vals))
+    else:
+        # simple moving average of last 3 weeks
+        window = weekly_vals[-3:] if len(weekly_vals) >= 3 else weekly_vals
+        avg = sum(window) / len(window)
+    # Generate next 4 weeks
+    forecast = {}
+    for i in range(1, 5):
+        forecast[f"Week {i}"] = round(avg * (0.95 + i * 0.02), 2)  # slight trend
+    return forecast
 
-    # Category aggregates
-    cat_spend = {}
-    for e in expenses:
-        cat_spend[e['category']] = cat_spend.get(e['category'], 0) + e['amount']
-    # Default categories for budgeting
-    default_cats = ['Food & Dining', 'Transport', 'Groceries', 'Entertainment', 'Health']
-
-    # Helper to build scenario dict
-    def build_scenario(name, savings_mult, invest_mult, essential_mult, disc_mult):
-        # Base limits: average of past spending or default
-        limits = {}
-        for cat in default_cats:
-            spent = cat_spend.get(cat, 0)
-            if cat in ['Food & Dining', 'Groceries', 'Health']:
-                # essential categories get multiplier
-                suggested = max(spent * essential_mult, 2000) if spent > 0 else 3000
+def generate_advice(transactions, budgets):
+    """Generate AI advice per category based on budget vs actual."""
+    advice = []
+    cat_spending = {}
+    for t in transactions:
+        if t['tx_type'] == 'expense':
+            cat_spending[t['category']] = cat_spending.get(t['category'], 0) + t['amount']
+    for cat, limit in budgets.items():
+        spent = cat_spending.get(cat, 0)
+        if limit > 0:
+            if spent > limit:
+                advice.append({"cat": cat, "msg": f"⚠️ Overspent by ₱{spent-limit:.2f}. Reduce or adjust budget."})
+            elif spent < limit * 0.7:
+                advice.append({"cat": cat, "msg": f"✅ Great! You underspent by ₱{limit-spent:.2f}. Consider saving the difference."})
             else:
-                suggested = max(spent * disc_mult, 1000) if spent > 0 else 2000
-            limits[cat] = round(suggested)
+                advice.append({"cat": cat, "msg": f"✔️ On track. Spent ₱{spent:.2f} of ₱{limit:.2f} budget."})
+    if not advice:
+        advice.append({"cat": "General", "msg": "No budget limits set. Set budgets to get personalized advice."})
+    return advice
 
-        # Adjust based on social class and mindset
-        if social == 'Low':
-            # lower discretionary, higher essential
-            limits['Entertainment'] = limits.get('Entertainment', 1500) * 0.6
-        elif social == 'Upper':
-            limits['Entertainment'] = limits.get('Entertainment', 3000) * 1.5
-            limits['Health'] = limits.get('Health', 3000) * 1.3
+def generate_chatbot_response_with_profile(message, transactions, budgets, profile):
+    """Simple rule-based chatbot with profile context."""
+    msg_lower = message.lower()
+    if "forecast" in msg_lower:
+        forecast = forecast_spending(transactions)
+        return f"Based on your spending patterns, the next 4 weeks forecast: {forecast}"
+    elif "health score" in msg_lower:
+        score = calculate_health_score(transactions, budgets)
+        return f"Your current ML health score is {score}/100. {'Keep it up!' if score >= 70 else 'Try to increase savings and control overspending.'}"
+    elif "investment" in msg_lower:
+        social = profile['social_status']
+        if social == 'Upper':
+            return "Given your upper-class profile, consider diversifying into stocks and real estate. Aim to invest 30% of income."
+        else:
+            return "Start with low-cost index funds or micro-investing apps. Aim to invest at least 10% of savings."
+    else:
+        return "I can help with spending forecasts, health scores, or investment advice. Try asking: 'ML forecast', 'Health score', or 'Investment advice'."
 
-        if mindset == 'Saver':
-            for cat in ['Entertainment', 'Transport']:
-                limits[cat] = limits.get(cat, 2000) * 0.7
-        elif mindset == 'Spender':
-            for cat in ['Entertainment', 'Food & Dining']:
-                limits[cat] = limits.get(cat, 3000) * 1.4
-
-        # Ensure limits are positive integers
-        for cat in limits:
-            limits[cat] = max(100, int(limits[cat]))
-
-        # Monthly savings goal (not a budget category, but shown)
-        suggested_savings = income * savings_mult if income > 0 else savings * savings_mult
-        suggested_investment = suggested_savings * invest_mult
-
-        return {
-            'name': name,
-            'budget_limits': limits,
-            'savings_goal': round(suggested_savings),
-            'investment_goal': round(suggested_investment),
-            'expected_savings_rate': round(savings_mult * 100)
-        }
-
-    cons = build_scenario('Conservative (Safe)', 0.25, 0.6, 1.0, 0.7)
-    bal = build_scenario('Balanced (Moderate)', 0.20, 0.7, 1.0, 1.0)
-    agg = build_scenario('Aggressive (Growth)', 0.15, 0.9, 0.9, 1.3)
-
-    return [cons, bal, agg]
-
-# ========== API ROUTES (existing + new) ==========
+# ---------- API ROUTES ----------
 @app.route('/api/health')
 def health():
     return jsonify({'status': 'ok'})
 
 @app.route('/api/register', methods=['POST'])
 def register():
-    # ... (unchanged from your original) ...
     try:
         data = request.get_json()
         name = data.get('name')
@@ -190,7 +209,6 @@ def register():
 
 @app.route('/api/login', methods=['POST'])
 def login():
-    # ... unchanged ...
     try:
         data = request.get_json()
         email = data.get('email')
@@ -220,7 +238,6 @@ def me():
         return jsonify({'error': 'User not found'}), 401
     return jsonify({'id': user.id, 'name': user.name, 'email': user.email, 'role': user.role})
 
-# --- Profile endpoints ---
 @app.route('/api/user/profile', methods=['GET'])
 @login_required
 def get_profile():
@@ -249,19 +266,66 @@ def update_profile():
     db.session.commit()
     return jsonify({'message': 'Profile saved'})
 
-# --- Scenario generation endpoint ---
+def generate_scenarios(user_id, transactions, budgets):
+    expenses = [t for t in transactions if t['tx_type'] == 'expense']
+    income = sum(t['amount'] for t in transactions if t['tx_type'] == 'income')
+    total_expense = sum(e['amount'] for e in expenses)
+    savings = max(0, income - total_expense)
+    profile = get_user_profile(user_id)
+    social = profile['social_status']
+    mindset = profile['spending_mindset']
+    cat_spend = {}
+    for e in expenses:
+        cat_spend[e['category']] = cat_spend.get(e['category'], 0) + e['amount']
+    default_cats = ['Food & Dining', 'Transport', 'Groceries', 'Entertainment', 'Health']
+
+    def build_scenario(name, savings_mult, invest_mult, essential_mult, disc_mult):
+        limits = {}
+        for cat in default_cats:
+            spent = cat_spend.get(cat, 0)
+            if cat in ['Food & Dining', 'Groceries', 'Health']:
+                suggested = max(spent * essential_mult, 2000) if spent > 0 else 3000
+            else:
+                suggested = max(spent * disc_mult, 1000) if spent > 0 else 2000
+            limits[cat] = round(suggested)
+        if social == 'Low':
+            limits['Entertainment'] = limits.get('Entertainment', 1500) * 0.6
+        elif social == 'Upper':
+            limits['Entertainment'] = limits.get('Entertainment', 3000) * 1.5
+            limits['Health'] = limits.get('Health', 3000) * 1.3
+        if mindset == 'Saver':
+            for cat in ['Entertainment', 'Transport']:
+                limits[cat] = limits.get(cat, 2000) * 0.7
+        elif mindset == 'Spender':
+            for cat in ['Entertainment', 'Food & Dining']:
+                limits[cat] = limits.get(cat, 3000) * 1.4
+        for cat in limits:
+            limits[cat] = max(100, int(limits[cat]))
+        suggested_savings = income * savings_mult if income > 0 else savings * savings_mult
+        suggested_investment = suggested_savings * invest_mult
+        return {
+            'name': name,
+            'budget_limits': limits,
+            'savings_goal': round(suggested_savings),
+            'investment_goal': round(suggested_investment),
+            'expected_savings_rate': round(savings_mult * 100)
+        }
+    cons = build_scenario('Conservative (Safe)', 0.25, 0.6, 1.0, 0.7)
+    bal = build_scenario('Balanced (Moderate)', 0.20, 0.7, 1.0, 1.0)
+    agg = build_scenario('Aggressive (Growth)', 0.15, 0.9, 0.9, 1.3)
+    return [cons, bal, agg]
+
 @app.route('/api/budget/scenarios/<int:user_id>', methods=['GET'])
 @login_required
 def get_scenarios(user_id):
     if user_id != session['user_id']:
         return jsonify({'error': 'Access denied'}), 403
     txs = Transaction.query.filter_by(user_id=user_id).all()
-    txs_data = [{'amount': t.amount, 'tx_type': t.tx_type, 'category': t.category} for t in txs]
+    txs_data = [{'amount': t.amount, 'tx_type': t.tx_type, 'category': t.category, 'tx_date': t.tx_date.isoformat()} for t in txs]
     budgets = {b.category: b.limit_amount for b in Budget.query.filter_by(user_id=user_id).all()}
     scenarios = generate_scenarios(user_id, txs_data, budgets)
     return jsonify({'scenarios': scenarios})
 
-# --- Bulk budget save from selected scenario ---
 @app.route('/api/budgets/bulk/<int:user_id>', methods=['POST'])
 @login_required
 def bulk_save_budgets(user_id):
@@ -279,7 +343,33 @@ def bulk_save_budgets(user_id):
     db.session.commit()
     return jsonify({'message': 'Budgets updated from scenario'})
 
-# --- Existing transaction and summary endpoints (unchanged) ---
+@app.route('/api/budgets/<int:user_id>', methods=['GET'])
+@login_required
+def get_budgets(user_id):
+    if user_id != session['user_id']:
+        return jsonify({'error': 'Access denied'}), 403
+    budgets = Budget.query.filter_by(user_id=user_id).all()
+    return jsonify([{'category': b.category, 'limit': b.limit_amount} for b in budgets])
+
+@app.route('/api/budgets/<int:user_id>', methods=['POST'])
+@login_required
+def set_budget(user_id):
+    if user_id != session['user_id']:
+        return jsonify({'error': 'Access denied'}), 403
+    data = request.json
+    category = data.get('category')
+    limit = data.get('limit')
+    if not category or limit is None:
+        return jsonify({'error': 'Missing category or limit'}), 400
+    budget = Budget.query.filter_by(user_id=user_id, category=category).first()
+    if budget:
+        budget.limit_amount = float(limit)
+    else:
+        budget = Budget(user_id=user_id, category=category, limit_amount=float(limit))
+        db.session.add(budget)
+    db.session.commit()
+    return jsonify({'message': 'Budget saved'})
+
 @app.route('/api/transactions', methods=['GET'])
 @login_required
 def get_transactions():
@@ -327,22 +417,24 @@ def predict(user_id):
     if user_id != session['user_id']:
         return jsonify({'error': 'Access denied'}), 403
     txs = Transaction.query.filter_by(user_id=user_id).all()
-    txs_data = [{'amount': t.amount, 'tx_type': t.tx_type, 'category': t.category} for t in txs]
+    if not txs:
+        return jsonify({'has_data': False, 'score': None, 'predictions': {'weekly': {}, 'categories': {}}, 'advice': []})
+    txs_data = [{'amount': t.amount, 'tx_type': t.tx_type, 'category': t.category, 'tx_date': t.tx_date} for t in txs]
     budgets = {b.category: b.limit_amount for b in Budget.query.filter_by(user_id=user_id).all()}
-    # ... (same ML functions from your original, but using the existing helpers)
-    from your_original_ml_functions import calculate_health_score, forecast_spending, generate_advice
-    # (I'm referencing them; assume they exist. For brevity, keep your original code block.)
-    # In a full deployment you would copy the original functions here.
-    # For this answer I'll assume they are present.
-    # (But to avoid omission, I'll paste them again inline – see note below)
-    # For production, reuse your existing calculate_health_score etc.
-    # I'll include them for completeness.
-    def calc_score(txs, budgets):
-        # ... your original implementation ...
-        pass
-    # However, to keep answer short, I'll trust they are defined above.
+    score = calculate_health_score(txs_data, budgets)
+    weekly_forecast = forecast_spending(txs_data)
+    cat_spending = {}
+    for t in txs_data:
+        if t['tx_type'] == 'expense':
+            cat_spending[t['category']] = cat_spending.get(t['category'], 0) + t['amount']
+    advice = generate_advice(txs_data, budgets)
+    return jsonify({
+        'has_data': True,
+        'score': score,
+        'predictions': {'weekly': weekly_forecast, 'categories': cat_spending},
+        'advice': advice
+    })
 
-# ========== CHATBOT ENDPOINT (enhanced) ==========
 @app.route('/api/chatbot', methods=['POST'])
 @login_required
 def chatbot():
@@ -350,17 +442,12 @@ def chatbot():
     user_message = data.get('message', '')
     user_id = session['user_id']
     txs = Transaction.query.filter_by(user_id=user_id).all()
-    txs_data = [{'amount': t.amount, 'tx_type': t.tx_type, 'category': t.category} for t in txs]
+    txs_data = [{'amount': t.amount, 'tx_type': t.tx_type, 'category': t.category, 'tx_date': t.tx_date.isoformat()} for t in txs]
     budgets = {b.category: b.limit_amount for b in Budget.query.filter_by(user_id=user_id).all()}
     profile = get_user_profile(user_id)
-    # Use your existing generate_chatbot_response but inject profile awareness
     response = generate_chatbot_response_with_profile(user_message, txs_data, budgets, profile)
     return jsonify({'response': response})
 
-# (Implement generate_chatbot_response_with_profile similarly to your original but using profile)
-# For production, integrate the profile into the response logic.
-
-# ... static file serving ...
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def serve_index(path):
