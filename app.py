@@ -1,6 +1,7 @@
 import json
 import csv
 import io
+import google.generativeai as genai
 from datetime import datetime, timedelta
 from collections import defaultdict
 from functools import wraps
@@ -17,7 +18,7 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-secret-key-change-in-production'
 app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://makamandag_db_user:zcDibuXdlpEpcZNGEYLc9nqpgWwuTTfO@dpg-d7od7md7vvec739acfj0-a/makamandag_db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-
+genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
 db = SQLAlchemy(app)
 bcrypt = Bcrypt(app)
 
@@ -147,6 +148,54 @@ def get_current_user():
 # ----------------------------------------------------------------------
 # ML / Prediction helpers (unchanged)
 # ----------------------------------------------------------------------
+@app.route('/api/ai_analyze', methods=['POST'])
+@login_required
+def ai_analyze():
+    """
+    Accepts user spending data and returns AI-powered analysis and advice.
+    """
+    user = get_current_user()
+    data = request.json
+    user_message = data.get('message', '')
+
+    # 1. Fetch real-time data for the user
+    user_data = {
+        "balance": get_monthly_summary(user.id)["balance"],
+        "recent_transactions": [
+            t.to_dict() for t in Transaction.query
+            .filter_by(user_id=user.id)
+            .order_by(Transaction.tx_date.desc())
+            .limit(10)
+            .all()
+        ],
+        "health_score": compute_health_score(user.id),
+        "advice": generate_advice(user.id)
+    }
+
+    # 2. Prepare a prompt for the AI
+    prompt_content = f"""
+    You are SmartSpend AI, a personal finance assistant for the user: {user.name}.
+    Their financial data is:
+    - Current Balance: ₱{user_data['balance']:,.2f}
+    - Financial Health Score: {user_data['health_score']}/100
+    - Recent spending: {user_data['recent_transactions']}
+    - Recent AI advice: {user_data['advice']}
+
+    The user asks: "{user_message}"
+    Provide a helpful, actionable, and friendly answer (max 150 words).
+    """
+
+    # 3. Call the Gemini API
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    try:
+        response = model.generate_content(prompt_content)
+        ai_response = response.text
+    except Exception as e:
+        print(f"Gemini API Error: {e}")
+        ai_response = "Sorry, the AI advisor is temporarily unavailable."
+
+    return jsonify({'reply': ai_response}), 200
+
 def compute_health_score(user_id):
     user = User.query.get(user_id)
     if not user:
