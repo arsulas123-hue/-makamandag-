@@ -6,14 +6,14 @@ import json
 import csv
 import io
 from functools import wraps
-from flask import Flask, request, jsonify, session, send_from_directory, Response
+from flask import Flask, request, jsonify, session, Response
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 
 app = Flask(__name__, static_folder='static')
 CORS(app, supports_credentials=True)
 
-# === DATABASE CONFIGURATION ===
+# === CONFIGURATION ===
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', secrets.token_hex(32))
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_HTTPONLY'] = True
@@ -64,10 +64,22 @@ class UserProfile(db.Model):
     spending_mindset = db.Column(db.String(20), nullable=False, default='Neutral')
     wants_needs_json = db.Column(db.Text, default='{}')
 
-# ========== CREATE TABLES ==========
+# ========== CREATE TABLES & FALLBACK MIGRATIONS ==========
 with app.app_context():
     db.create_all()
-    # Create default admin if not exists
+    # Ensure is_need and priority columns exist (for older dbs)
+    try:
+        db.session.execute('ALTER TABLE transactions ADD COLUMN is_need BOOLEAN DEFAULT 0')
+        db.session.commit()
+    except Exception:
+        pass
+    try:
+        db.session.execute('ALTER TABLE transactions ADD COLUMN priority INTEGER DEFAULT 0')
+        db.session.commit()
+    except Exception:
+        pass
+
+    # Create default admin
     if not User.query.filter_by(email='admin@smartspend.com').first():
         hashed = hashlib.sha256('admin123'.encode()).hexdigest()
         admin = User(name='Admin', email='admin@smartspend.com', password=hashed, role='admin')
@@ -98,7 +110,6 @@ def get_user_profile(user_id):
     }
 
 def _prio_label(p):
-    """Helper to convert priority integer to label."""
     return {0: 'Low', 1: 'Medium', 2: 'High', 3: 'Critical'}.get(p, 'Low')
 
 def _priority_penalty(priority):
@@ -371,7 +382,6 @@ def transactions():
         data = request.json
         if not data or 'amount' not in data or 'category' not in data or 'tx_type' not in data:
             return jsonify({'error': 'Invalid transaction data'}), 400
-        # For income, force is_need = False, priority = 0
         is_need = data.get('is_need', False) if data['tx_type'] == 'expense' else False
         priority = data.get('priority', 0) if data['tx_type'] == 'expense' else 0
         txn = Transaction(
@@ -391,7 +401,6 @@ def transactions():
 @app.route('/api/transactions/<int:txn_id>', methods=['PATCH'])
 @login_required
 def update_transaction(txn_id):
-    """Endpoint to toggle is_need flag (used by ML diagram)."""
     txn = Transaction.query.get_or_404(txn_id)
     if txn.user_id != session['user_id']:
         return jsonify({'error': 'Forbidden'}), 403
@@ -580,7 +589,7 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
 
-# ========== FRONTEND (Fully Functional) ==========
+# ========== FRONTEND (Embedded) ==========
 HTML_PAGE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -1073,7 +1082,7 @@ document.getElementById('sendChatBtn').addEventListener('click', async () => {
 });
 function escapeHtml(str) { return str.replace(/[&<>]/g, function(m){ if(m==='&') return '&amp;'; if(m==='<') return '&lt;'; if(m==='>') return '&gt;'; return m;}); }
 document.getElementById('closeChatBtn').addEventListener('click', ()=> document.getElementById('chatContainer').style.display = 'none');
-// drag chat (simple)
+// drag chat
 let drag = false, offsetX, offsetY;
 const chatContainer = document.getElementById('chatContainer');
 const chatHeader = document.getElementById('chatHeader');
