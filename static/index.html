@@ -1,5 +1,3 @@
-Here is the aligned HTML and Flask backend code. The HTML has been restructured to include all necessary forms for income/expense transactions, budget management, and analytics, ensuring complete compatibility with the provided `app.py` routes and logic.
-```html
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -63,7 +61,8 @@ Here is the aligned HTML and Flask backend code. The HTML has been restructured 
         @media (max-width: 700px) { .row-2cols { grid-template-columns: 1fr; } }
         .allocation-box { background: var(--bg3); border-radius: 12px; padding: 16px; margin: 12px 0; }
         .forecast-scenarios { display: flex; justify-content: space-between; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
-        .scenario-card { background: var(--bg3); border-radius: 12px; padding: 12px; flex: 1; text-align: center; }
+        .scenario-card { background: var(--bg3); border-radius: 12px; padding: 12px; flex: 1; text-align: center; cursor: pointer; transition: all 0.2s; }
+        .scenario-card.active { border: 2px solid var(--green); background: var(--green-dim); }
         .pref-checkbox { margin: 8px 0; display: flex; align-items: center; gap: 10px; }
         .ml-badge { background: linear-gradient(135deg, var(--purple), var(--blue)); padding: 2px 8px; border-radius: 12px; font-size: 0.7rem; font-weight: 600; margin-left: 8px; }
         .table-wrap { overflow-x: auto; border-radius: var(--r); background: var(--panel); border: 1px solid var(--border2); }
@@ -89,8 +88,10 @@ Here is the aligned HTML and Flask backend code. The HTML has been restructured 
         .chat-input { display: flex; padding: 14px; gap: 10px; background: var(--bg3); border-top: 1px solid var(--border); }
         .budget-limit-panel { margin-top: 24px; border-top: 1px solid var(--border); padding-top: 20px; }
         .auto-badge { font-size: 0.6rem; background: var(--green-dim); border-radius: 12px; padding: 2px 6px; margin-left: 8px; color: var(--green);}
-        .form-group { margin-bottom: 16px; display: flex; flex-direction: column; gap: 6px; }
-        .form-row { display: flex; gap: 16px; flex-wrap: wrap; }
+        .cat-row { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; flex-wrap: wrap; }
+        .cat-row input[type="number"] { width: 80px; }
+        .cat-row .need-want { width: 100px; }
+        .future-expense-item { background: var(--bg3); border-radius: 12px; padding: 12px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
     </style>
 </head>
 <body>
@@ -114,7 +115,7 @@ Here is the aligned HTML and Flask backend code. The HTML has been restructured 
     </div>
     <div id="toast"></div>
 
-    <!-- DASHBOARD -->
+    <!-- DASHBOARD (unchanged) -->
     <div class="screen active" id="screen-dashboard">
         <div class="stats-grid">
             <div class="stat-card"><div class="stat-value" id="sBalance">—</div><div class="stat-label">Balance</div></div>
@@ -127,93 +128,105 @@ Here is the aligned HTML and Flask backend code. The HTML has been restructured 
         <div class="panel"><div class="panel-header">AI Advice</div><div id="adviceList"></div></div>
     </div>
 
-    <!-- ADD TRANSACTION SCREEN with Income/Expense forms + ML Allocation -->
+    <!-- ADD TRANSACTION SCREEN - REDESIGNED per diagram -->
     <div class="screen" id="screen-add">
-        <div class="row-2cols">
-            <!-- Income Form -->
-            <div class="panel">
-                <div class="panel-title">💸 Add Income</div>
-                <form id="incomeForm" class="flex-form">
-                    <div class="form-group"><label>Amount (₱)</label><input type="number" id="incomeAmount" step="0.01" required placeholder="e.g., 5000"></div>
-                    <div class="form-group"><label>Note (optional)</label><input type="text" id="incomeNote" placeholder="Salary, Freelance..."></div>
-                    <button type="submit" class="btn btn-green">+ Record Income</button>
-                </form>
-            </div>
-            <!-- Expense Form -->
-            <div class="panel">
-                <div class="panel-title">🛒 Add Expense</div>
-                <form id="expenseForm" class="flex-form">
-                    <div class="form-group"><label>Amount (₱)</label><input type="number" id="expenseAmount" step="0.01" required></div>
-                    <div class="form-group"><label>Category</label><select id="expenseCategory"><option>Food & Dining</option><option>Transport</option><option>Groceries</option><option>Entertainment</option><option>Health</option><option>Other</option></select></div>
-                    <div class="form-row">
-                        <label style="display:flex; align-items:center; gap:8px;"><input type="checkbox" id="isNeed"> Essential (Need)</label>
-                        <div class="form-group" style="flex:1"><label>Priority (0=Low → 3=Critical)</label><select id="expensePriority"><option value="0">0 - Low</option><option value="1" selected>1 - Medium</option><option value="2">2 - High</option><option value="3">3 - Critical</option></select></div>
-                    </div>
-                    <div class="form-group"><label>Note</label><input type="text" id="expenseNote" placeholder="e.g., Groceries"></div>
-                    <button type="submit" class="btn btn-green">➕ Record Expense</button>
-                </form>
-            </div>
-        </div>
-
+        <!-- ML Controlled Budget Allocation (Priority + percentage) -->
         <div class="panel">
             <div class="panel-header">🧠 ML Controlled Budget Allocation <span class="ml-badge">LIVE</span></div>
             <div style="display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 16px;">
-                <div style="flex:1;"><label>Monthly Budget Cap (₱)</label><input type="number" id="monthlyBudgetCap" placeholder="Auto from income" step="500"></div>
+                <div style="flex:1;"><label>Monthly Budget (₱)</label><input type="number" id="monthlyBudgetCap" placeholder="Auto from income" step="100"></div>
                 <div style="flex:1;"><label>Social Status</label><select id="socialStatusDiagram"><option>Low</option><option selected>Middle</option><option>Upper</option></select></div>
                 <div style="flex:1;"><label>Mindset</label><select id="mindsetDiagram"><option>Saver</option><option selected>Neutral</option><option>Spender</option></select></div>
                 <div style="flex:1;"><label>Cycle</label><select id="budgetCycle"><option>Daily</option><option>Weekly</option><option selected>Monthly</option><option>Yearly</option></select></div>
             </div>
-            <div class="allocation-box" id="allocationDisplay">Needs: -- / Wants: -- / Savings: --</div>
-            <div style="margin: 16px 0; padding: 12px; background: var(--bg3); border-radius: 12px;" id="lastExpenseBox">
-                <strong>📝 LAST EXPENSE</strong><br>
-                <span id="lastExpenseDesc">No expenses yet</span>
-                <div id="lastExpenseActions" style="margin-top: 8px;"></div>
+            <!-- Dynamic category rows -->
+            <div id="categoryAllocationList"></div>
+            <div class="allocation-box" id="allocationDisplay">
+                Needs: -- / Wants: -- / Savings: --
             </div>
-            <div>
-                <div class="panel-title">📈 FORECAST (next 7 days)</div>
-                <div class="forecast-scenarios" id="forecastScenarios">
-                    <div class="scenario-card"><strong>🟢 Optimistic</strong><br><span id="forecastOpt">--</span></div>
-                    <div class="scenario-card"><strong>🔵 Realistic</strong><br><span id="forecastReal">--</span></div>
-                    <div class="scenario-card"><strong>🔴 Pessimistic</strong><br><span id="forecastPess">--</span></div>
-                </div>
-            </div>
-            <div style="margin-top: 16px;">
-                <div class="panel-title">⚙️ ML Preferences</div>
-                <label class="pref-checkbox"><input type="checkbox" id="prefAutoReallocate"> Allow ML to auto‑reallocate wants to needs</label>
-                <label class="pref-checkbox"><input type="checkbox" id="prefAlertWant"> Alert me before any want expense</label>
-                <label class="pref-checkbox"><input type="checkbox" id="prefDailyForecast" checked> Show daily forecast summary</label>
+            <div class="pref-checkbox">
+                <label><input type="checkbox" id="autoRemainingToWants" checked> Automatically allocate remaining % to Wants</label>
             </div>
         </div>
 
-        <!-- Quick Budget Limits (Auto-save) inside Add screen -->
+        <!-- PIN FUTURE EXPENSE -->
+        <div class="panel">
+            <div class="panel-header">📌 PIN FUTURE EXPENSE</div>
+            <div style="display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 16px;">
+                <input type="text" id="futureDesc" placeholder="Description (e.g., Concert ticket)" style="flex:2">
+                <input type="number" id="futureAmount" placeholder="Amount (₱)" style="flex:1">
+                <select id="futureCategory">
+                    <option>Entertainment</option><option>Food & Dining</option><option>Transport</option><option>Groceries</option><option>Health</option><option>Other</option>
+                </select>
+                <select id="futureCycle">
+                    <option>One-time</option><option>Weekly</option><option>Monthly</option>
+                </select>
+                <input type="date" id="futureDate">
+                <button id="pinFutureExpenseBtn" class="btn btn-green">Pin Expense</button>
+            </div>
+            <div id="futureExpensesList"></div>
+        </div>
+
+        <!-- LAST EXPENSE (unchanged) -->
+        <div class="panel">
+            <div class="panel-header">📝 LAST EXPENSE</div>
+            <div id="lastExpenseBox">
+                <span id="lastExpenseDesc">No expenses yet</span>
+                <div id="lastExpenseActions" style="margin-top: 8px;"></div>
+            </div>
+        </div>
+
+        <!-- ML FORECAST (dropdown + graphs link) -->
+        <div class="panel">
+            <div class="panel-header">📈 ML FORECAST <span style="font-size:0.8rem;">(budget will last for next 7 days)</span>
+                <select id="forecastScenarioSelect">
+                    <option value="optimistic">Optimistic</option>
+                    <option value="realistic" selected>Realistic</option>
+                    <option value="pessimistic">Pessimistic</option>
+                </select>
+                <button id="linkToAnalyticsBtn" class="btn" style="background:var(--blue);">View in Analytics →</button>
+            </div>
+            <div id="forecastScenariosDisplay" class="forecast-scenarios">
+                <div class="scenario-card" data-scenario="optimistic"><strong>🟢 Optimistic</strong><br><span id="forecastOpt">--</span></div>
+                <div class="scenario-card active" data-scenario="realistic"><strong>🔵 Realistic</strong><br><span id="forecastReal">--</span></div>
+                <div class="scenario-card" data-scenario="pessimistic"><strong>🔴 Pessimistic</strong><br><span id="forecastPess">--</span></div>
+            </div>
+        </div>
+
+        <!-- REAL‑TIME ML PREFERENCES -->
+        <div class="panel">
+            <div class="panel-header">⚙️ REAL‑TIME ML Preferences</div>
+            <label class="pref-checkbox"><input type="checkbox" id="prefAlertWant"> Alert me before any want expense</label>
+            <label class="pref-checkbox"><input type="checkbox" id="prefDailyForecast" checked> Show <select id="forecastSummaryPeriod" style="width: auto; display: inline-block;"><option>daily</option><option>weekly</option></select> forecast summary</label>
+        </div>
+
+        <!-- Budget Limits auto-save panel (kept as before) -->
         <div class="panel budget-limit-panel">
-            <div class="panel-header">💰 Budget Limits by Category <span class="auto-badge">⚡ auto-saves on change</span></div>
+            <div class="panel-header">💰 Budget Limits (by category) <span class="auto-badge">⚡ auto-saves on change</span></div>
             <div id="budgetInputsAdd" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px;"></div>
         </div>
     </div>
 
-    <!-- ANALYTICS -->
+    <!-- ANALYTICS, BUDGETS, TRANSACTIONS (unchanged) -->
     <div class="screen" id="screen-analytics">
         <div class="panel"><div class="panel-header">⏳ Budget Longevity</div><div id="longevityContainer">Loading...</div></div>
-        <div class="panel"><div class="panel-header">Weekly Forecast (ML)</div><canvas id="forecastChart" height="200"></canvas></div>
-        <div class="panel"><div class="panel-header">Category Breakdown (Current Month)</div><canvas id="catBarChart" height="200"></canvas></div>
+        <div class="panel"><div class="panel-header">Weekly Forecast</div><canvas id="forecastChart" height="200"></canvas></div>
+        <div class="panel"><div class="panel-header">Category Breakdown</div><canvas id="catBarChart" height="200"></canvas></div>
     </div>
-    <!-- BUDGETS (standalone auto-save) -->
     <div class="screen" id="screen-budgets">
         <div class="panel">
             <div class="panel-header">Set Monthly Budget Limits <span class="auto-badge">✏️ auto-save on edit</span></div>
             <div id="budgetInputsStandalone" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:16px;"></div>
         </div>
     </div>
-    <!-- TRANSACTIONS HISTORY -->
     <div class="screen" id="screen-transactions">
-        <div class="table-wrap"></table><thead><tr><th>Date</th><th>Category</th><th>Need?</th><th>Priority</th><th>Note</th><th>Type</th><th>Amount</th></tr></thead><tbody id="txTableBody"></tbody></table></div>
+        <div class="table-wrap"><table><thead><tr><th>Date</th><th>Category</th><th>Need?</th><th>Priority</th><th>Note</th><th>Type</th><th>Amount</th></tr></thead><tbody id="txTableBody"></tbody></table></div>
     </div>
 
     <!-- AUTH OVERLAY -->
     <div id="authOverlay" class="auth-overlay"><div class="auth-card"><h2 id="authTitle">Welcome back</h2><input type="text" id="regName" class="auth-input" placeholder="Full Name" style="display:none"><input type="email" id="authEmail" class="auth-input" placeholder="Email"><input type="password" id="authPass" class="auth-input" placeholder="Password"><input type="password" id="authConfirm" class="auth-input" placeholder="Confirm Password" style="display:none"><div id="termsRow" style="display:none;"><label><input type="checkbox" id="termsCheck"> Accept Terms</label></div><div id="authMsg" style="color:#ff4d6d;"></div><button id="authBtn" class="auth-btn">Sign In</button><div id="toggleAuthLink" class="auth-link" style="cursor:pointer; margin-top:12px;">Don't have an account? Register</div></div></div>
 
-    <!-- CHATBOT AI -->
+    <!-- CHATBOT -->
     <div id="chatContainer" class="chat-container"><div class="chat-window"><div class="chat-header" id="chatHeader">🤖 SmartSpend AI <span class="ml-badge">ML</span><button id="closeChatBtn">✕</button></div><div class="chat-messages" id="chatMessages"><div class="message bot-message">✨ Ask: 'health score', 'forecast', 'investment', 'needs vs wants', 'priority'.</div></div><div class="chat-input"><input id="chatInput" placeholder="Ask..."><button id="sendChatBtn">Send</button></div></div></div>
 </main>
 
@@ -225,79 +238,193 @@ function fmt(amt) { return '₱' + Number(amt).toLocaleString('en-PH', { minimum
 function toast(msg) { let t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2500); }
 async function apiFetch(url, opts={}) { let res = await fetch(url, {...opts, credentials:'include', headers:{'Content-Type':'application/json'}}); if(!res.ok) throw new Error((await res.json()).error); return res.json(); }
 
-// --- ML Allocation and diagram ---
-function getAllocation(budget, status, mindset) {
-    let needsPct, wantsPct, savingsPct;
-    if(status === 'Low') { needsPct=70; wantsPct=20; savingsPct=10; }
-    else if(status === 'Middle') { needsPct=50; wantsPct=30; savingsPct=20; }
-    else { needsPct=30; wantsPct=30; savingsPct=40; }
-    if(mindset === 'Spender') { wantsPct += 10; needsPct -= 5; savingsPct -= 5; }
-    else if(mindset === 'Saver') { savingsPct += 10; wantsPct -= 5; needsPct -= 5; }
-    needsPct = Math.min(100, Math.max(0, needsPct));
-    wantsPct = Math.min(100, Math.max(0, wantsPct));
-    savingsPct = Math.min(100, Math.max(0, 100 - needsPct - wantsPct));
-    let needsAmt = budget * needsPct / 100;
-    let wantsAmt = budget * wantsPct / 100;
-    let savingsAmt = budget * savingsPct / 100;
-    return { needsPct, wantsPct, savingsPct, needsAmt, wantsAmt, savingsAmt };
+// ---------- Category Allocation (Need/Want + percentages) ----------
+let categoryConfig = [
+    { name: "Food & dining", defaultPct: 50, type: "need" },
+    { name: "Debt repayment", defaultPct: 20, type: "need" },
+    { name: "Mortgage", defaultPct: 10, type: "need" },
+    { name: "Entertainment", defaultPct: 5, type: "want" },
+    { name: "Transport", defaultPct: 4, type: "need" },
+    { name: "Subscription", defaultPct: 11, type: "want" },
+    { name: "Hobbies", defaultPct: 0, type: "want" }
+];
+
+function renderCategoryAllocation() {
+    let container = document.getElementById('categoryAllocationList');
+    let html = '';
+    categoryConfig.forEach((cat, idx) => {
+        html += `<div class="cat-row">
+            <select class="need-want" data-idx="${idx}" style="width:100px;">
+                <option value="need" ${cat.type === 'need' ? 'selected' : ''}>Need</option>
+                <option value="want" ${cat.type === 'want' ? 'selected' : ''}>Want</option>
+            </select>
+            <label><input type="checkbox" class="cat-enabled" data-idx="${idx}" ${cat.pct !== undefined ? 'checked' : ''}> ${cat.name}</label>
+            <input type="number" class="cat-pct" data-idx="${idx}" value="${cat.pct !== undefined ? cat.pct : cat.defaultPct}" step="1" min="0" max="100" style="width:80px;"> %
+        </div>`;
+    });
+    container.innerHTML = html;
+    // attach events
+    document.querySelectorAll('.need-want').forEach(sel => sel.addEventListener('change', updateAllocationFromCategories));
+    document.querySelectorAll('.cat-enabled').forEach(chk => chk.addEventListener('change', updateAllocationFromCategories));
+    document.querySelectorAll('.cat-pct').forEach(inp => inp.addEventListener('input', updateAllocationFromCategories));
 }
-function computeScenarios(budget, spentSoFar, daysElapsed, totalDays) {
-    let remainingDays = Math.max(1, totalDays - daysElapsed);
-    let avgDailySpent = spentSoFar / Math.max(1, daysElapsed);
-    let realisticRemaining = avgDailySpent * remainingDays;
-    let optimisticRemaining = (avgDailySpent * 0.8) * remainingDays;
-    let pessimisticRemaining = (avgDailySpent * 1.2) * remainingDays;
-    let remainingBudget = budget - spentSoFar;
-    return { optimistic: Math.max(0, remainingBudget - optimisticRemaining), realistic: Math.max(0, remainingBudget - realisticRemaining), pessimistic: Math.max(0, remainingBudget - pessimisticRemaining) };
+
+function updateAllocationFromCategories() {
+    let selected = [];
+    for (let i = 0; i < categoryConfig.length; i++) {
+        let enabled = document.querySelector(`.cat-enabled[data-idx="${i}"]`)?.checked;
+        let type = document.querySelector(`.need-want[data-idx="${i}"]`)?.value;
+        let pct = parseFloat(document.querySelector(`.cat-pct[data-idx="${i}"]`)?.value || 0);
+        if (enabled && pct > 0) {
+            selected.push({ name: categoryConfig[i].name, type, pct });
+        }
+    }
+    let totalNeedPct = selected.filter(c => c.type === 'need').reduce((s,c)=>s+c.pct,0);
+    let totalWantPct = selected.filter(c => c.type === 'want').reduce((s,c)=>s+c.pct,0);
+    let autoRemaining = document.getElementById('autoRemainingToWants').checked;
+    if (autoRemaining && (totalNeedPct + totalWantPct) < 100) {
+        totalWantPct = 100 - totalNeedPct;
+    }
+    totalNeedPct = Math.min(100, totalNeedPct);
+    totalWantPct = Math.min(100 - totalNeedPct, totalWantPct);
+    let monthlyBudget = parseFloat(document.getElementById('monthlyBudgetCap').value) || 10000;
+    let needAmount = monthlyBudget * totalNeedPct / 100;
+    let wantAmount = monthlyBudget * totalWantPct / 100;
+    let savings = monthlyBudget - needAmount - wantAmount;
+    document.getElementById('allocationDisplay').innerHTML = `Needs (${totalNeedPct}%): ${fmt(needAmount)} 🔒 &nbsp;|&nbsp; Wants (${totalWantPct}%): ${fmt(wantAmount)} ⚡ &nbsp;|&nbsp; Savings (${(savings/monthlyBudget*100).toFixed(0)}%): ${fmt(savings)} 🏦`;
+    // store for later use
+    window.currentAllocation = { needAmount, wantAmount, savings, totalNeedPct, totalWantPct };
 }
-async function updateMLDiagram() {
-    if(!currentUser) return;
-    let txns = allTransactions;
-    let incomeTotal = txns.filter(t=>t.tx_type==='income').reduce((s,t)=>s+t.amount,0);
-    let monthlyBudget = parseFloat(document.getElementById('monthlyBudgetCap').value) || incomeTotal || 10000;
-    let status = document.getElementById('socialStatusDiagram').value;
-    let mindset = document.getElementById('mindsetDiagram').value;
-    let cycle = document.getElementById('budgetCycle').value;
-    let alloc = getAllocation(monthlyBudget, status, mindset);
-    document.getElementById('allocationDisplay').innerHTML = `Needs (${alloc.needsPct}%): ${fmt(alloc.needsAmt)} 🔒 &nbsp;|&nbsp; Wants (${alloc.wantsPct}%): ${fmt(alloc.wantsAmt)} ⚡ &nbsp;|&nbsp; Savings (${alloc.savingsPct}%): ${fmt(alloc.savingsAmt)} 🏦`;
-    let expenses = txns.filter(t=>t.tx_type==='expense').sort((a,b)=>new Date(b.tx_date)-new Date(a.tx_date));
+
+// ---------- Future Expenses (local array, can be extended to backend) ----------
+let futureExpenses = [];
+function renderFutureExpenses() {
+    let container = document.getElementById('futureExpensesList');
+    if (!container) return;
+    if (futureExpenses.length === 0) {
+        container.innerHTML = '<div class="future-expense-item">No pinned future expenses.</div>';
+        return;
+    }
+    let html = '';
+    futureExpenses.forEach((exp, idx) => {
+        html += `<div class="future-expense-item">
+            <div><strong>${exp.desc}</strong><br>${fmt(exp.amount)} | ${exp.category} | ${exp.cycle} | ${exp.date}</div>
+            <button class="btn" data-future-idx="${idx}" style="background:var(--red-dim);">Delete</button>
+        </div>`;
+    });
+    container.innerHTML = html;
+    document.querySelectorAll('[data-future-idx]').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            let idx = parseInt(btn.dataset.futureIdx);
+            futureExpenses.splice(idx, 1);
+            renderFutureExpenses();
+            toast('Future expense removed');
+        });
+    });
+}
+
+document.getElementById('pinFutureExpenseBtn')?.addEventListener('click', () => {
+    let desc = document.getElementById('futureDesc').value.trim();
+    let amount = parseFloat(document.getElementById('futureAmount').value);
+    let category = document.getElementById('futureCategory').value;
+    let cycle = document.getElementById('futureCycle').value;
+    let date = document.getElementById('futureDate').value;
+    if (!desc || isNaN(amount) || amount <= 0 || !date) {
+        toast('Please fill all fields (description, amount, date)');
+        return;
+    }
+    futureExpenses.push({ desc, amount, category, cycle, date, id: Date.now() });
+    renderFutureExpenses();
+    document.getElementById('futureDesc').value = '';
+    document.getElementById('futureAmount').value = '';
+    document.getElementById('futureDate').value = '';
+    toast('Future expense pinned!');
+});
+
+// ---------- Last Expense (unchanged functionality) ----------
+async function updateLastExpense() {
+    let expenses = allTransactions.filter(t=>t.tx_type==='expense').sort((a,b)=>new Date(b.tx_date)-new Date(a.tx_date));
     if(expenses.length) {
         let last = expenses[0];
         document.getElementById('lastExpenseDesc').innerHTML = `${last.category}: ${fmt(last.amount)} (${last.is_need ? '✅ Need' : '⚪ Want'})<br><small>${new Date(last.tx_date).toLocaleDateString()}</small>`;
         document.getElementById('lastExpenseActions').innerHTML = `<button class="btn" id="toggleNeedBtn" style="background:var(--green-dim);">Mark as ${last.is_need ? 'Want' : 'Need'}</button> <span class="ml-badge">ML suggests: ${last.is_need ? '✅ Keep as Need' : 'Consider moving to Need if essential'}</span>`;
-        document.getElementById('toggleNeedBtn')?.addEventListener('click', async()=>{ await apiFetch(`/api/transactions/${last.id}`, { method:'PATCH', body:JSON.stringify({ is_need: !last.is_need }) }); toast('Updated! Reloading...'); await loadDashboard(); updateMLDiagram(); });
-    } else { document.getElementById('lastExpenseDesc').innerHTML = 'No expenses yet'; document.getElementById('lastExpenseActions').innerHTML = ''; }
+        document.getElementById('toggleNeedBtn')?.addEventListener('click', async()=>{ await apiFetch(`/api/transactions/${last.id}`, { method:'PATCH', body:JSON.stringify({ is_need: !last.is_need }) }); toast('Updated! Reloading...'); await loadDashboard(); updateLastExpense(); });
+    } else {
+        document.getElementById('lastExpenseDesc').innerHTML = 'No expenses yet';
+        document.getElementById('lastExpenseActions').innerHTML = '';
+    }
+}
+
+// ---------- Forecast Scenarios (replaces previous forecastScenarios) ----------
+async function updateForecastScenarios() {
+    if(!currentUser) return;
+    let monthlyBudget = parseFloat(document.getElementById('monthlyBudgetCap').value) || (currentSummary.income || 10000);
+    let expenses = allTransactions.filter(t=>t.tx_type==='expense');
     let now = new Date();
+    let cycle = document.getElementById('budgetCycle').value;
     let startOfCycle, totalDays;
     if(cycle === 'Daily') { startOfCycle = new Date(now.getFullYear(), now.getMonth(), now.getDate()); totalDays = 1; }
     else if(cycle === 'Weekly') { let day = now.getDay(); startOfCycle = new Date(now); startOfCycle.setDate(now.getDate() - day); totalDays = 7; }
     else if(cycle === 'Monthly') { startOfCycle = new Date(now.getFullYear(), now.getMonth(), 1); totalDays = new Date(now.getFullYear(), now.getMonth()+1, 0).getDate(); }
     else { startOfCycle = new Date(now.getFullYear(), 0, 1); totalDays = 366; }
-    let spentThisCycle = txns.filter(t=>t.tx_type==='expense' && new Date(t.tx_date) >= startOfCycle).reduce((s,t)=>s+t.amount,0);
+    let spentThisCycle = expenses.filter(e=> new Date(e.tx_date) >= startOfCycle).reduce((s,e)=>s+e.amount,0);
     let daysElapsed = Math.min(totalDays, Math.floor((now - startOfCycle) / (1000*60*60*24)));
-    let scenarios = computeScenarios(monthlyBudget, spentThisCycle, daysElapsed, totalDays);
-    document.getElementById('forecastOpt').innerHTML = fmt(scenarios.optimistic);
-    document.getElementById('forecastReal').innerHTML = fmt(scenarios.realistic);
-    document.getElementById('forecastPess').innerHTML = fmt(scenarios.pessimistic);
+    let remainingDays = Math.max(1, totalDays - daysElapsed);
+    let avgDailySpent = spentThisCycle / Math.max(1, daysElapsed);
+    let realisticRemaining = avgDailySpent * remainingDays;
+    let optimisticRemaining = (avgDailySpent * 0.8) * remainingDays;
+    let pessimisticRemaining = (avgDailySpent * 1.2) * remainingDays;
+    let remainingBudget = monthlyBudget - spentThisCycle;
+    let opt = Math.max(0, remainingBudget - optimisticRemaining);
+    let real = Math.max(0, remainingBudget - realisticRemaining);
+    let pess = Math.max(0, remainingBudget - pessimisticRemaining);
+    document.getElementById('forecastOpt').innerText = fmt(opt);
+    document.getElementById('forecastReal').innerText = fmt(real);
+    document.getElementById('forecastPess').innerText = fmt(pess);
+    // highlight active scenario based on dropdown
+    let selected = document.getElementById('forecastScenarioSelect').value;
+    document.querySelectorAll('.scenario-card').forEach(card => {
+        let scenario = card.dataset.scenario;
+        if(scenario === selected) card.classList.add('active');
+        else card.classList.remove('active');
+    });
+}
+
+document.getElementById('forecastScenarioSelect')?.addEventListener('change', updateForecastScenarios);
+document.getElementById('linkToAnalyticsBtn')?.addEventListener('click', () => { navigate('analytics'); });
+
+// ---------- Override updateMLDiagram to use our new allocation and forecast ----------
+async function updateMLDiagram() {
+    if(!currentUser) return;
+    let incomeTotal = allTransactions.filter(t=>t.tx_type==='income').reduce((s,t)=>s+t.amount,0);
+    let monthlyBudget = parseFloat(document.getElementById('monthlyBudgetCap').value) || incomeTotal || 10000;
+    // update category allocation display
+    updateAllocationFromCategories();
+    await updateForecastScenarios();
+    // also update user profile for mindset/status
+    let status = document.getElementById('socialStatusDiagram').value;
+    let mindset = document.getElementById('mindsetDiagram').value;
     await apiFetch('/api/user/profile', { method:'POST', body:JSON.stringify({ social_status:status, spending_mindset:mindset }) });
 }
 
-// --- Budget Auto-save Helpers ---
+// ---------- Auto-save budgets (unchanged) ----------
 async function autoSaveBudget(category, limitValue) {
-    if(!currentUser || !limitValue || isNaN(parseFloat(limitValue)) || parseFloat(limitValue) <= 0) return;
-    try {
-        await apiFetch(`/api/budgets/${currentUser.id}`, { method:'POST', body:JSON.stringify({ category, limit: parseFloat(limitValue) }) });
-        toast(`💾 Auto-saved: ${category} limit → ${fmt(parseFloat(limitValue))}`);
-    } catch(e) { console.warn("Auto-save failed", e); }
+    if(!currentUser) return;
+    if(limitValue && !isNaN(parseFloat(limitValue)) && parseFloat(limitValue) > 0) {
+        try {
+            await apiFetch(`/api/budgets/${currentUser.id}`, { method:'POST', body:JSON.stringify({ category, limit: parseFloat(limitValue) }) });
+            toast(`💾 Auto-saved: ${category} limit → ${fmt(parseFloat(limitValue))}`);
+        } catch(e) { console.warn("Auto-save failed", e); }
+    }
 }
-function attachAutoSaveToInputs(containerPrefix, categories) {
-    categories.forEach(cat => {
+function attachAutoSaveToInputs(containerSelector, categoryMap) {
+    categoryMap.forEach(cat => {
         let rawId = cat.replace(/\s/g, '');
-        let inputEl = document.getElementById(`${containerPrefix}_${rawId}`);
+        let inputEl = document.getElementById(`${containerSelector}_${rawId}`);
         if(inputEl && !inputEl.hasAttribute('data-auto-save')) {
             inputEl.setAttribute('data-auto-save', 'true');
             inputEl.addEventListener('change', async function(e) { await autoSaveBudget(cat, this.value); });
-            inputEl.addEventListener('blur', async function(e) { await autoSaveBudget(cat, this.value); });
+            inputEl.addEventListener('blur', async function(e) { let val = this.value; if(val !== this.getAttribute('data-last-val')) { this.setAttribute('data-last-val', val); await autoSaveBudget(cat, val); } });
         }
     });
 }
@@ -320,13 +447,13 @@ async function loadBudgetsStandalone() {
     attachAutoSaveToInputs('budgetStand', categories);
 }
 
-// --- Dashboard & Data loading ---
+// ---------- Dashboard and core loads (mostly unchanged) ----------
 async function loadDashboard() {
     if(!currentUser) return;
     try {
         let summary = await apiFetch(`/api/summary/${currentUser.id}`);
         let pred = await apiFetch(`/api/predict/${currentUser.id}`);
-        allTransactions = await apiFetch(`/api/transactions`);
+        allTransactions = await apiFetch(`/api/transactions?user_id=${currentUser.id}`);
         currentSummary = summary; currentPrediction = pred;
         document.getElementById('sBalance').innerText = fmt(summary.balance);
         document.getElementById('sExpense').innerText = fmt(summary.expense);
@@ -345,37 +472,35 @@ async function loadDashboard() {
         }
         renderTransactions();
         loadAnalytics();
+        updateLastExpense();
         updateMLDiagram();
         await loadBudgetsForAdd();
         await loadBudgetsStandalone();
-    } catch(e) { toast('Error loading data'); console.error(e); }
+    } catch(e) { toast('Error loading data'); }
 }
-function renderTransactions() { document.getElementById('txTableBody').innerHTML = allTransactions.slice(0,100).map(t=>`<tr><td>${new Date(t.tx_date).toLocaleDateString()}</td><td>${t.category}</td><td>${t.is_need ? 'Need' : 'Want'}</td><td>${PRIO_MAP[t.priority]||''}</td><td>${t.note||''}</td><td>${t.tx_type}</td><td>${fmt(t.amount)}</td></tr>`).join(''); }
+function renderTransactions() { document.getElementById('txTableBody').innerHTML = allTransactions.slice(0,50).map(t=>`<tr><td>${new Date(t.tx_date).toLocaleDateString()}</td><td>${t.category}</td><td>${t.is_need ? 'Need' : 'Want'}</td><td>${PRIO_MAP[t.priority]||''}</td><td>${t.note||''}</td><td>${t.tx_type}</td><td>${fmt(t.amount)}</td></tr>`).join(''); }
 async function loadAnalytics() { if(!currentUser) return; try { let longevity = await apiFetch(`/api/longevity/${currentUser.id}`); document.getElementById('longevityContainer').innerHTML = `<div>💰 Balance: ${fmt(longevity.balance)}<br>📉 Avg Daily: ${fmt(longevity.avg_daily_spend)}<br>📅 Days left: ${longevity.days}</div>`; } catch(e) {} if(currentPrediction.has_data) { if(forecastChart) forecastChart.destroy(); forecastChart = new Chart(document.getElementById('forecastChart'), { type:'line', data:{ labels:Object.keys(currentPrediction.predictions.weekly), datasets:[{ label:'ML Forecast', data:Object.values(currentPrediction.predictions.weekly), borderColor:'#00d282' }] } }); if(catBarChart) catBarChart.destroy(); catBarChart = new Chart(document.getElementById('catBarChart'), { type:'bar', data:{ labels:Object.keys(currentPrediction.predictions.categories), datasets:[{ label:'Spent', data:Object.values(currentPrediction.predictions.categories), backgroundColor:'#3b82f6' }] }, options:{ indexAxis:'y' } }); } }
 
-// --- Transactions Handlers ---
-document.getElementById('incomeForm').addEventListener('submit', async(e)=>{ e.preventDefault(); let amt = parseFloat(document.getElementById('incomeAmount').value); if(isNaN(amt)) return; await apiFetch('/api/transactions', { method:'POST', body:JSON.stringify({ amount: amt, category:'Income', tx_type:'income', note: document.getElementById('incomeNote').value }) }); toast('Income recorded'); document.getElementById('incomeForm').reset(); await loadDashboard(); });
-document.getElementById('expenseForm').addEventListener('submit', async(e)=>{ e.preventDefault(); let amount = parseFloat(document.getElementById('expenseAmount').value); let category = document.getElementById('expenseCategory').value; let isNeed = document.getElementById('isNeed').checked; let priority = parseInt(document.getElementById('expensePriority').value); let note = document.getElementById('expenseNote').value; if(document.getElementById('prefAlertWant').checked && !isNeed && category !== 'Income') { if(!confirm('This is a WANT expense. Continue?')) return; } await apiFetch('/api/transactions', { method:'POST', body:JSON.stringify({ amount, category, tx_type:'expense', is_need:isNeed, priority, note }) }); toast('Expense recorded'); document.getElementById('expenseForm').reset(); document.getElementById('isNeed').checked = false; await loadDashboard(); });
-document.getElementById('socialStatusDiagram').addEventListener('change', updateMLDiagram);
-document.getElementById('mindsetDiagram').addEventListener('change', updateMLDiagram);
-document.getElementById('budgetCycle').addEventListener('change', updateMLDiagram);
-document.getElementById('monthlyBudgetCap').addEventListener('input', updateMLDiagram);
+// Navigation, event listeners, auth, chatbot (keep from original)
+function navigate(screenId) { document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active')); document.getElementById(`screen-${screenId}`).classList.add('active'); document.getElementById('pageTitle').innerText = screenId.charAt(0).toUpperCase()+screenId.slice(1); if(screenId === 'analytics') loadAnalytics(); if(screenId === 'add') { updateMLDiagram(); loadBudgetsForAdd(); renderCategoryAllocation(); updateAllocationFromCategories(); renderFutureExpenses(); } if(screenId === 'budgets') loadBudgetsStandalone(); }
 document.querySelectorAll('.nav-item').forEach(btn=>btn.addEventListener('click',()=>{ let scr = btn.dataset.nav; if(scr) navigate(scr); }));
-function navigate(screenId) { document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active')); document.getElementById(`screen-${screenId}`).classList.add('active'); document.getElementById('pageTitle').innerText = screenId.charAt(0).toUpperCase()+screenId.slice(1); if(screenId === 'analytics') loadAnalytics(); if(screenId === 'add') { updateMLDiagram(); loadBudgetsForAdd(); } if(screenId === 'budgets') loadBudgetsStandalone(); }
 document.getElementById('exportBtn').addEventListener('click', ()=> window.location.href='/api/export/csv');
 document.getElementById('signoutBtn').addEventListener('click', async()=>{ await fetch('/api/logout',{method:'POST',credentials:'include'}); location.reload(); });
+document.getElementById('socialStatusDiagram')?.addEventListener('change', updateMLDiagram);
+document.getElementById('mindsetDiagram')?.addEventListener('change', updateMLDiagram);
+document.getElementById('budgetCycle')?.addEventListener('change', updateMLDiagram);
+document.getElementById('monthlyBudgetCap')?.addEventListener('input', updateMLDiagram);
+document.getElementById('autoRemainingToWants')?.addEventListener('change', updateAllocationFromCategories);
 
-// Auth logic
+// Auth and chatbot (unchanged)
 let authBtn = document.getElementById('authBtn'), toggleLink = document.getElementById('toggleAuthLink');
-toggleLink.addEventListener('click', ()=>{ isLogin = !isLogin; document.getElementById('authTitle').innerText = isLogin ? 'Welcome back' : 'Create account'; document.getElementById('regName').style.display = isLogin ? 'none' : 'block'; document.getElementById('authConfirm').style.display = isLogin ? 'none' : 'block'; document.getElementById('termsRow').style.display = isLogin ? 'none' : 'flex'; authBtn.innerText = isLogin ? 'Sign In' : 'Register'; });
-authBtn.addEventListener('click', async()=>{ let email = document.getElementById('authEmail').value, pass = document.getElementById('authPass').value, name = document.getElementById('regName').value; if(!isLogin && (!name || !document.getElementById('termsCheck').checked)) { document.getElementById('authMsg').innerText = 'Accept terms & name required'; return; } let endpoint = isLogin ? '/api/login' : '/api/register'; let body = isLogin ? { email, password:pass } : { name, email, password:pass }; try { let res = await fetch(endpoint, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body), credentials:'include' }); if(res.ok) { location.reload(); } else { let err = await res.json(); document.getElementById('authMsg').innerText = err.error || 'Auth failed'; } } catch(e){ document.getElementById('authMsg').innerText = 'Error connecting'; } });
-// Chatbot
-document.getElementById('sendChatBtn').addEventListener('click', async()=>{ let input = document.getElementById('chatInput'); let msg = input.value.trim(); if(!msg) return; let chatDiv = document.getElementById('chatMessages'); chatDiv.innerHTML += `<div class="message user-message">${escapeHtml(msg)}</div>`; input.value = ''; chatDiv.scrollTop = chatDiv.scrollHeight; try { let res = await fetch('/api/chat', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ message:msg, user_id: currentUser?.id }), credentials:'include' }); let data = await res.json(); let reply = data.reply || "AI: Analyze spending patterns."; chatDiv.innerHTML += `<div class="message bot-message">${escapeHtml(reply)}</div>`; } catch(e) { chatDiv.innerHTML += `<div class="message bot-message">💬 Try keywords like "health", "forecast".</div>`; } chatDiv.scrollTop = chatDiv.scrollHeight; });
+toggleLink?.addEventListener('click', ()=>{ isLogin = !isLogin; document.getElementById('authTitle').innerText = isLogin ? 'Welcome back' : 'Create account'; document.getElementById('regName').style.display = isLogin ? 'none' : 'block'; document.getElementById('authConfirm').style.display = isLogin ? 'none' : 'block'; document.getElementById('termsRow').style.display = isLogin ? 'none' : 'flex'; authBtn.innerText = isLogin ? 'Sign In' : 'Register'; });
+authBtn?.addEventListener('click', async()=>{ let email = document.getElementById('authEmail').value, pass = document.getElementById('authPass').value, name = document.getElementById('regName').value; if(!isLogin && (!name || !document.getElementById('termsCheck').checked)) { document.getElementById('authMsg').innerText = 'Accept terms & name required'; return; } let endpoint = isLogin ? '/api/login' : '/api/register'; let body = isLogin ? { email, password:pass } : { name, email, password:pass }; try { let res = await fetch(endpoint, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body), credentials:'include' }); if(res.ok) { location.reload(); } else { let err = await res.json(); document.getElementById('authMsg').innerText = err.error || 'Auth failed'; } } catch(e){ document.getElementById('authMsg').innerText = 'Error connecting'; } });
+document.getElementById('sendChatBtn')?.addEventListener('click', async()=>{ let input = document.getElementById('chatInput'); let msg = input.value.trim(); if(!msg) return; let chatDiv = document.getElementById('chatMessages'); chatDiv.innerHTML += `<div class="message user-message">${escapeHtml(msg)}</div>`; input.value = ''; chatDiv.scrollTop = chatDiv.scrollHeight; try { let res = await fetch('/api/chat', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ message:msg, user_id: currentUser?.id }), credentials:'include' }); let data = await res.json(); let reply = data.reply || "AI: I'll analyze your spending patterns soon."; chatDiv.innerHTML += `<div class="message bot-message">${escapeHtml(reply)}</div>`; } catch(e) { chatDiv.innerHTML += `<div class="message bot-message">💬 Try again later. Use keywords like "health", "forecast".</div>`; } chatDiv.scrollTop = chatDiv.scrollHeight; });
 function escapeHtml(str) { return str.replace(/[&<>]/g, function(m){ if(m === '&') return '&amp;'; if(m === '<') return '&lt;'; if(m === '>') return '&gt;'; return m;}); }
-document.getElementById('closeChatBtn').addEventListener('click',()=>{ document.getElementById('chatContainer').style.display = 'none'; });
-async function init() { let res = await fetch('/api/me', { credentials:'include' }); if(res.ok) { currentUser = await res.json(); document.getElementById('authOverlay').style.display = 'none'; document.getElementById('userAvatar').innerText = currentUser.name.slice(0,2).toUpperCase(); await loadDashboard(); } else { document.getElementById('authOverlay').style.display = 'flex'; } }
+document.getElementById('closeChatBtn')?.addEventListener('click',()=>{ document.getElementById('chatContainer').style.display = 'none'; });
+async function init() { let res = await fetch('/api/me', { credentials:'include' }); if(res.ok) { currentUser = await res.json(); document.getElementById('authOverlay').style.display = 'none'; document.getElementById('userAvatar').innerText = currentUser.name.slice(0,2).toUpperCase(); renderCategoryAllocation(); await loadDashboard(); } else { document.getElementById('authOverlay').style.display = 'flex'; } }
 init();
 </script>
 </body>
 </html>
-```
