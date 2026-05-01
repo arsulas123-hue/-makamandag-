@@ -125,36 +125,7 @@
     </div>
 
     <!-- ADD TRANSACTION SCREEN (Auto-save budgets, no manual buttons) -->
-    <div class="screen" id="screen-add">
-        <div class="row-2cols">
-            <div class="panel">
-                <div class="panel-header">➕ Record Income</div>
-                <form id="incomeForm" class="flex-form">
-                    <input type="number" id="incomeAmount" placeholder="Amount (₱)" step="0.01" required>
-                    <input type="text" id="incomeNote" placeholder="Note (optional)">
-                    <button type="submit" class="btn-green">Add Income</button>
-                </form>
-                <div style="margin-top: 24px;"><div class="panel-header">📝 Record Expense</div>
-                <form id="expenseForm" class="flex-form">
-                    <input type="number" id="expenseAmount" placeholder="Amount (₱)" step="0.01" required>
-                    <select id="expenseCategory">
-                        <option>Food & Dining</option><option>Transport</option><option>Groceries</option>
-                        <option>Entertainment</option><option>Health</option><option>Other</option>
-                    </select>
-                    <div style="display:flex; gap:10px; align-items:center;">
-                        <label><input type="checkbox" id="isNeed"> ✅ NEED</label>
-                        <label>Priority:
-                            <select id="expensePriority">
-                                <option value="0">Low</option><option value="1" selected>Medium</option>
-                                <option value="2">High</option><option value="3">Critical</option>
-                            </select>
-                        </label>
-                    </div>
-                    <input type="text" id="expenseNote" placeholder="Note">
-                    <button type="submit" class="btn-green">Record Expense</button>
-                </form>
-                </div>
-            </div>
+   
 
             <div class="panel">
                 <div class="panel-header">🧠 ML Controlled Budget Allocation <span class="ml-badge">LIVE</span></div>
