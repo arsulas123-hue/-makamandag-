@@ -815,7 +815,7 @@ with app.app_context():
     ensure_schema()
 
 # ----------------------------------------------------------------------
-# Embedded HTML (full frontend with all features AND transaction form)
+# Embedded HTML (full frontend with draggable, resizable, undeletable chatbot)
 # ----------------------------------------------------------------------
 HTML_PAGE = """
 <!DOCTYPE html>
@@ -876,18 +876,6 @@ HTML_PAGE = """
         .scenario-card.active { border: 2px solid var(--green); background: var(--green-dim); }
         .future-expense-item { background: var(--bg3); border-radius: 12px; padding: 12px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
         .warning { color: var(--red); font-size: 0.8rem; margin-top: 8px; }
-        .chat-container { position: fixed; bottom: 24px; right: 24px; z-index: 10001; cursor: move; }
-        .chat-window { width: 380px; height: 480px; background: var(--bg2); backdrop-filter: blur(10px); border: 1px solid var(--green); border-radius: 24px; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 8px 32px rgba(0,0,0,0.3); }
-        .chat-header { padding: 14px 18px; background: var(--bg3); border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; cursor: move; }
-        .chat-messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
-        .message { max-width: 85%; padding: 10px 14px; border-radius: 18px; font-size: 0.85rem; }
-        .user-message { align-self: flex-end; background: var(--green-dim); color: var(--green); border-bottom-right-radius: 4px; }
-        .bot-message { align-self: flex-start; background: var(--bg3); color: var(--text); border-bottom-left-radius: 4px; }
-        .chat-input { display: flex; padding: 14px; gap: 10px; background: var(--bg3); border-top: 1px solid var(--border); }
-        #toast { position: fixed; bottom: 24px; right: 24px; background: var(--bg2); border: 1px solid var(--green); border-radius: 12px; padding: 12px 24px; opacity: 0; transition: all 0.25s; z-index: 10000; }
-        #toast.show { opacity: 1; }
-        .auth-overlay { position: fixed; inset: 0; background: rgba(8,13,20,0.98); backdrop-filter: blur(20px); z-index: 9999; display: flex; align-items: center; justify-content: center; }
-        .auth-card { background: linear-gradient(145deg, #0d1520, #0a1220); border: 1px solid rgba(0,210,130,0.2); border-radius: 28px; padding: 40px; width: 400px; max-width: 90%; }
         .last-expense-item { background: var(--bg3); border-radius: 10px; padding: 10px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
         .forecast-row { display: flex; align-items: center; gap: 14px; margin-bottom: 14px; }
         .forecast-week { width: 70px; font-weight: 600; color: var(--green); }
@@ -895,6 +883,93 @@ HTML_PAGE = """
         .forecast-bar-fill { height: 100%; background: linear-gradient(90deg, var(--green), var(--green2)); width: 0; border-radius: 99px; transition: width 1s ease; }
         .form-row { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; align-items: center; }
         .form-row > * { flex: 1; min-width: 120px; }
+        
+        /* Chatbot styles (draggable, resizable, no close button) */
+        .chat-container {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            width: 380px;
+            height: 480px;
+            min-width: 280px;
+            min-height: 320px;
+            max-width: 80vw;
+            max-height: 80vh;
+            resize: both;
+            overflow: auto;
+            z-index: 10001;
+            cursor: default;
+        }
+        .chat-window {
+            width: 100%;
+            height: 100%;
+            background: var(--bg2);
+            backdrop-filter: blur(10px);
+            border: 1px solid var(--green);
+            border-radius: 24px;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+        }
+        .chat-header {
+            padding: 14px 18px;
+            background: var(--bg3);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            cursor: move;
+            user-select: none;
+        }
+        .chat-header span {
+            font-weight: 600;
+        }
+        .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .message {
+            max-width: 85%;
+            padding: 10px 14px;
+            border-radius: 18px;
+            font-size: 0.85rem;
+        }
+        .user-message {
+            align-self: flex-end;
+            background: var(--green-dim);
+            color: var(--green);
+            border-bottom-right-radius: 4px;
+        }
+        .bot-message {
+            align-self: flex-start;
+            background: var(--bg3);
+            color: var(--text);
+            border-bottom-left-radius: 4px;
+        }
+        .chat-input {
+            display: flex;
+            padding: 14px;
+            gap: 10px;
+            background: var(--bg3);
+            border-top: 1px solid var(--border);
+        }
+        #chatInput {
+            flex: 1;
+        }
+        #sendChatBtn {
+            background: var(--green-dim);
+            border: none;
+            color: var(--green);
+        }
+        #toast { position: fixed; bottom: 24px; right: 24px; background: var(--bg2); border: 1px solid var(--green); border-radius: 12px; padding: 12px 24px; opacity: 0; transition: all 0.25s; z-index: 10000; }
+        #toast.show { opacity: 1; }
+        .auth-overlay { position: fixed; inset: 0; background: rgba(8,13,20,0.98); backdrop-filter: blur(20px); z-index: 9999; display: flex; align-items: center; justify-content: center; }
+        .auth-card { background: linear-gradient(145deg, #0d1520, #0a1220); border: 1px solid rgba(0,210,130,0.2); border-radius: 28px; padding: 40px; width: 400px; max-width: 90%; }
     </style>
 </head>
 <body>
@@ -1040,8 +1115,22 @@ HTML_PAGE = """
     <!-- AUTH OVERLAY -->
     <div id="authOverlay" class="auth-overlay"><div class="auth-card"><h2 id="authTitle">Welcome back</h2><input type="text" id="regName" placeholder="Full Name" style="display:none"><input type="email" id="authEmail" placeholder="Email"><input type="password" id="authPass" placeholder="Password"><input type="password" id="authConfirm" placeholder="Confirm Password" style="display:none"><div id="termsRow" style="display:none;"><label><input type="checkbox" id="termsCheck"> Accept Terms</label></div><div id="authMsg" style="color:#ff4d6d;"></div><button id="authBtn">Sign In</button><div id="toggleAuthLink">Don't have an account? Register</div></div></div>
 
-    <!-- CHATBOT -->
-    <div id="chatContainer" class="chat-container"><div class="chat-window"><div class="chat-header" id="chatHeader">🤖 SmartSpend AI <span class="ml-badge">Gemini</span><button id="closeChatBtn">✕</button></div><div class="chat-messages" id="chatMessages"><div class="message bot-message">💬 I'm SmartSpend AI. Ask me about your spending, savings, future expenses, or how to improve your finances.</div></div><div class="chat-input"><input id="chatInput" placeholder="Ask..."><button id="sendChatBtn">Send</button></div></div></div>
+    <!-- CHATBOT (draggable, resizable, no close button) -->
+    <div id="chatContainer" class="chat-container">
+        <div class="chat-window">
+            <div class="chat-header" id="chatHeader">
+                <span>🤖 SmartSpend AI <span class="ml-badge">Gemini</span></span>
+                <!-- No close button - undeletable -->
+            </div>
+            <div class="chat-messages" id="chatMessages">
+                <div class="message bot-message">💬 I'm SmartSpend AI. Ask me about your spending, savings, future expenses, or how to improve your finances.</div>
+            </div>
+            <div class="chat-input">
+                <input id="chatInput" placeholder="Ask...">
+                <button id="sendChatBtn">Send</button>
+            </div>
+        </div>
+    </div>
 </main>
 
 <script>
@@ -1338,12 +1427,44 @@ document.getElementById('submitTransactionBtn')?.addEventListener('click', async
     } catch(e) { toast("Error adding transaction"); }
 });
 
+// Draggable chatbot (simple)
+const chatContainer = document.getElementById('chatContainer');
+const chatHeader = document.getElementById('chatHeader');
+let isDragging = false;
+let dragOffsetX = 0, dragOffsetY = 0;
+
+chatHeader.addEventListener('mousedown', (e) => {
+    isDragging = true;
+    dragOffsetX = e.clientX - chatContainer.offsetLeft;
+    dragOffsetY = e.clientY - chatContainer.offsetTop;
+    chatContainer.style.transition = 'none';
+});
+window.addEventListener('mousemove', (e) => {
+    if (isDragging) {
+        let newLeft = e.clientX - dragOffsetX;
+        let newTop = e.clientY - dragOffsetY;
+        // Constrain within viewport
+        newLeft = Math.min(Math.max(newLeft, 0), window.innerWidth - chatContainer.offsetWidth);
+        newTop = Math.min(Math.max(newTop, 0), window.innerHeight - chatContainer.offsetHeight);
+        chatContainer.style.left = newLeft + 'px';
+        chatContainer.style.top = newTop + 'px';
+        chatContainer.style.right = 'auto';
+        chatContainer.style.bottom = 'auto';
+    }
+});
+window.addEventListener('mouseup', () => {
+    isDragging = false;
+    chatContainer.style.transition = '';
+});
+
+// Resize is handled by CSS resize on .chat-container, but we need to ensure the content respects new size.
+// Already works because .chat-container has resize: both and overflow: auto.
+
 let authBtn = document.getElementById('authBtn'), toggleLink = document.getElementById('toggleAuthLink');
 toggleLink?.addEventListener('click', ()=>{ isLogin = !isLogin; document.getElementById('authTitle').innerText = isLogin ? 'Welcome back' : 'Create account'; document.getElementById('regName').style.display = isLogin ? 'none' : 'block'; document.getElementById('authConfirm').style.display = isLogin ? 'none' : 'block'; document.getElementById('termsRow').style.display = isLogin ? 'none' : 'flex'; authBtn.innerText = isLogin ? 'Sign In' : 'Register'; });
 authBtn?.addEventListener('click', async()=>{ let email = document.getElementById('authEmail').value, pass = document.getElementById('authPass').value, name = document.getElementById('regName').value; if(!isLogin && (!name || !document.getElementById('termsCheck').checked)) { document.getElementById('authMsg').innerText = 'Accept terms & name required'; return; } let endpoint = isLogin ? '/api/login' : '/api/register'; let body = isLogin ? { email, password:pass } : { name, email, password:pass }; try { let res = await fetch(endpoint, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body), credentials:'include' }); if(res.ok) { location.reload(); } else { let err = await res.json(); document.getElementById('authMsg').innerText = err.error || 'Auth failed'; } } catch(e){ document.getElementById('authMsg').innerText = 'Error connecting'; } });
 document.getElementById('sendChatBtn')?.addEventListener('click', async()=>{ let input = document.getElementById('chatInput'); let msg = input.value.trim(); if(!msg) return; let chatDiv = document.getElementById('chatMessages'); chatDiv.innerHTML += `<div class="message user-message">${escapeHtml(msg)}</div>`; input.value = ''; chatDiv.scrollTop = chatDiv.scrollHeight; try { let res = await fetch('/api/chat', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ message:msg }), credentials:'include' }); let data = await res.json(); let reply = data.reply || "AI: I'll analyze."; chatDiv.innerHTML += `<div class="message bot-message">${escapeHtml(reply)}</div>`; } catch(e) { chatDiv.innerHTML += `<div class="message bot-message">💬 Error, try again later.</div>`; } chatDiv.scrollTop = chatDiv.scrollHeight; });
 function escapeHtml(str) { return str.replace(/[&<>]/g, function(m){ if(m === '&') return '&amp;'; if(m === '<') return '&lt;'; if(m === '>') return '&gt;'; return m;}); }
-document.getElementById('closeChatBtn')?.addEventListener('click',()=>{ document.getElementById('chatContainer').style.display = 'none'; });
 async function init() { let res = await fetch('/api/me', { credentials:'include' }); if(res.ok) { currentUser = await res.json(); document.getElementById('authOverlay').style.display = 'none'; document.getElementById('userAvatar').innerText = currentUser.name.slice(0,2).toUpperCase(); renderCategoryAllocation(); await loadDashboard(); loadFutureExpenses(); } else { document.getElementById('authOverlay').style.display = 'flex'; } }
 init();
 </script>
