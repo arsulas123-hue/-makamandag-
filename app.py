@@ -146,7 +146,7 @@ def get_current_user():
     return User.query.get(user_id) if user_id else None
 
 # ----------------------------------------------------------------------
-# AI-powered allocation endpoint (NEW)
+# AI-powered allocation endpoint
 # ----------------------------------------------------------------------
 @app.route('/api/ai_allocate', methods=['POST'])
 @login_required
@@ -154,18 +154,16 @@ def ai_allocate():
     """Gemini AI computes optimal budget allocation percentages for the 7 categories."""
     user = get_current_user()
     data = request.json
-    selected_categories = data.get('categories', [])  # list of category names the user checked
+    selected_categories = data.get('categories', [])
     monthly_budget = data.get('monthly_budget', user.monthly_budget_limit or 10000)
     social_status = user.social_status
     spending_mindset = user.spending_mindset
 
-    # Fetch user's recent spending to guide AI
     recent_spending = defaultdict(float)
     transactions = Transaction.query.filter_by(user_id=user.id, tx_type='expense').order_by(Transaction.tx_date.desc()).limit(20).all()
     for t in transactions:
         recent_spending[t.category] += t.amount
 
-    # Build prompt for Gemini
     prompt = f"""
 You are a financial AI that allocates a monthly budget of ₱{monthly_budget} across these categories: {selected_categories}.
 
@@ -183,28 +181,23 @@ Rules:
 Example output:
 {{"Food & dining": 35.0, "Debt repayment": 25.0, "Mortgage": 20.0, "Transport": 10.0, "Entertainment": 5.0, "Subscription": 3.0, "Hobbies": 2.0}}
 """
-
     try:
         model = genai.GenerativeModel('gemini-1.5-flash')
         response = model.generate_content(prompt)
-        # Parse the JSON response
         allocation = json.loads(response.text.strip())
-        # Ensure total is 100 and round to 1 decimal
         total = sum(allocation.values())
         if abs(total - 100) > 0.1:
-            # If not exactly 100, normalize
             factor = 100 / total
             allocation = {k: round(v * factor, 1) for k, v in allocation.items()}
         return jsonify({'allocation': allocation}), 200
     except Exception as e:
         print(f"Gemini allocation error: {e}")
-        # Fallback to a simple equal split among selected categories
         fallback_pct = 100 / len(selected_categories) if selected_categories else 0
         fallback = {cat: round(fallback_pct, 1) for cat in selected_categories}
         return jsonify({'allocation': fallback, 'fallback': True}), 200
 
 # ----------------------------------------------------------------------
-# ML / Prediction helpers (unchanged)
+# ML / Prediction helpers
 # ----------------------------------------------------------------------
 def compute_health_score(user_id):
     user = User.query.get(user_id)
@@ -369,7 +362,7 @@ def compute_longevity(user_id):
     }
 
 # ----------------------------------------------------------------------
-# Routes (existing + new AI allocation)
+# Routes
 # ----------------------------------------------------------------------
 @app.route('/')
 def index():
@@ -570,65 +563,45 @@ def export_csv():
 @app.route('/api/chat', methods=['POST'])
 @login_required
 def chat():
+    """Fully AI-powered chatbot using Gemini – no hardcoded responses."""
     user = get_current_user()
     data = request.json
-    message = data.get('message', '').lower()
-    user_id = user.id
+    user_message = data.get('message', '')
 
-    # Keyword commands
-    if 'health' in message or 'score' in message:
-        score = compute_health_score(user_id)
-        return jsonify({'reply': f"Your financial health score is {score}/100."})
-    if 'forecast' in message:
-        forecast = generate_weekly_forecast(user_id)
-        reply = "📈 Spending forecast for next 4 weeks:\n" + "\n".join([f"{k}: ₱{v:,.2f}" for k, v in forecast.items()])
-        return jsonify({'reply': reply})
-    if 'investment' in message:
-        return jsonify({'reply': "Consider putting 20% of monthly surplus into low-cost index funds."})
-    if 'needs vs wants' in message:
-        expenses = Transaction.query.filter_by(user_id=user_id, tx_type='expense').all()
-        wants = sum(e.amount for e in expenses if not e.is_need)
-        needs = sum(e.amount for e in expenses if e.is_need)
-        total = wants + needs
-        if total > 0:
-            reply = f"Needs: ₱{needs:,.2f} ({needs/total*100:.0f}%), Wants: ₱{wants:,.2f} ({wants/total*100:.0f}%)."
-        else:
-            reply = "No expense data yet."
-        return jsonify({'reply': reply})
+    # Fetch real-time context for the AI
+    summary = get_monthly_summary(user.id)
+    recent_transactions = Transaction.query.filter_by(user_id=user.id).order_by(Transaction.tx_date.desc()).limit(10).all()
+    recent_list = [f"{t.category}: ₱{t.amount:.2f} on {t.tx_date.strftime('%Y-%m-%d')}" for t in recent_transactions]
+    health = compute_health_score(user.id)
+    advice = generate_advice(user.id)
 
-    # Fallback to Gemini AI
+    prompt = f"""
+You are SmartSpend AI, a friendly and professional personal finance assistant for the user {user.name}.
+
+Current user financial snapshot:
+- Balance: ₱{summary['balance']:,.2f}
+- This month's income: ₱{summary['income']:,.2f}
+- This month's expenses: ₱{summary['expense']:,.2f}
+- Financial health score: {health}/100
+- Recent AI advice: {advice}
+
+Recent transactions (last 10):
+{chr(10).join(recent_list) if recent_list else 'No transactions yet.'}
+
+The user asks: "{user_message}"
+
+Provide an answer that is helpful, actionable, and concise (max 200 words). Be friendly and practical. Never mention that you are an AI unless asked.
+"""
+
     try:
-        user_data = {
-            "balance": get_monthly_summary(user.id)["balance"],
-            "recent_transactions": [
-                t.to_dict() for t in Transaction.query
-                .filter_by(user_id=user.id)
-                .order_by(Transaction.tx_date.desc())
-                .limit(10)
-                .all()
-            ],
-            "health_score": compute_health_score(user.id),
-            "advice": generate_advice(user.id)
-        }
-        prompt = f"""
-        You are SmartSpend AI, a personal finance assistant for the user: {user.name}.
-        Their financial data is:
-        - Current Balance: ₱{user_data['balance']:,.2f}
-        - Financial Health Score: {user_data['health_score']}/100
-        - Recent spending: {user_data['recent_transactions']}
-        - Recent AI advice: {user_data['advice']}
-
-        The user asks: "{message}"
-        Provide a helpful, actionable, and friendly answer (max 150 words).
-        """
         model = genai.GenerativeModel('gemini-1.5-flash')
         response = model.generate_content(prompt)
-        ai_reply = response.text
+        reply = response.text.strip()
     except Exception as e:
         print(f"Gemini chat error: {e}")
-        ai_reply = "Sorry, I'm having trouble connecting to my AI brain. Please try again later."
+        reply = "Sorry, I'm having trouble connecting to my AI brain right now. Please try again in a moment."
 
-    return jsonify({'reply': ai_reply}), 200
+    return jsonify({'reply': reply}), 200
 
 @app.route('/api/future_expenses', methods=['GET'])
 @login_required
@@ -732,7 +705,7 @@ with app.app_context():
     ensure_schema()
 
 # ----------------------------------------------------------------------
-# Embedded HTML (updated with AI autonomous allocation)
+# Embedded HTML (complete frontend)
 # ----------------------------------------------------------------------
 HTML_PAGE = """
 <!DOCTYPE html>
@@ -867,7 +840,7 @@ HTML_PAGE = """
         <div class="panel"><div class="panel-header">AI Advice</div><div id="adviceList"></div></div>
     </div>
 
-    <!-- ADD TRANSACTION SCREEN - UPDATED WITH AI AUTONOMOUS ALLOCATION -->
+    <!-- ADD TRANSACTION SCREEN -->
     <div class="screen" id="screen-add">
         <div class="panel">
             <div class="panel-header">🧠 AI Autonomous Budget Allocation <span class="ml-badge">GEMINI AI</span></div>
@@ -949,7 +922,7 @@ HTML_PAGE = """
         </div>
     </div>
 
-    <!-- ANALYTICS, BUDGETS, TRANSACTIONS (unchanged) -->
+    <!-- ANALYTICS, BUDGETS, TRANSACTIONS -->
     <div class="screen" id="screen-analytics">
         <div class="panel"><div class="panel-header">⏳ Budget Longevity</div><div id="longevityContainer">Loading...</div></div>
         <div class="panel"><div class="panel-header">Weekly Forecast</div><canvas id="forecastChart" height="200"></canvas></div>
@@ -976,7 +949,7 @@ HTML_PAGE = """
     <div id="authOverlay" class="auth-overlay"><div class="auth-card"><h2 id="authTitle">Welcome back</h2><input type="text" id="regName" class="auth-input" placeholder="Full Name" style="display:none"><input type="email" id="authEmail" class="auth-input" placeholder="Email"><input type="password" id="authPass" class="auth-input" placeholder="Password"><input type="password" id="authConfirm" class="auth-input" placeholder="Confirm Password" style="display:none"><div id="termsRow" style="display:none;"><label><input type="checkbox" id="termsCheck"> Accept Terms</label></div><div id="authMsg" style="color:#ff4d6d;"></div><button id="authBtn" class="auth-btn">Sign In</button><div id="toggleAuthLink" class="auth-link" style="cursor:pointer; margin-top:12px;">Don't have an account? Register</div></div></div>
 
     <!-- CHATBOT -->
-    <div id="chatContainer" class="chat-container"><div class="chat-window"><div class="chat-header" id="chatHeader">🤖 SmartSpend AI <span class="ml-badge">ML</span><button id="closeChatBtn">✕</button></div><div class="chat-messages" id="chatMessages"><div class="message bot-message">✨ Ask: 'health score', 'forecast', 'investment', 'needs vs wants', 'priority'.</div></div><div class="chat-input"><input id="chatInput" placeholder="Ask..."><button id="sendChatBtn">Send</button></div></div></div>
+    <div id="chatContainer" class="chat-container"><div class="chat-window"><div class="chat-header" id="chatHeader">🤖 SmartSpend AI <span class="ml-badge">Gemini</span><button id="closeChatBtn">✕</button></div><div class="chat-messages" id="chatMessages"><div class="message bot-message">💬 I'm SmartSpend AI. Ask me anything about your finances – spending, saving, investments, or just general advice.</div></div><div class="chat-input"><input id="chatInput" placeholder="Ask..."><button id="sendChatBtn">Send</button></div></div></div>
 </main>
 
 <script>
@@ -1056,7 +1029,6 @@ function validateAllocation() {
     if (Math.abs(total - 100) > 0.01) {
         warning.style.display = 'block';
         warning.innerText = `⚠️ Total allocation is ${total}% – must be exactly 100%. Please adjust or use AI Auto-Allocate.`;
-        // Disable saving if needed? We just warn.
     } else {
         warning.style.display = 'none';
     }
@@ -1065,7 +1037,6 @@ function validateAllocation() {
 // AI Auto-Allocate function
 async function aiAutoAllocate() {
     if (!currentUser) return;
-    // Gather which categories are checked
     let selectedCategories = [];
     for (let i = 0; i < categoryConfig.length; i++) {
         let enabled = document.querySelector(`.cat-enabled[data-idx="${i}"]`)?.checked;
@@ -1088,15 +1059,11 @@ async function aiAutoAllocate() {
             })
         });
         let allocation = response.allocation;
-        // Update the UI: for each category, set percentage if present
         for (let i = 0; i < categoryConfig.length; i++) {
             let catName = categoryConfig[i].name;
             if (allocation[catName] !== undefined) {
                 let pctInput = document.querySelector(`.cat-pct[data-idx="${i}"]`);
-                if (pctInput) {
-                    pctInput.value = allocation[catName].toFixed(1);
-                }
-                // Ensure the checkbox is checked
+                if (pctInput) pctInput.value = allocation[catName].toFixed(1);
                 let chk = document.querySelector(`.cat-enabled[data-idx="${i}"]`);
                 if (chk && !chk.checked) chk.checked = true;
             }
@@ -1107,7 +1074,6 @@ async function aiAutoAllocate() {
     } catch (err) {
         console.error(err);
         toast("AI allocation failed. Using fallback equal split.");
-        // Fallback: equal split among selected
         let eq = 100 / selectedCategories.length;
         for (let i = 0; i < categoryConfig.length; i++) {
             if (selectedCategories.includes(categoryConfig[i].name)) {
@@ -1122,22 +1088,187 @@ async function aiAutoAllocate() {
     }
 }
 
-// Future Expenses (unchanged)
+// Future Expenses
 let futureExpenses = [];
-function renderFutureExpenses() { /* same as before */ }
-document.getElementById('pinFutureExpenseBtn')?.addEventListener('click', () => { /* same */ });
-async function updateLastExpense() { /* same */ }
-async function updateForecastScenarios() { /* same */ }
+function renderFutureExpenses() {
+    let container = document.getElementById('futureExpensesList');
+    if (!container) return;
+    if (futureExpenses.length === 0) {
+        container.innerHTML = '<div class="future-expense-item">No pinned future expenses.</div>';
+        return;
+    }
+    let html = '';
+    futureExpenses.forEach((exp, idx) => {
+        html += `<div class="future-expense-item">
+            <div><strong>${exp.desc}</strong><br>${fmt(exp.amount)} | ${exp.category} | ${exp.cycle} | ${exp.date}</div>
+            <button class="btn" data-future-idx="${idx}" style="background:var(--red-dim);">Delete</button>
+        </div>`;
+    });
+    container.innerHTML = html;
+    document.querySelectorAll('[data-future-idx]').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            let idx = parseInt(btn.dataset.futureIdx);
+            futureExpenses.splice(idx, 1);
+            renderFutureExpenses();
+            toast('Future expense removed');
+        });
+    });
+}
+
+document.getElementById('pinFutureExpenseBtn')?.addEventListener('click', () => {
+    let desc = document.getElementById('futureDesc').value.trim();
+    let amount = parseFloat(document.getElementById('futureAmount').value);
+    let category = document.getElementById('futureCategory').value;
+    let cycle = document.getElementById('futureCycle').value;
+    let date = document.getElementById('futureDate').value;
+    if (!desc || isNaN(amount) || amount <= 0 || !date) {
+        toast('Please fill all fields (description, amount, date)');
+        return;
+    }
+    futureExpenses.push({ desc, amount, category, cycle, date, id: Date.now() });
+    renderFutureExpenses();
+    document.getElementById('futureDesc').value = '';
+    document.getElementById('futureAmount').value = '';
+    document.getElementById('futureDate').value = '';
+    toast('Future expense pinned!');
+});
+
+// Last Expense
+async function updateLastExpense() {
+    let expenses = allTransactions.filter(t=>t.tx_type==='expense').sort((a,b)=>new Date(b.tx_date)-new Date(a.tx_date));
+    if(expenses.length) {
+        let last = expenses[0];
+        document.getElementById('lastExpenseDesc').innerHTML = `${last.category}: ${fmt(last.amount)} (${last.is_need ? '✅ Need' : '⚪ Want'})<br><small>${new Date(last.tx_date).toLocaleDateString()}</small>`;
+        document.getElementById('lastExpenseActions').innerHTML = `<button class="btn" id="toggleNeedBtn" style="background:var(--green-dim);">Mark as ${last.is_need ? 'Want' : 'Need'}</button> <span class="ml-badge">ML suggests: ${last.is_need ? '✅ Keep as Need' : 'Consider moving to Need if essential'}</span>`;
+        document.getElementById('toggleNeedBtn')?.addEventListener('click', async()=>{ await apiFetch(`/api/transactions/${last.id}`, { method:'PATCH', body:JSON.stringify({ is_need: !last.is_need }) }); toast('Updated! Reloading...'); await loadDashboard(); updateLastExpense(); });
+    } else {
+        document.getElementById('lastExpenseDesc').innerHTML = 'No expenses yet';
+        document.getElementById('lastExpenseActions').innerHTML = '';
+    }
+}
+
+// Forecast Scenarios
+async function updateForecastScenarios() {
+    if(!currentUser) return;
+    let monthlyBudget = parseFloat(document.getElementById('monthlyBudgetCap').value) || (currentSummary.income || 10000);
+    let expenses = allTransactions.filter(t=>t.tx_type==='expense');
+    let now = new Date();
+    let cycle = document.getElementById('budgetCycle').value;
+    let startOfCycle, totalDays;
+    if(cycle === 'Daily') { startOfCycle = new Date(now.getFullYear(), now.getMonth(), now.getDate()); totalDays = 1; }
+    else if(cycle === 'Weekly') { let day = now.getDay(); startOfCycle = new Date(now); startOfCycle.setDate(now.getDate() - day); totalDays = 7; }
+    else if(cycle === 'Monthly') { startOfCycle = new Date(now.getFullYear(), now.getMonth(), 1); totalDays = new Date(now.getFullYear(), now.getMonth()+1, 0).getDate(); }
+    else { startOfCycle = new Date(now.getFullYear(), 0, 1); totalDays = 366; }
+    let spentThisCycle = expenses.filter(e=> new Date(e.tx_date) >= startOfCycle).reduce((s,e)=>s+e.amount,0);
+    let daysElapsed = Math.min(totalDays, Math.floor((now - startOfCycle) / (1000*60*60*24)));
+    let remainingDays = Math.max(1, totalDays - daysElapsed);
+    let avgDailySpent = spentThisCycle / Math.max(1, daysElapsed);
+    let realisticRemaining = avgDailySpent * remainingDays;
+    let optimisticRemaining = (avgDailySpent * 0.8) * remainingDays;
+    let pessimisticRemaining = (avgDailySpent * 1.2) * remainingDays;
+    let remainingBudget = monthlyBudget - spentThisCycle;
+    let opt = Math.max(0, remainingBudget - optimisticRemaining);
+    let real = Math.max(0, remainingBudget - realisticRemaining);
+    let pess = Math.max(0, remainingBudget - pessimisticRemaining);
+    document.getElementById('forecastOpt').innerText = fmt(opt);
+    document.getElementById('forecastReal').innerText = fmt(real);
+    document.getElementById('forecastPess').innerText = fmt(pess);
+    let selected = document.getElementById('forecastScenarioSelect').value;
+    document.querySelectorAll('.scenario-card').forEach(card => {
+        let scenario = card.dataset.scenario;
+        if(scenario === selected) card.classList.add('active');
+        else card.classList.remove('active');
+    });
+}
+
 document.getElementById('forecastScenarioSelect')?.addEventListener('change', updateForecastScenarios);
 document.getElementById('linkToAnalyticsBtn')?.addEventListener('click', () => { navigate('analytics'); });
-async function updateMLDiagram() { /* same */ }
-async function autoSaveBudget(category, limitValue) { /* same */ }
-function attachAutoSaveToInputs(containerSelector, categoryMap) { /* same */ }
-async function loadBudgetsForAdd() { /* same */ }
-async function loadBudgetsStandalone() { /* same */ }
-async function loadDashboard() { /* same */ }
-function renderTransactions() { /* same */ }
-async function loadAnalytics() { /* same */ }
+
+async function updateMLDiagram() {
+    if(!currentUser) return;
+    let incomeTotal = allTransactions.filter(t=>t.tx_type==='income').reduce((s,t)=>s+t.amount,0);
+    let monthlyBudget = parseFloat(document.getElementById('monthlyBudgetCap').value) || incomeTotal || 10000;
+    updateAllocationFromCategories();
+    await updateForecastScenarios();
+    let status = document.getElementById('socialStatusDiagram').value;
+    let mindset = document.getElementById('mindsetDiagram').value;
+    await apiFetch('/api/user/profile', { method:'POST', body:JSON.stringify({ social_status:status, spending_mindset:mindset }) });
+}
+
+async function autoSaveBudget(category, limitValue) {
+    if(!currentUser) return;
+    if(limitValue && !isNaN(parseFloat(limitValue)) && parseFloat(limitValue) > 0) {
+        try {
+            await apiFetch(`/api/budgets/${currentUser.id}`, { method:'POST', body:JSON.stringify({ category, limit: parseFloat(limitValue) }) });
+            toast(`💾 Auto-saved: ${category} limit → ${fmt(parseFloat(limitValue))}`);
+        } catch(e) { console.warn("Auto-save failed", e); }
+    }
+}
+function attachAutoSaveToInputs(containerSelector, categoryMap) {
+    categoryMap.forEach(cat => {
+        let rawId = cat.replace(/\\s/g, '');
+        let inputEl = document.getElementById(`${containerSelector}_${rawId}`);
+        if(inputEl && !inputEl.hasAttribute('data-auto-save')) {
+            inputEl.setAttribute('data-auto-save', 'true');
+            inputEl.addEventListener('change', async function(e) { await autoSaveBudget(cat, this.value); });
+            inputEl.addEventListener('blur', async function(e) { let val = this.value; if(val !== this.getAttribute('data-last-val')) { this.setAttribute('data-last-val', val); await autoSaveBudget(cat, val); } });
+        }
+    });
+}
+async function loadBudgetsForAdd() {
+    if(!currentUser) return;
+    let budgets = await apiFetch(`/api/budgets/${currentUser.id}`);
+    let limits = Object.fromEntries(budgets.map(b=>[b.category, b.limit]));
+    let categories = ['Food & Dining','Transport','Groceries','Entertainment','Health','Other'];
+    let html = categories.map(cat=>`<div><label>${cat}</label><input type="number" id="budgetAdd_${cat.replace(/\\s/g,'')}" value="${limits[cat]||''}" placeholder="₱ limit (auto-save)"></div>`).join('');
+    document.getElementById('budgetInputsAdd').innerHTML = html;
+    attachAutoSaveToInputs('budgetAdd', categories);
+}
+async function loadBudgetsStandalone() {
+    if(!currentUser) return;
+    let budgets = await apiFetch(`/api/budgets/${currentUser.id}`);
+    let limits = Object.fromEntries(budgets.map(b=>[b.category, b.limit]));
+    let categories = ['Food & Dining','Transport','Groceries','Entertainment','Health','Other'];
+    let html = categories.map(cat=>`<div><label>${cat}</label><input type="number" id="budgetStand_${cat.replace(/\\s/g,'')}" value="${limits[cat]||''}" placeholder="Auto-save limit"></div>`).join('');
+    document.getElementById('budgetInputsStandalone').innerHTML = html;
+    attachAutoSaveToInputs('budgetStand', categories);
+}
+
+async function loadDashboard() {
+    if(!currentUser) return;
+    try {
+        let summary = await apiFetch(`/api/summary/${currentUser.id}`);
+        let pred = await apiFetch(`/api/predict/${currentUser.id}`);
+        allTransactions = await apiFetch(`/api/transactions`);
+        currentSummary = summary; currentPrediction = pred;
+        document.getElementById('sBalance').innerText = fmt(summary.balance);
+        document.getElementById('sExpense').innerText = fmt(summary.expense);
+        document.getElementById('sIncome').innerText = fmt(summary.income);
+        let score = pred.has_data ? pred.score : null;
+        document.getElementById('sScore').innerText = score ? score+'/100' : '—';
+        document.getElementById('topScore').innerText = score || '—';
+        if(pred.has_data) {
+            let weeks = pred.predictions.weekly;
+            let maxVal = Math.max(...Object.values(weeks),1);
+            document.getElementById('forecastBars').innerHTML = Object.entries(weeks).map(([w,v])=>`<div class="forecast-row"><span class="forecast-week">${w}</span><div class="forecast-bar-track"><div class="forecast-bar-fill" style="width:${(v/maxVal*100)}%"></div></div><span>${fmt(v)}</span></div>`).join('');
+            document.getElementById('adviceList').innerHTML = pred.advice.map(a=>`<div class="advice-item"><strong>${a.cat}:</strong> ${a.msg}</div>`).join('');
+            if(monthlyChart) monthlyChart.destroy();
+            let months = Object.keys(summary.monthly).slice(-6);
+            monthlyChart = new Chart(document.getElementById('monthlyChart'), { type:'bar', data:{ labels:months, datasets:[{ label:'Income', data:months.map(m=>summary.monthly[m]?.income||0), backgroundColor:'rgba(0,210,130,0.6)' },{ label:'Expense', data:months.map(m=>summary.monthly[m]?.expense||0), backgroundColor:'rgba(255,77,109,0.6)' }] } });
+        }
+        renderTransactions();
+        loadAnalytics();
+        updateLastExpense();
+        updateMLDiagram();
+        await loadBudgetsForAdd();
+        await loadBudgetsStandalone();
+    } catch(e) { toast('Error loading data'); }
+}
+function renderTransactions() {
+    document.getElementById('txTableBody').innerHTML = allTransactions.slice(0,50).map(t=>`<tr><td>${new Date(t.tx_date).toLocaleDateString()}</td><td>${t.category}</td><td>${t.is_need ? 'Need' : 'Want'}</td><td>${PRIO_MAP[t.priority] || ''}</td><td>${t.note||''}</td><td>${t.tx_type}</td><td>${fmt(t.amount)}</td>`).join('');
+}
+async function loadAnalytics() { if(!currentUser) return; try { let longevity = await apiFetch(`/api/longevity/${currentUser.id}`); document.getElementById('longevityContainer').innerHTML = `<div>💰 Balance: ${fmt(longevity.balance)}<br>📉 Avg Daily: ${fmt(longevity.avg_daily_spend)}<br>📅 Days left: ${longevity.days}</div>`; } catch(e) {} if(currentPrediction.has_data) { if(forecastChart) forecastChart.destroy(); forecastChart = new Chart(document.getElementById('forecastChart'), { type:'line', data:{ labels:Object.keys(currentPrediction.predictions.weekly), datasets:[{ label:'ML Forecast', data:Object.values(currentPrediction.predictions.weekly), borderColor:'#00d282' }] } }); if(catBarChart) catBarChart.destroy(); catBarChart = new Chart(document.getElementById('catBarChart'), { type:'bar', data:{ labels:Object.keys(currentPrediction.predictions.categories), datasets:[{ label:'Spent', data:Object.values(currentPrediction.predictions.categories), backgroundColor:'#3b82f6' }] }, options:{ indexAxis:'y' } }); } }
+
 function navigate(screenId) {
     document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
     document.getElementById(`screen-${screenId}`).classList.add('active');
@@ -1167,7 +1298,7 @@ document.getElementById('aiAutoAllocateBtn')?.addEventListener('click', aiAutoAl
 let authBtn = document.getElementById('authBtn'), toggleLink = document.getElementById('toggleAuthLink');
 toggleLink?.addEventListener('click', ()=>{ isLogin = !isLogin; document.getElementById('authTitle').innerText = isLogin ? 'Welcome back' : 'Create account'; document.getElementById('regName').style.display = isLogin ? 'none' : 'block'; document.getElementById('authConfirm').style.display = isLogin ? 'none' : 'block'; document.getElementById('termsRow').style.display = isLogin ? 'none' : 'flex'; authBtn.innerText = isLogin ? 'Sign In' : 'Register'; });
 authBtn?.addEventListener('click', async()=>{ let email = document.getElementById('authEmail').value, pass = document.getElementById('authPass').value, name = document.getElementById('regName').value; if(!isLogin && (!name || !document.getElementById('termsCheck').checked)) { document.getElementById('authMsg').innerText = 'Accept terms & name required'; return; } let endpoint = isLogin ? '/api/login' : '/api/register'; let body = isLogin ? { email, password:pass } : { name, email, password:pass }; try { let res = await fetch(endpoint, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body), credentials:'include' }); if(res.ok) { location.reload(); } else { let err = await res.json(); document.getElementById('authMsg').innerText = err.error || 'Auth failed'; } } catch(e){ document.getElementById('authMsg').innerText = 'Error connecting'; } });
-document.getElementById('sendChatBtn')?.addEventListener('click', async()=>{ let input = document.getElementById('chatInput'); let msg = input.value.trim(); if(!msg) return; let chatDiv = document.getElementById('chatMessages'); chatDiv.innerHTML += `<div class="message user-message">${escapeHtml(msg)}</div>`; input.value = ''; chatDiv.scrollTop = chatDiv.scrollHeight; try { let res = await fetch('/api/chat', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ message:msg, user_id: currentUser?.id }), credentials:'include' }); let data = await res.json(); let reply = data.reply || "AI: I'll analyze your spending patterns soon."; chatDiv.innerHTML += `<div class="message bot-message">${escapeHtml(reply)}</div>`; } catch(e) { chatDiv.innerHTML += `<div class="message bot-message">💬 Try again later. Use keywords like "health", "forecast".</div>`; } chatDiv.scrollTop = chatDiv.scrollHeight; });
+document.getElementById('sendChatBtn')?.addEventListener('click', async()=>{ let input = document.getElementById('chatInput'); let msg = input.value.trim(); if(!msg) return; let chatDiv = document.getElementById('chatMessages'); chatDiv.innerHTML += `<div class="message user-message">${escapeHtml(msg)}</div>`; input.value = ''; chatDiv.scrollTop = chatDiv.scrollHeight; try { let res = await fetch('/api/chat', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ message:msg }), credentials:'include' }); let data = await res.json(); let reply = data.reply || "AI: I'll analyze your spending patterns soon."; chatDiv.innerHTML += `<div class="message bot-message">${escapeHtml(reply)}</div>`; } catch(e) { console.error(e); chatDiv.innerHTML += `<div class="message bot-message">💬 Sorry, something went wrong. Please try again later.</div>`; } chatDiv.scrollTop = chatDiv.scrollHeight; });
 function escapeHtml(str) { return str.replace(/[&<>]/g, function(m){ if(m === '&') return '&amp;'; if(m === '<') return '&lt;'; if(m === '>') return '&gt;'; return m;}); }
 document.getElementById('closeChatBtn')?.addEventListener('click',()=>{ document.getElementById('chatContainer').style.display = 'none'; });
 async function init() { let res = await fetch('/api/me', { credentials:'include' }); if(res.ok) { currentUser = await res.json(); document.getElementById('authOverlay').style.display = 'none'; document.getElementById('userAvatar').innerText = currentUser.name.slice(0,2).toUpperCase(); renderCategoryAllocation(); await loadDashboard(); } else { document.getElementById('authOverlay').style.display = 'flex'; } }
