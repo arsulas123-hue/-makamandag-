@@ -815,7 +815,7 @@ with app.app_context():
     ensure_schema()
 
 # ----------------------------------------------------------------------
-# Embedded HTML (full frontend with all features)
+# Embedded HTML (full frontend with all features AND transaction form)
 # ----------------------------------------------------------------------
 HTML_PAGE = """
 <!DOCTYPE html>
@@ -893,6 +893,8 @@ HTML_PAGE = """
         .forecast-week { width: 70px; font-weight: 600; color: var(--green); }
         .forecast-bar-track { flex: 1; height: 8px; background: var(--bg3); border-radius: 99px; overflow: hidden; }
         .forecast-bar-fill { height: 100%; background: linear-gradient(90deg, var(--green), var(--green2)); width: 0; border-radius: 99px; transition: width 1s ease; }
+        .form-row { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; align-items: center; }
+        .form-row > * { flex: 1; min-width: 120px; }
     </style>
 </head>
 <body>
@@ -929,8 +931,36 @@ HTML_PAGE = """
         <div class="panel"><div class="panel-header">AI Advice</div><div id="adviceList"></div></div>
     </div>
 
-    <!-- ADD TRANSACTION SCREEN -->
+    <!-- ADD TRANSACTION SCREEN (with transaction form + all AI features) -->
     <div class="screen" id="screen-add">
+        <!-- Transaction entry form -->
+        <div class="panel">
+            <div class="panel-header">📝 Add New Transaction</div>
+            <div class="form-row">
+                <input type="number" id="txAmount" placeholder="Amount (₱)" step="0.01">
+                <select id="txCategory">
+                    <option>Food & Dining</option><option>Transport</option><option>Groceries</option><option>Entertainment</option>
+                    <option>Health</option><option>Debt repayment</option><option>Mortgage</option><option>Subscription</option>
+                    <option>Hobbies</option><option>Salary</option><option>Other</option>
+                </select>
+                <select id="txType">
+                    <option value="expense">Expense</option>
+                    <option value="income">Income</option>
+                </select>
+                <select id="txNeedWant">
+                    <option value="need">Need</option>
+                    <option value="want">Want</option>
+                </select>
+                <select id="txPriority">
+                    <option value="0">Low</option><option value="1" selected>Medium</option>
+                    <option value="2">High</option><option value="3">Critical</option>
+                </select>
+                <input type="text" id="txNote" placeholder="Note (optional)">
+                <button id="submitTransactionBtn" class="btn btn-green">➕ Add Transaction</button>
+            </div>
+        </div>
+
+        <!-- AI Autonomous Budget Allocation (same as before) -->
         <div class="panel">
             <div class="panel-header">🧠 AI Autonomous Budget Allocation <span class="ml-badge">GEMINI AI</span></div>
             <div style="display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 16px;">
@@ -949,6 +979,7 @@ HTML_PAGE = """
             <div id="allocationWarning" class="warning" style="display: none;">⚠️ Total allocation must be 100%</div>
         </div>
 
+        <!-- PIN FUTURE EXPENSE -->
         <div class="panel">
             <div class="panel-header">📌 PIN FUTURE EXPENSE</div>
             <div style="display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 16px;">
@@ -963,11 +994,13 @@ HTML_PAGE = """
             <div id="futureExpensesList"></div>
         </div>
 
+        <!-- LAST 3 EXPENSES -->
         <div class="panel">
             <div class="panel-header">📝 LAST 3 EXPENSES (History)</div>
             <div id="lastExpenseList"></div>
         </div>
 
+        <!-- ML FORECAST -->
         <div class="panel">
             <div class="panel-header">📈 ML FORECAST</div>
             <select id="forecastScenarioSelect"><option value="optimistic">Optimistic</option><option value="realistic" selected>Realistic</option><option value="pessimistic">Pessimistic</option></select>
@@ -987,23 +1020,27 @@ HTML_PAGE = """
         </div>
     </div>
 
-    <!-- ANALYTICS SCREEN (fully restored) -->
+    <!-- ANALYTICS SCREEN -->
     <div class="screen" id="screen-analytics">
         <div class="panel"><div class="panel-header">⏳ Budget Longevity</div><div id="longevityContainer">Loading...</div></div>
         <div class="panel"><div class="panel-header">Weekly Forecast</div><canvas id="forecastChart" height="200"></canvas></div>
         <div class="panel"><div class="panel-header">Category Breakdown</div><canvas id="catBarChart" height="200"></canvas></div>
     </div>
 
+    <!-- BUDGETS SCREEN -->
     <div class="screen" id="screen-budgets">
         <div class="panel"><div class="panel-header">Set Monthly Budget Limits <span class="auto-badge">auto-save</span></div><div id="budgetInputsStandalone" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:16px;"></div></div>
     </div>
 
+    <!-- TRANSACTIONS SCREEN -->
     <div class="screen" id="screen-transactions">
         <div class="table-wrap"><table><thead><th>Date</th><th>Category</th><th>Need?</th><th>Priority</th><th>Note</th><th>Type</th><th>Amount</th></thead><tbody id="txTableBody"></tbody></table></div>
     </div>
 
+    <!-- AUTH OVERLAY -->
     <div id="authOverlay" class="auth-overlay"><div class="auth-card"><h2 id="authTitle">Welcome back</h2><input type="text" id="regName" placeholder="Full Name" style="display:none"><input type="email" id="authEmail" placeholder="Email"><input type="password" id="authPass" placeholder="Password"><input type="password" id="authConfirm" placeholder="Confirm Password" style="display:none"><div id="termsRow" style="display:none;"><label><input type="checkbox" id="termsCheck"> Accept Terms</label></div><div id="authMsg" style="color:#ff4d6d;"></div><button id="authBtn">Sign In</button><div id="toggleAuthLink">Don't have an account? Register</div></div></div>
 
+    <!-- CHATBOT -->
     <div id="chatContainer" class="chat-container"><div class="chat-window"><div class="chat-header" id="chatHeader">🤖 SmartSpend AI <span class="ml-badge">Gemini</span><button id="closeChatBtn">✕</button></div><div class="chat-messages" id="chatMessages"><div class="message bot-message">💬 I'm SmartSpend AI. Ask me about your spending, savings, future expenses, or how to improve your finances.</div></div><div class="chat-input"><input id="chatInput" placeholder="Ask..."><button id="sendChatBtn">Send</button></div></div></div>
 </main>
 
@@ -1279,6 +1316,27 @@ document.getElementById('budgetCycle')?.addEventListener('change', updateMLDiagr
 document.getElementById('monthlyBudgetCap')?.addEventListener('input', updateMLDiagram);
 document.getElementById('autoRemainingToWants')?.addEventListener('change', updateAllocationFromCategories);
 document.getElementById('aiAutoAllocateBtn')?.addEventListener('click', aiAutoAllocate);
+
+// Handle new transaction submission
+document.getElementById('submitTransactionBtn')?.addEventListener('click', async () => {
+    let amount = parseFloat(document.getElementById('txAmount').value);
+    let category = document.getElementById('txCategory').value;
+    let tx_type = document.getElementById('txType').value;
+    let is_need = document.getElementById('txNeedWant').value === 'need';
+    let priority = parseInt(document.getElementById('txPriority').value);
+    let note = document.getElementById('txNote').value;
+    if (isNaN(amount) || amount <= 0) { toast("Please enter a valid amount"); return; }
+    try {
+        await apiFetch('/api/transactions', {
+            method: 'POST',
+            body: JSON.stringify({ amount, category, tx_type, is_need, priority, note })
+        });
+        toast("Transaction added! Refreshing dashboard...");
+        await loadDashboard();      // refresh all data
+        loadFutureExpenses();       // refresh future expenses
+        navigate('dashboard');      // switch to dashboard to see updated stats
+    } catch(e) { toast("Error adding transaction"); }
+});
 
 let authBtn = document.getElementById('authBtn'), toggleLink = document.getElementById('toggleAuthLink');
 toggleLink?.addEventListener('click', ()=>{ isLogin = !isLogin; document.getElementById('authTitle').innerText = isLogin ? 'Welcome back' : 'Create account'; document.getElementById('regName').style.display = isLogin ? 'none' : 'block'; document.getElementById('authConfirm').style.display = isLogin ? 'none' : 'block'; document.getElementById('termsRow').style.display = isLogin ? 'none' : 'flex'; authBtn.innerText = isLogin ? 'Sign In' : 'Register'; });
