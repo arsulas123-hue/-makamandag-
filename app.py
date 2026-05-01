@@ -20,8 +20,9 @@ app.config['SECRET_KEY'] = 'your-secret-key-change-in-production'
 app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://makamandag_db_user:zcDibuXdlpEpcZNGEYLc9nqpgWwuTTfO@dpg-d7od7md7vvec739acfj0-a/makamandag_db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-# Configure Gemini AI
-genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
+# Configure Gemini AI with your provided API key
+GEMINI_API_KEY = "AIzaSyDADCUZKxOPf6NKQ7uhCcTZWqnd50HoPVY"
+genai.configure(api_key=GEMINI_API_KEY)
 
 db = SQLAlchemy(app)
 bcrypt = Bcrypt(app)
