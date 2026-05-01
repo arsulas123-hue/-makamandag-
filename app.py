@@ -22,7 +22,7 @@ db = SQLAlchemy(app)
 bcrypt = Bcrypt(app)
 
 # ----------------------------------------------------------------------
-# Database models (unchanged)
+# Database models
 # ----------------------------------------------------------------------
 class User(db.Model):
     __tablename__ = 'users'
@@ -43,8 +43,13 @@ class User(db.Model):
     def set_password(self, password):
         self.password_hash = bcrypt.generate_password_hash(password).decode('utf-8')
 
+    # FIXED: Handle invalid salt (e.g., empty string from old migration)
     def check_password(self, password):
-        return bcrypt.check_password_hash(self.password_hash, password)
+        try:
+            return bcrypt.check_password_hash(self.password_hash, password)
+        except ValueError:
+            # Stored hash is malformed (likely empty string or corrupted)
+            return False
 
     def to_dict(self):
         return {
@@ -603,7 +608,7 @@ def ensure_schema():
     if inspector.has_table('users'):
         existing_columns = [col['name'] for col in inspector.get_columns('users')]
         
-        # Remove old 'password' column if it exists (causes NOT NULL violation)
+        # Remove old 'password' column if it exists
         if 'password' in existing_columns:
             with db.engine.connect() as conn:
                 conn.execute(text('ALTER TABLE users DROP COLUMN password'))
@@ -640,7 +645,7 @@ with app.app_context():
     ensure_schema()
 
 # ----------------------------------------------------------------------
-# Embedded HTML (fixed: assigned to HTML_PAGE)
+# Embedded HTML (full frontend - same as before)
 # ----------------------------------------------------------------------
 HTML_PAGE = """
 <!DOCTYPE html>
@@ -884,13 +889,11 @@ HTML_PAGE = """
 <script>
 let currentUser = null, allTransactions = [], currentSummary = { balance:0, expense:0, income:0 }, currentPrediction = { has_data:false, score:null, predictions:{ weekly:{}, categories:{} }, advice:[] };
 let monthlyChart, forecastChart, catBarChart, isLogin = true;
-// FIXED: Use integer keys in priority map
 const PRIO_MAP = {0:'Low',1:'Medium',2:'High',3:'Critical'};
 function fmt(amt) { return '₱' + Number(amt).toLocaleString('en-PH', { minimumFractionDigits:2 }); }
 function toast(msg) { let t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2500); }
 async function apiFetch(url, opts={}) { let res = await fetch(url, {...opts, credentials:'include', headers:{'Content-Type':'application/json'}}); if(!res.ok) throw new Error((await res.json()).error); return res.json(); }
 
-// Category Allocation
 let categoryConfig = [
     { name: "Food & dining", defaultPct: 50, type: "need" },
     { name: "Debt repayment", defaultPct: 20, type: "need" },
@@ -946,7 +949,6 @@ function updateAllocationFromCategories() {
     window.currentAllocation = { needAmount, wantAmount, savings, totalNeedPct, totalWantPct };
 }
 
-// Future Expenses
 let futureExpenses = [];
 function renderFutureExpenses() {
     let container = document.getElementById('futureExpensesList');
@@ -991,7 +993,6 @@ document.getElementById('pinFutureExpenseBtn')?.addEventListener('click', () => 
     toast('Future expense pinned!');
 });
 
-// Last Expense
 async function updateLastExpense() {
     let expenses = allTransactions.filter(t=>t.tx_type==='expense').sort((a,b)=>new Date(b.tx_date)-new Date(a.tx_date));
     if(expenses.length) {
@@ -1005,7 +1006,6 @@ async function updateLastExpense() {
     }
 }
 
-// Forecast Scenarios
 async function updateForecastScenarios() {
     if(!currentUser) return;
     let monthlyBudget = parseFloat(document.getElementById('monthlyBudgetCap').value) || (currentSummary.income || 10000);
@@ -1053,7 +1053,6 @@ async function updateMLDiagram() {
     await apiFetch('/api/user/profile', { method:'POST', body:JSON.stringify({ social_status:status, spending_mindset:mindset }) });
 }
 
-// Auto-save budgets
 async function autoSaveBudget(category, limitValue) {
     if(!currentUser) return;
     if(limitValue && !isNaN(parseFloat(limitValue)) && parseFloat(limitValue) > 0) {
@@ -1093,7 +1092,6 @@ async function loadBudgetsStandalone() {
     attachAutoSaveToInputs('budgetStand', categories);
 }
 
-// Dashboard and core loads
 async function loadDashboard() {
     if(!currentUser) return;
     try {
@@ -1139,7 +1137,6 @@ document.getElementById('budgetCycle')?.addEventListener('change', updateMLDiagr
 document.getElementById('monthlyBudgetCap')?.addEventListener('input', updateMLDiagram);
 document.getElementById('autoRemainingToWants')?.addEventListener('change', updateAllocationFromCategories);
 
-// Auth and chatbot
 let authBtn = document.getElementById('authBtn'), toggleLink = document.getElementById('toggleAuthLink');
 toggleLink?.addEventListener('click', ()=>{ isLogin = !isLogin; document.getElementById('authTitle').innerText = isLogin ? 'Welcome back' : 'Create account'; document.getElementById('regName').style.display = isLogin ? 'none' : 'block'; document.getElementById('authConfirm').style.display = isLogin ? 'none' : 'block'; document.getElementById('termsRow').style.display = isLogin ? 'none' : 'flex'; authBtn.innerText = isLogin ? 'Sign In' : 'Register'; });
 authBtn?.addEventListener('click', async()=>{ let email = document.getElementById('authEmail').value, pass = document.getElementById('authPass').value, name = document.getElementById('regName').value; if(!isLogin && (!name || !document.getElementById('termsCheck').checked)) { document.getElementById('authMsg').innerText = 'Accept terms & name required'; return; } let endpoint = isLogin ? '/api/login' : '/api/register'; let body = isLogin ? { email, password:pass } : { name, email, password:pass }; try { let res = await fetch(endpoint, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body), credentials:'include' }); if(res.ok) { location.reload(); } else { let err = await res.json(); document.getElementById('authMsg').innerText = err.error || 'Auth failed'; } } catch(e){ document.getElementById('authMsg').innerText = 'Error connecting'; } });
