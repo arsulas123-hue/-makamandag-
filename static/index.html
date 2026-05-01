@@ -1,4 +1,5 @@
-
+Here is the aligned HTML and Flask backend code. The HTML has been restructured to include all necessary forms for income/expense transactions, budget management, and analytics, ensuring complete compatibility with the provided `app.py` routes and logic.
+```html
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -88,6 +89,8 @@
         .chat-input { display: flex; padding: 14px; gap: 10px; background: var(--bg3); border-top: 1px solid var(--border); }
         .budget-limit-panel { margin-top: 24px; border-top: 1px solid var(--border); padding-top: 20px; }
         .auto-badge { font-size: 0.6rem; background: var(--green-dim); border-radius: 12px; padding: 2px 6px; margin-left: 8px; color: var(--green);}
+        .form-group { margin-bottom: 16px; display: flex; flex-direction: column; gap: 6px; }
+        .form-row { display: flex; gap: 16px; flex-wrap: wrap; }
     </style>
 </head>
 <body>
@@ -124,64 +127,87 @@
         <div class="panel"><div class="panel-header">AI Advice</div><div id="adviceList"></div></div>
     </div>
 
-    <!-- ADD TRANSACTION SCREEN (Auto-save budgets, no manual buttons) -->
-   
-
+    <!-- ADD TRANSACTION SCREEN with Income/Expense forms + ML Allocation -->
+    <div class="screen" id="screen-add">
+        <div class="row-2cols">
+            <!-- Income Form -->
             <div class="panel">
-                <div class="panel-header">🧠 ML Controlled Budget Allocation <span class="ml-badge">LIVE</span></div>
-                <div style="display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 16px;">
-                    <div style="flex:1;"><label>Monthly Budget (₱)</label><input type="number" id="monthlyBudgetCap" placeholder="Auto from income" step="500"></div>
-                    <div style="flex:1;"><label>Social Status</label><select id="socialStatusDiagram"><option>Low</option><option selected>Middle</option><option>Upper</option></select></div>
-                    <div style="flex:1;"><label>Mindset</label><select id="mindsetDiagram"><option>Saver</option><option selected>Neutral</option><option>Spender</option></select></div>
-                    <div style="flex:1;"><label>Cycle</label><select id="budgetCycle"><option>Daily</option><option>Weekly</option><option selected>Monthly</option><option>Yearly</option></select></div>
-                </div>
-                <div class="allocation-box" id="allocationDisplay">
-                    Needs: -- / Wants: -- / Savings: --
-                </div>
-                <div style="margin: 16px 0; padding: 12px; background: var(--bg3); border-radius: 12px;" id="lastExpenseBox">
-                    <strong>📝 LAST EXPENSE</strong><br>
-                    <span id="lastExpenseDesc">No expenses yet</span>
-                    <div id="lastExpenseActions" style="margin-top: 8px;"></div>
-                </div>
-                <div>
-                    <div class="panel-title">📈 FORECAST (next 7 days)</div>
-                    <div class="forecast-scenarios" id="forecastScenarios">
-                        <div class="scenario-card"><strong>🟢 Optimistic</strong><br><span id="forecastOpt">--</span></div>
-                        <div class="scenario-card"><strong>🔵 Realistic</strong><br><span id="forecastReal">--</span></div>
-                        <div class="scenario-card"><strong>🔴 Pessimistic</strong><br><span id="forecastPess">--</span></div>
+                <div class="panel-title">💸 Add Income</div>
+                <form id="incomeForm" class="flex-form">
+                    <div class="form-group"><label>Amount (₱)</label><input type="number" id="incomeAmount" step="0.01" required placeholder="e.g., 5000"></div>
+                    <div class="form-group"><label>Note (optional)</label><input type="text" id="incomeNote" placeholder="Salary, Freelance..."></div>
+                    <button type="submit" class="btn btn-green">+ Record Income</button>
+                </form>
+            </div>
+            <!-- Expense Form -->
+            <div class="panel">
+                <div class="panel-title">🛒 Add Expense</div>
+                <form id="expenseForm" class="flex-form">
+                    <div class="form-group"><label>Amount (₱)</label><input type="number" id="expenseAmount" step="0.01" required></div>
+                    <div class="form-group"><label>Category</label><select id="expenseCategory"><option>Food & Dining</option><option>Transport</option><option>Groceries</option><option>Entertainment</option><option>Health</option><option>Other</option></select></div>
+                    <div class="form-row">
+                        <label style="display:flex; align-items:center; gap:8px;"><input type="checkbox" id="isNeed"> Essential (Need)</label>
+                        <div class="form-group" style="flex:1"><label>Priority (0=Low → 3=Critical)</label><select id="expensePriority"><option value="0">0 - Low</option><option value="1" selected>1 - Medium</option><option value="2">2 - High</option><option value="3">3 - Critical</option></select></div>
                     </div>
-                </div>
-                <div style="margin-top: 16px;">
-                    <div class="panel-title">⚙️ ML Preferences</div>
-                    <label class="pref-checkbox"><input type="checkbox" id="prefAutoReallocate"> Allow ML to auto‑reallocate wants to needs</label>
-                    <label class="pref-checkbox"><input type="checkbox" id="prefAlertWant"> Alert me before any want expense</label>
-                    <label class="pref-checkbox"><input type="checkbox" id="prefDailyForecast" checked> Show daily forecast summary</label>
-                </div>
+                    <div class="form-group"><label>Note</label><input type="text" id="expenseNote" placeholder="e.g., Groceries"></div>
+                    <button type="submit" class="btn btn-green">➕ Record Expense</button>
+                </form>
             </div>
         </div>
 
-        <!-- BUDGET LIMITS PANEL: NO MANUAL SAVE BUTTON, AUTO-SAVE ON CHANGE -->
+        <div class="panel">
+            <div class="panel-header">🧠 ML Controlled Budget Allocation <span class="ml-badge">LIVE</span></div>
+            <div style="display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 16px;">
+                <div style="flex:1;"><label>Monthly Budget Cap (₱)</label><input type="number" id="monthlyBudgetCap" placeholder="Auto from income" step="500"></div>
+                <div style="flex:1;"><label>Social Status</label><select id="socialStatusDiagram"><option>Low</option><option selected>Middle</option><option>Upper</option></select></div>
+                <div style="flex:1;"><label>Mindset</label><select id="mindsetDiagram"><option>Saver</option><option selected>Neutral</option><option>Spender</option></select></div>
+                <div style="flex:1;"><label>Cycle</label><select id="budgetCycle"><option>Daily</option><option>Weekly</option><option selected>Monthly</option><option>Yearly</option></select></div>
+            </div>
+            <div class="allocation-box" id="allocationDisplay">Needs: -- / Wants: -- / Savings: --</div>
+            <div style="margin: 16px 0; padding: 12px; background: var(--bg3); border-radius: 12px;" id="lastExpenseBox">
+                <strong>📝 LAST EXPENSE</strong><br>
+                <span id="lastExpenseDesc">No expenses yet</span>
+                <div id="lastExpenseActions" style="margin-top: 8px;"></div>
+            </div>
+            <div>
+                <div class="panel-title">📈 FORECAST (next 7 days)</div>
+                <div class="forecast-scenarios" id="forecastScenarios">
+                    <div class="scenario-card"><strong>🟢 Optimistic</strong><br><span id="forecastOpt">--</span></div>
+                    <div class="scenario-card"><strong>🔵 Realistic</strong><br><span id="forecastReal">--</span></div>
+                    <div class="scenario-card"><strong>🔴 Pessimistic</strong><br><span id="forecastPess">--</span></div>
+                </div>
+            </div>
+            <div style="margin-top: 16px;">
+                <div class="panel-title">⚙️ ML Preferences</div>
+                <label class="pref-checkbox"><input type="checkbox" id="prefAutoReallocate"> Allow ML to auto‑reallocate wants to needs</label>
+                <label class="pref-checkbox"><input type="checkbox" id="prefAlertWant"> Alert me before any want expense</label>
+                <label class="pref-checkbox"><input type="checkbox" id="prefDailyForecast" checked> Show daily forecast summary</label>
+            </div>
+        </div>
+
+        <!-- Quick Budget Limits (Auto-save) inside Add screen -->
         <div class="panel budget-limit-panel">
-            <div class="panel-header">💰 Budget Limits (by category) <span class="auto-badge">⚡ auto-saves on change</span></div>
+            <div class="panel-header">💰 Budget Limits by Category <span class="auto-badge">⚡ auto-saves on change</span></div>
             <div id="budgetInputsAdd" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px;"></div>
         </div>
     </div>
 
-    <!-- ANALYTICS, BUDGETS (auto-save, no manual button), TRANSACTIONS -->
+    <!-- ANALYTICS -->
     <div class="screen" id="screen-analytics">
         <div class="panel"><div class="panel-header">⏳ Budget Longevity</div><div id="longevityContainer">Loading...</div></div>
-        <div class="panel"><div class="panel-header">Weekly Forecast</div><canvas id="forecastChart" height="200"></canvas></div>
-        <div class="panel"><div class="panel-header">Category Breakdown</div><canvas id="catBarChart" height="200"></canvas></div>
+        <div class="panel"><div class="panel-header">Weekly Forecast (ML)</div><canvas id="forecastChart" height="200"></canvas></div>
+        <div class="panel"><div class="panel-header">Category Breakdown (Current Month)</div><canvas id="catBarChart" height="200"></canvas></div>
     </div>
+    <!-- BUDGETS (standalone auto-save) -->
     <div class="screen" id="screen-budgets">
         <div class="panel">
             <div class="panel-header">Set Monthly Budget Limits <span class="auto-badge">✏️ auto-save on edit</span></div>
             <div id="budgetInputsStandalone" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:16px;"></div>
-            <!-- MANUAL SAVE BUTTON REMOVED: fully automatic now -->
         </div>
     </div>
+    <!-- TRANSACTIONS HISTORY -->
     <div class="screen" id="screen-transactions">
-        <div class="table-wrap"><table><thead><tr><th>Date</th><th>Category</th><th>Need?</th><th>Priority</th><th>Note</th><th>Type</th><th>Amount</th></tr></thead><tbody id="txTableBody"></tbody></div>
+        <div class="table-wrap"></table><thead><tr><th>Date</th><th>Category</th><th>Need?</th><th>Priority</th><th>Note</th><th>Type</th><th>Amount</th></tr></thead><tbody id="txTableBody"></tbody></table></div>
     </div>
 
     <!-- AUTH OVERLAY -->
@@ -199,7 +225,7 @@ function fmt(amt) { return '₱' + Number(amt).toLocaleString('en-PH', { minimum
 function toast(msg) { let t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2500); }
 async function apiFetch(url, opts={}) { let res = await fetch(url, {...opts, credentials:'include', headers:{'Content-Type':'application/json'}}); if(!res.ok) throw new Error((await res.json()).error); return res.json(); }
 
-// --- Core allocation and ML diagram (unchanged) ---
+// --- ML Allocation and diagram ---
 function getAllocation(budget, status, mindset) {
     let needsPct, wantsPct, savingsPct;
     if(status === 'Low') { needsPct=70; wantsPct=20; savingsPct=10; }
@@ -256,35 +282,22 @@ async function updateMLDiagram() {
     await apiFetch('/api/user/profile', { method:'POST', body:JSON.stringify({ social_status:status, spending_mindset:mindset }) });
 }
 
-// --- BUDGET AUTO-SAVE: core function and listeners ---
+// --- Budget Auto-save Helpers ---
 async function autoSaveBudget(category, limitValue) {
-    if(!currentUser) return;
-    if(limitValue && !isNaN(parseFloat(limitValue)) && parseFloat(limitValue) > 0) {
-        try {
-            await apiFetch(`/api/budgets/${currentUser.id}`, { method:'POST', body:JSON.stringify({ category, limit: parseFloat(limitValue) }) });
-            toast(`💾 Auto-saved: ${category} limit → ${fmt(parseFloat(limitValue))}`);
-        } catch(e) { console.warn("Auto-save failed", e); }
-    }
+    if(!currentUser || !limitValue || isNaN(parseFloat(limitValue)) || parseFloat(limitValue) <= 0) return;
+    try {
+        await apiFetch(`/api/budgets/${currentUser.id}`, { method:'POST', body:JSON.stringify({ category, limit: parseFloat(limitValue) }) });
+        toast(`💾 Auto-saved: ${category} limit → ${fmt(parseFloat(limitValue))}`);
+    } catch(e) { console.warn("Auto-save failed", e); }
 }
-function attachAutoSaveToInputs(containerSelector, categoryMap) {
-    // categoryMap: array of categories. For each input id pattern, attach event
-    categoryMap.forEach(cat => {
+function attachAutoSaveToInputs(containerPrefix, categories) {
+    categories.forEach(cat => {
         let rawId = cat.replace(/\s/g, '');
-        let inputEl = document.getElementById(`${containerSelector}_${rawId}`);
+        let inputEl = document.getElementById(`${containerPrefix}_${rawId}`);
         if(inputEl && !inputEl.hasAttribute('data-auto-save')) {
             inputEl.setAttribute('data-auto-save', 'true');
-            inputEl.addEventListener('change', async function(e) {
-                let val = this.value;
-                await autoSaveBudget(cat, val);
-            });
-            // also listen to blur for good measure
-            inputEl.addEventListener('blur', async function(e) {
-                let val = this.value;
-                if(val !== this.getAttribute('data-last-val')) {
-                    this.setAttribute('data-last-val', val);
-                    await autoSaveBudget(cat, val);
-                }
-            });
+            inputEl.addEventListener('change', async function(e) { await autoSaveBudget(cat, this.value); });
+            inputEl.addEventListener('blur', async function(e) { await autoSaveBudget(cat, this.value); });
         }
     });
 }
@@ -307,13 +320,13 @@ async function loadBudgetsStandalone() {
     attachAutoSaveToInputs('budgetStand', categories);
 }
 
-// --- dashboard / transactions loading ---
+// --- Dashboard & Data loading ---
 async function loadDashboard() {
     if(!currentUser) return;
     try {
         let summary = await apiFetch(`/api/summary/${currentUser.id}`);
         let pred = await apiFetch(`/api/predict/${currentUser.id}`);
-        allTransactions = await apiFetch(`/api/transactions?user_id=${currentUser.id}`);
+        allTransactions = await apiFetch(`/api/transactions`);
         currentSummary = summary; currentPrediction = pred;
         document.getElementById('sBalance').innerText = fmt(summary.balance);
         document.getElementById('sExpense').innerText = fmt(summary.expense);
@@ -335,13 +348,13 @@ async function loadDashboard() {
         updateMLDiagram();
         await loadBudgetsForAdd();
         await loadBudgetsStandalone();
-    } catch(e) { toast('Error loading data'); }
+    } catch(e) { toast('Error loading data'); console.error(e); }
 }
-function renderTransactions() { document.getElementById('txTableBody').innerHTML = allTransactions.slice(0,50).map(t=>`<tr><td>${new Date(t.tx_date).toLocaleDateString()}</td><td>${t.category}</td><td>${t.is_need ? 'Need' : 'Want'}</td><td>${PRIO_MAP[t.priority]||''}</td><td>${t.note||''}</td><td>${t.tx_type}</td><td>${fmt(t.amount)}</td></tr>`).join(''); }
+function renderTransactions() { document.getElementById('txTableBody').innerHTML = allTransactions.slice(0,100).map(t=>`<tr><td>${new Date(t.tx_date).toLocaleDateString()}</td><td>${t.category}</td><td>${t.is_need ? 'Need' : 'Want'}</td><td>${PRIO_MAP[t.priority]||''}</td><td>${t.note||''}</td><td>${t.tx_type}</td><td>${fmt(t.amount)}</td></tr>`).join(''); }
 async function loadAnalytics() { if(!currentUser) return; try { let longevity = await apiFetch(`/api/longevity/${currentUser.id}`); document.getElementById('longevityContainer').innerHTML = `<div>💰 Balance: ${fmt(longevity.balance)}<br>📉 Avg Daily: ${fmt(longevity.avg_daily_spend)}<br>📅 Days left: ${longevity.days}</div>`; } catch(e) {} if(currentPrediction.has_data) { if(forecastChart) forecastChart.destroy(); forecastChart = new Chart(document.getElementById('forecastChart'), { type:'line', data:{ labels:Object.keys(currentPrediction.predictions.weekly), datasets:[{ label:'ML Forecast', data:Object.values(currentPrediction.predictions.weekly), borderColor:'#00d282' }] } }); if(catBarChart) catBarChart.destroy(); catBarChart = new Chart(document.getElementById('catBarChart'), { type:'bar', data:{ labels:Object.keys(currentPrediction.predictions.categories), datasets:[{ label:'Spent', data:Object.values(currentPrediction.predictions.categories), backgroundColor:'#3b82f6' }] }, options:{ indexAxis:'y' } }); } }
 
-// --- EVENT HANDLERS (Income/Expense, navigation, etc.) ---
-document.getElementById('incomeForm').addEventListener('submit', async(e)=>{ e.preventDefault(); await apiFetch('/api/transactions', { method:'POST', body:JSON.stringify({ amount: parseFloat(document.getElementById('incomeAmount').value), category:'Income', tx_type:'income', note: document.getElementById('incomeNote').value }) }); toast('Income recorded'); document.getElementById('incomeForm').reset(); await loadDashboard(); });
+// --- Transactions Handlers ---
+document.getElementById('incomeForm').addEventListener('submit', async(e)=>{ e.preventDefault(); let amt = parseFloat(document.getElementById('incomeAmount').value); if(isNaN(amt)) return; await apiFetch('/api/transactions', { method:'POST', body:JSON.stringify({ amount: amt, category:'Income', tx_type:'income', note: document.getElementById('incomeNote').value }) }); toast('Income recorded'); document.getElementById('incomeForm').reset(); await loadDashboard(); });
 document.getElementById('expenseForm').addEventListener('submit', async(e)=>{ e.preventDefault(); let amount = parseFloat(document.getElementById('expenseAmount').value); let category = document.getElementById('expenseCategory').value; let isNeed = document.getElementById('isNeed').checked; let priority = parseInt(document.getElementById('expensePriority').value); let note = document.getElementById('expenseNote').value; if(document.getElementById('prefAlertWant').checked && !isNeed && category !== 'Income') { if(!confirm('This is a WANT expense. Continue?')) return; } await apiFetch('/api/transactions', { method:'POST', body:JSON.stringify({ amount, category, tx_type:'expense', is_need:isNeed, priority, note }) }); toast('Expense recorded'); document.getElementById('expenseForm').reset(); document.getElementById('isNeed').checked = false; await loadDashboard(); });
 document.getElementById('socialStatusDiagram').addEventListener('change', updateMLDiagram);
 document.getElementById('mindsetDiagram').addEventListener('change', updateMLDiagram);
@@ -352,12 +365,12 @@ function navigate(screenId) { document.querySelectorAll('.screen').forEach(s=>s.
 document.getElementById('exportBtn').addEventListener('click', ()=> window.location.href='/api/export/csv');
 document.getElementById('signoutBtn').addEventListener('click', async()=>{ await fetch('/api/logout',{method:'POST',credentials:'include'}); location.reload(); });
 
-// --- full auth and chatbot (restored from original pattern)---
+// Auth logic
 let authBtn = document.getElementById('authBtn'), toggleLink = document.getElementById('toggleAuthLink');
 toggleLink.addEventListener('click', ()=>{ isLogin = !isLogin; document.getElementById('authTitle').innerText = isLogin ? 'Welcome back' : 'Create account'; document.getElementById('regName').style.display = isLogin ? 'none' : 'block'; document.getElementById('authConfirm').style.display = isLogin ? 'none' : 'block'; document.getElementById('termsRow').style.display = isLogin ? 'none' : 'flex'; authBtn.innerText = isLogin ? 'Sign In' : 'Register'; });
 authBtn.addEventListener('click', async()=>{ let email = document.getElementById('authEmail').value, pass = document.getElementById('authPass').value, name = document.getElementById('regName').value; if(!isLogin && (!name || !document.getElementById('termsCheck').checked)) { document.getElementById('authMsg').innerText = 'Accept terms & name required'; return; } let endpoint = isLogin ? '/api/login' : '/api/register'; let body = isLogin ? { email, password:pass } : { name, email, password:pass }; try { let res = await fetch(endpoint, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body), credentials:'include' }); if(res.ok) { location.reload(); } else { let err = await res.json(); document.getElementById('authMsg').innerText = err.error || 'Auth failed'; } } catch(e){ document.getElementById('authMsg').innerText = 'Error connecting'; } });
-// Chatbot simple integration
-document.getElementById('sendChatBtn').addEventListener('click', async()=>{ let input = document.getElementById('chatInput'); let msg = input.value.trim(); if(!msg) return; let chatDiv = document.getElementById('chatMessages'); chatDiv.innerHTML += `<div class="message user-message">${escapeHtml(msg)}</div>`; input.value = ''; chatDiv.scrollTop = chatDiv.scrollHeight; try { let res = await fetch('/api/chat', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ message:msg, user_id: currentUser?.id }), credentials:'include' }); let data = await res.json(); let reply = data.reply || "AI: I'll analyze your spending patterns soon."; chatDiv.innerHTML += `<div class="message bot-message">${escapeHtml(reply)}</div>`; } catch(e) { chatDiv.innerHTML += `<div class="message bot-message">💬 Try again later. Use keywords like "health", "forecast".</div>`; } chatDiv.scrollTop = chatDiv.scrollHeight; });
+// Chatbot
+document.getElementById('sendChatBtn').addEventListener('click', async()=>{ let input = document.getElementById('chatInput'); let msg = input.value.trim(); if(!msg) return; let chatDiv = document.getElementById('chatMessages'); chatDiv.innerHTML += `<div class="message user-message">${escapeHtml(msg)}</div>`; input.value = ''; chatDiv.scrollTop = chatDiv.scrollHeight; try { let res = await fetch('/api/chat', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ message:msg, user_id: currentUser?.id }), credentials:'include' }); let data = await res.json(); let reply = data.reply || "AI: Analyze spending patterns."; chatDiv.innerHTML += `<div class="message bot-message">${escapeHtml(reply)}</div>`; } catch(e) { chatDiv.innerHTML += `<div class="message bot-message">💬 Try keywords like "health", "forecast".</div>`; } chatDiv.scrollTop = chatDiv.scrollHeight; });
 function escapeHtml(str) { return str.replace(/[&<>]/g, function(m){ if(m === '&') return '&amp;'; if(m === '<') return '&lt;'; if(m === '>') return '&gt;'; return m;}); }
 document.getElementById('closeChatBtn').addEventListener('click',()=>{ document.getElementById('chatContainer').style.display = 'none'; });
 async function init() { let res = await fetch('/api/me', { credentials:'include' }); if(res.ok) { currentUser = await res.json(); document.getElementById('authOverlay').style.display = 'none'; document.getElementById('userAvatar').innerText = currentUser.name.slice(0,2).toUpperCase(); await loadDashboard(); } else { document.getElementById('authOverlay').style.display = 'flex'; } }
@@ -365,3 +378,4 @@ init();
 </script>
 </body>
 </html>
+```
