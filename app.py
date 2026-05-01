@@ -1,38 +1,71 @@
-import os
-import datetime
-import hashlib
-import secrets
 import json
+import csv
+import io
+import os
+import google.generativeai as genai
+from datetime import datetime, timedelta, timezone
+from collections import defaultdict
 from functools import wraps
-from flask import Flask, request, jsonify, session, send_from_directory
-from flask_cors import CORS
+
+from flask import Flask, request, jsonify, session, Response
 from flask_sqlalchemy import SQLAlchemy
+from flask_bcrypt import Bcrypt
+from sqlalchemy import inspect, text
 
-app = Flask(__name__, static_folder='static')
-CORS(app, supports_credentials=True)
-
-# === DATABASE CONFIGURATION ===
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', secrets.token_hex(32))
-app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
-app.config['SESSION_COOKIE_HTTPONLY'] = True
-app.config['SESSION_COOKIE_SECURE'] = False
-
-default_db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'smartspend.db')
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', f'sqlite:///{default_db_path}')
+# ----------------------------------------------------------------------
+# App configuration
+# ----------------------------------------------------------------------
+app = Flask(__name__)
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-change-in-production')
+# Use Render’s PostgreSQL URL (already set in environment)
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'postgresql://makamandag_db_user:zcDibuXdlpEpcZNGEYLc9nqpgWwuTTfO@dpg-d7od7md7vvec739acfj0-a/makamandag_db')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-db = SQLAlchemy(app)
+# Configure Gemini AI with your provided API key
+GEMINI_API_KEY = "AIzaSyDADCUZKxOPf6NKQ7uhCcTZWqnd50HoPVY"
+genai.configure(api_key=GEMINI_API_KEY)
 
-# ========== MODELS ==========
+db = SQLAlchemy(app)
+bcrypt = Bcrypt(app)
+
+# ----------------------------------------------------------------------
+# Database models (from first app – fully featured)
+# ----------------------------------------------------------------------
 class User(db.Model):
     __tablename__ = 'users'
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(100), nullable=False)
-    email = db.Column(db.String(100), unique=True, nullable=False)
-    password = db.Column(db.String(200), nullable=False)
-    role = db.Column(db.String(20), default='user')
-    is_active = db.Column(db.Boolean, default=True)
-    created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+    email = db.Column(db.String(120), unique=True, nullable=False)
+    password_hash = db.Column(db.String(128), nullable=False)
+    social_status = db.Column(db.String(20), default='Middle')
+    spending_mindset = db.Column(db.String(20), default='Neutral')
+    monthly_budget_limit = db.Column(db.Float, default=0.0)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+
+    transactions = db.relationship('Transaction', backref='user', lazy=True)
+    budgets = db.relationship('Budget', backref='user', lazy=True)
+    future_expenses = db.relationship('FutureExpense', backref='user', lazy=True)
+    allocations = db.relationship('UserAllocation', backref='user', lazy=True)
+
+    def set_password(self, password):
+        self.password_hash = bcrypt.generate_password_hash(password).decode('utf-8')
+
+    def check_password(self, password):
+        try:
+            return bcrypt.check_password_hash(self.password_hash, password)
+        except ValueError:
+            return False
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'name': self.name,
+            'email': self.email,
+            'social_status': self.social_status,
+            'spending_mindset': self.spending_mindset,
+            'monthly_budget_limit': self.monthly_budget_limit
+        }
+
 
 class Transaction(db.Model):
     __tablename__ = 'transactions'
@@ -40,10 +73,24 @@ class Transaction(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     amount = db.Column(db.Float, nullable=False)
     category = db.Column(db.String(50), nullable=False)
-    tx_type = db.Column(db.String(10), nullable=False)       # 'income' or 'expense'
-    is_need = db.Column(db.Boolean, default=False)          # marks need vs want
+    tx_type = db.Column(db.String(10), nullable=False)
+    is_need = db.Column(db.Boolean, default=True)
+    priority = db.Column(db.Integer, default=1)
     note = db.Column(db.String(200))
-    tx_date = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+    tx_date = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'amount': self.amount,
+            'category': self.category,
+            'tx_type': self.tx_type,
+            'is_need': self.is_need,
+            'priority': self.priority,
+            'note': self.note,
+            'tx_date': self.tx_date.isoformat()
+        }
+
 
 class Budget(db.Model):
     __tablename__ = 'budgets'
@@ -51,36 +98,86 @@ class Budget(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     category = db.Column(db.String(50), nullable=False)
     limit_amount = db.Column(db.Float, nullable=False)
-    __table_args__ = (db.UniqueConstraint('user_id', 'category'),)
+    __table_args__ = (db.UniqueConstraint('user_id', 'category', name='unique_user_category'),)
 
-class UserProfile(db.Model):
-    __tablename__ = 'user_profiles'
+
+class FutureExpense(db.Model):
+    __tablename__ = 'future_expenses'
     id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), unique=True, nullable=False)
-    social_status = db.Column(db.String(20), nullable=False, default='Middle')
-    spending_mindset = db.Column(db.String(20), nullable=False, default='Neutral')
-    wants_needs_json = db.Column(db.Text, default='{}')
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    description = db.Column(db.String(200), nullable=False)
+    amount = db.Column(db.Float, nullable=False)
+    category = db.Column(db.String(50), nullable=False)
+    cycle = db.Column(db.String(20), default='One-time')
+    expense_date = db.Column(db.Date, nullable=False)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
-# ========== CREATE TABLES & MIGRATIONS ==========
-with app.app_context():
-    db.create_all()
-    try:
-        db.session.execute('ALTER TABLE transactions ADD COLUMN is_need BOOLEAN DEFAULT 0')
-        db.session.commit()
-    except Exception:
-        pass
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'description': self.description,
+            'amount': self.amount,
+            'category': self.category,
+            'cycle': self.cycle,
+            'date': self.expense_date.isoformat()
+        }
 
-    if not User.query.filter_by(email='admin@smartspend.com').first():
-        hashed = hashlib.sha256('admin123'.encode()).hexdigest()
-        admin = User(name='Admin', email='admin@smartspend.com', password=hashed, role='admin')
-        db.session.add(admin)
-        db.session.commit()
-        print("✅ Admin created: admin@smartspend.com / admin123")
 
-# ========== HELPERS ==========
-def hash_password(pwd):
-    return hashlib.sha256(pwd.encode()).hexdigest()
+class UserAllocation(db.Model):
+    __tablename__ = 'user_allocations'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    category_name = db.Column(db.String(50), nullable=False)
+    type = db.Column(db.String(10), nullable=False)
+    percentage = db.Column(db.Float, nullable=False)
+    __table_args__ = (db.UniqueConstraint('user_id', 'category_name', name='unique_user_category_allocation'),)
 
+
+# ----------------------------------------------------------------------
+# Schema migration (add missing columns, drop old password column)
+# ----------------------------------------------------------------------
+def ensure_schema():
+    inspector = inspect(db.engine)
+    if inspector.has_table('users'):
+        existing_columns = [col['name'] for col in inspector.get_columns('users')]
+        
+        # Remove old 'password' column if it exists (from second app)
+        if 'password' in existing_columns:
+            with db.engine.connect() as conn:
+                conn.execute(text('ALTER TABLE users DROP COLUMN password'))
+                conn.commit()
+            print("✅ Dropped obsolete 'password' column from users table.")
+        
+        # Add missing columns from the first app's schema
+        if 'password_hash' not in existing_columns:
+            with db.engine.connect() as conn:
+                conn.execute(text('ALTER TABLE users ADD COLUMN password_hash VARCHAR(128) NOT NULL DEFAULT \'\''))
+                conn.commit()
+            print("✅ Added password_hash column to users table.")
+        if 'social_status' not in existing_columns:
+            with db.engine.connect() as conn:
+                conn.execute(text('ALTER TABLE users ADD COLUMN social_status VARCHAR(20) DEFAULT \'Middle\''))
+                conn.commit()
+            print("✅ Added social_status column to users table.")
+        if 'spending_mindset' not in existing_columns:
+            with db.engine.connect() as conn:
+                conn.execute(text('ALTER TABLE users ADD COLUMN spending_mindset VARCHAR(20) DEFAULT \'Neutral\''))
+                conn.commit()
+            print("✅ Added spending_mindset column to users table.")
+        if 'monthly_budget_limit' not in existing_columns:
+            with db.engine.connect() as conn:
+                conn.execute(text('ALTER TABLE users ADD COLUMN monthly_budget_limit FLOAT DEFAULT 0.0'))
+                conn.commit()
+            print("✅ Added monthly_budget_limit column to users table.")
+
+    # Ensure future_expenses table exists
+    if not inspector.has_table('future_expenses'):
+        db.create_all()  # create any missing tables
+
+
+# ----------------------------------------------------------------------
+# Authentication helpers
+# ----------------------------------------------------------------------
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -89,463 +186,675 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated
 
-def get_user_profile(user_id):
-    profile = UserProfile.query.filter_by(user_id=user_id).first()
-    if not profile:
-        return {'social_status': 'Middle', 'spending_mindset': 'Neutral', 'wants_needs': {}}
-    return {
-        'social_status': profile.social_status,
-        'spending_mindset': profile.spending_mindset,
-        'wants_needs': json.loads(profile.wants_needs_json) if profile.wants_needs_json else {}
-    }
 
-# ---------- ML Functions (updated with needs priority) ----------
-def calculate_health_score(transactions, budgets):
-    income = sum(t['amount'] for t in transactions if t['tx_type'] == 'income')
-    expense = sum(t['amount'] for t in transactions if t['tx_type'] == 'expense')
-    if income == 0:
-        return 0
-    savings_rate = (income - expense) / income
-    score = max(0, min(100, savings_rate * 100))
+def get_current_user():
+    user_id = session.get('user_id')
+    return User.query.get(user_id) if user_id else None
 
-    cat_spending = {}
-    for t in transactions:
-        if t['tx_type'] == 'expense':
-            cat_spending[t['category']] = cat_spending.get(t['category'], 0) + t['amount']
-    budget_penalty = 0
-    total_budget = 0
-    for cat, limit in budgets.items():
-        spent = cat_spending.get(cat, 0)
-        if limit > 0:
-            total_budget += limit
-            if spent > limit:
-                over = (spent - limit) / limit
-                budget_penalty += over * 10
-    if total_budget > 0:
-        score = max(0, min(100, score - budget_penalty))
-    return int(score)
 
-def forecast_spending(transactions):
-    expenses = [t for t in transactions if t['tx_type'] == 'expense']
-    if not expenses:
-        return {"Week 1": 0, "Week 2": 0, "Week 3": 0, "Week 4": 0}
-    weekly = {}
-    for t in expenses:
-        date = t['tx_date']
-        if isinstance(date, str):
-            date = datetime.datetime.fromisoformat(date)
-        week_num = date.isocalendar()[1]
-        year = date.year
-        key = f"{year}-W{week_num}"
-        weekly[key] = weekly.get(key, 0) + t['amount']
-    weekly_vals = list(weekly.values())
-    if len(weekly_vals) < 2:
-        avg = sum(weekly_vals) / max(1, len(weekly_vals))
+# ----------------------------------------------------------------------
+# ML / Prediction helpers (from first app)
+# ----------------------------------------------------------------------
+def compute_health_score(user_id):
+    user = User.query.get(user_id)
+    if not user:
+        return 50
+    thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
+    expenses = Transaction.query.filter(
+        Transaction.user_id == user_id,
+        Transaction.tx_type == 'expense',
+        Transaction.tx_date >= thirty_days_ago
+    ).all()
+    income = Transaction.query.filter(
+        Transaction.user_id == user_id,
+        Transaction.tx_type == 'income',
+        Transaction.tx_date >= thirty_days_ago
+    ).all()
+    total_expense = sum(e.amount for e in expenses)
+    total_income = sum(i.amount for i in income)
+    savings_rate = max(0, (total_income - total_expense) / total_income) if total_income > 0 else 0
+    want_expense = sum(e.amount for e in expenses if not e.is_need)
+    need_expense = sum(e.amount for e in expenses if e.is_need)
+    total_exp = want_expense + need_expense
+    want_ratio = want_expense / total_exp if total_exp > 0 else 0
+    budgets = Budget.query.filter_by(user_id=user_id).all()
+    budget_dict = {b.category: b.limit_amount for b in budgets}
+    overspend_penalty = 0
+    for cat, limit in budget_dict.items():
+        cat_spent = sum(e.amount for e in expenses if e.category == cat)
+        if cat_spent > limit:
+            overspend_penalty += (cat_spent - limit) / limit
+    score = 70
+    score += int(savings_rate * 20)
+    score -= int(want_ratio * 15)
+    score -= min(20, int(overspend_penalty * 10))
+    return max(0, min(100, score))
+
+
+def generate_weekly_forecast(user_id):
+    thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
+    expenses = Transaction.query.filter(
+        Transaction.user_id == user_id,
+        Transaction.tx_type == 'expense',
+        Transaction.tx_date >= thirty_days_ago
+    ).all()
+    if len(expenses) < 7:
+        avg_daily = sum(e.amount for e in expenses) / max(1, len(expenses))
     else:
-        window = weekly_vals[-3:] if len(weekly_vals) >= 3 else weekly_vals
-        avg = sum(window) / len(window)
-    forecast = {}
-    for i in range(1, 5):
-        forecast[f"Week {i}"] = round(avg * (0.95 + i * 0.02), 2)
-    return forecast
+        daily_totals = defaultdict(float)
+        for e in expenses:
+            key = e.tx_date.date()
+            daily_totals[key] += e.amount
+        days_sorted = sorted(daily_totals.keys())
+        values = [daily_totals[d] for d in days_sorted]
+        n = len(values)
+        if n > 1:
+            x_mean = (n - 1) / 2
+            y_mean = sum(values) / n
+            numerator = sum((i - x_mean) * (values[i] - y_mean) for i in range(n))
+            denominator = sum((i - x_mean) ** 2 for i in range(n))
+            slope = numerator / denominator if denominator != 0 else 0
+            intercept = y_mean - slope * x_mean
+            week_sums = [0, 0, 0, 0]
+            for day in range(1, 29):
+                predicted = max(0, intercept + slope * (n + day))
+                week_sums[(day - 1) // 7] += predicted
+            return {
+                'Week 1': week_sums[0],
+                'Week 2': week_sums[1],
+                'Week 3': week_sums[2],
+                'Week 4': week_sums[3]
+            }
+    daily_avg = sum(e.amount for e in expenses) / max(1, len(expenses))
+    weekly = daily_avg * 7
+    return {'Week 1': weekly, 'Week 2': weekly, 'Week 3': weekly, 'Week 4': weekly}
 
-def generate_advice(transactions, budgets):
+
+def get_category_forecast(user_id):
+    now = datetime.now(timezone.utc)
+    first_of_month = datetime(now.year, now.month, 1)
+    expenses = Transaction.query.filter(
+        Transaction.user_id == user_id,
+        Transaction.tx_type == 'expense',
+        Transaction.tx_date >= first_of_month
+    ).all()
+    cat_totals = defaultdict(float)
+    for e in expenses:
+        cat_totals[e.category] += e.amount
+    return dict(cat_totals)
+
+
+def generate_advice(user_id):
+    user = User.query.get(user_id)
+    if not user:
+        return []
+    budgets = {b.category: b.limit_amount for b in Budget.query.filter_by(user_id=user_id).all()}
+    current_month_expenses = get_category_forecast(user_id)
     advice = []
-    cat_spending = {}
-    for t in transactions:
-        if t['tx_type'] == 'expense':
-            cat_spending[t['category']] = cat_spending.get(t['category'], 0) + t['amount']
-    for cat, limit in budgets.items():
-        spent = cat_spending.get(cat, 0)
-        if limit > 0:
-            if spent > limit:
-                advice.append({"cat": cat, "msg": f"⚠️ Overspent by ₱{spent-limit:.2f}. Reduce or adjust budget."})
-            elif spent < limit * 0.7:
-                advice.append({"cat": cat, "msg": f"✅ Great! You underspent by ₱{limit-spent:.2f}. Consider saving the difference."})
-            else:
-                advice.append({"cat": cat, "msg": f"✔️ On track. Spent ₱{spent:.2f} of ₱{limit:.2f} budget."})
+    for category, spent in current_month_expenses.items():
+        limit = budgets.get(category)
+        if limit and spent > limit:
+            advice.append({
+                'cat': category,
+                'msg': f"You've exceeded the {category} budget by ₱{spent - limit:.2f}. Consider reducing non-essential purchases."
+            })
+    expenses = Transaction.query.filter_by(user_id=user_id, tx_type='expense').all()
+    wants = sum(e.amount for e in expenses if not e.is_need)
+    needs = sum(e.amount for e in expenses if e.is_need)
+    total = wants + needs
+    if total > 0 and (wants / total) > 0.4:
+        advice.append({
+            'cat': 'Wants',
+            'msg': f"Your wants spending is {wants/total*100:.0f}% of total expenses. Try to keep wants below 30% for better savings."
+        })
     if not advice:
-        advice.append({"cat": "General", "msg": "No budget limits set. Set budgets to get personalized advice."})
+        advice.append({'cat': 'Great job!', 'msg': 'Your spending is well within budgets. Keep it up!'})
     return advice
 
-def generate_scenarios(user_id, transactions, budgets):
-    expenses = [t for t in transactions if t['tx_type'] == 'expense']
-    income = sum(t['amount'] for t in transactions if t['tx_type'] == 'income')
-    total_expense = sum(e['amount'] for e in expenses)
-    savings = max(0, income - total_expense)
-    profile = get_user_profile(user_id)
-    social = profile['social_status']
-    mindset = profile['spending_mindset']
-    cat_spend = {}
-    need_spend = {}
-    want_spend = {}
-    for e in expenses:
-        cat = e['category']
-        amt = e['amount']
-        cat_spend[cat] = cat_spend.get(cat, 0) + amt
-        if e.get('is_need', False):
-            need_spend[cat] = need_spend.get(cat, 0) + amt
+
+def get_monthly_summary(user_id):
+    user = User.query.get(user_id)
+    if not user:
+        return {'balance': 0, 'expense': 0, 'income': 0, 'monthly': {}}
+    all_trans = Transaction.query.filter_by(user_id=user_id).all()
+    balance = 0
+    for t in all_trans:
+        if t.tx_type == 'income':
+            balance += t.amount
         else:
-            want_spend[cat] = want_spend.get(cat, 0) + amt
+            balance -= t.amount
+    now = datetime.now(timezone.utc)
+    first_of_month = datetime(now.year, now.month, 1)
+    this_month_expense = sum(t.amount for t in all_trans if t.tx_type == 'expense' and t.tx_date >= first_of_month)
+    this_month_income = sum(t.amount for t in all_trans if t.tx_type == 'income' and t.tx_date >= first_of_month)
+    monthly = defaultdict(lambda: {'income': 0, 'expense': 0})
+    for t in all_trans:
+        key = t.tx_date.strftime('%Y-%m')
+        if t.tx_type == 'income':
+            monthly[key]['income'] += t.amount
+        else:
+            monthly[key]['expense'] += t.amount
+    sorted_months = sorted(monthly.keys())[-6:]
+    monthly_hist = {m: monthly[m] for m in sorted_months}
+    return {
+        'balance': balance,
+        'expense': this_month_expense,
+        'income': this_month_income,
+        'monthly': monthly_hist
+    }
 
-    default_cats = ['Food & Dining', 'Transport', 'Groceries', 'Entertainment', 'Health']
 
-    def build_scenario(name, savings_mult, invest_mult, essential_mult, disc_mult):
-        limits = {}
-        for cat in default_cats:
-            spent = cat_spend.get(cat, 0)
-            if cat in need_spend:
-                multiplier = essential_mult
-            else:
-                multiplier = disc_mult
-            if cat in ['Food & Dining', 'Groceries', 'Health']:
-                suggested = max(spent * multiplier, 2000) if spent > 0 else 3000
-            else:
-                suggested = max(spent * multiplier, 1000) if spent > 0 else 2000
-            limits[cat] = round(suggested)
-        if social == 'Low':
-            limits['Entertainment'] = limits.get('Entertainment', 1500) * 0.6
-        elif social == 'Upper':
-            limits['Entertainment'] = limits.get('Entertainment', 3000) * 1.5
-            limits['Health'] = limits.get('Health', 3000) * 1.3
-        if mindset == 'Saver':
-            for cat in ['Entertainment', 'Transport']:
-                limits[cat] = limits.get(cat, 2000) * 0.7
-        elif mindset == 'Spender':
-            for cat in ['Entertainment', 'Food & Dining']:
-                limits[cat] = limits.get(cat, 3000) * 1.4
-        for cat in limits:
-            limits[cat] = max(100, int(limits[cat]))
-        suggested_savings = income * savings_mult if income > 0 else savings * savings_mult
-        suggested_investment = suggested_savings * invest_mult
-        return {
-            'name': name,
-            'budget_limits': limits,
-            'savings_goal': round(suggested_savings),
-            'investment_goal': round(suggested_investment),
-            'expected_savings_rate': round(savings_mult * 100)
-        }
-    cons = build_scenario('Conservative (Safe)', 0.25, 0.6, 1.2, 0.7)
-    bal = build_scenario('Balanced (Moderate)', 0.20, 0.7, 1.0, 1.0)
-    agg = build_scenario('Aggressive (Growth)', 0.15, 0.9, 0.9, 1.3)
-    return [cons, bal, agg]
+def compute_longevity(user_id):
+    summary = get_monthly_summary(user_id)
+    balance = summary['balance']
+    thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
+    expenses = Transaction.query.filter(
+        Transaction.user_id == user_id,
+        Transaction.tx_type == 'expense',
+        Transaction.tx_date >= thirty_days_ago
+    ).all()
+    total_spent = sum(e.amount for e in expenses)
+    avg_daily = total_spent / 30 if len(expenses) > 0 else 0
+    days = int(balance / avg_daily) if avg_daily > 0 else 0
+    return {
+        'balance': balance,
+        'avg_daily_spend': avg_daily,
+        'days': days
+    }
 
-# ========== API ROUTES ==========
+
+# ----------------------------------------------------------------------
+# Gemini AI endpoints
+# ----------------------------------------------------------------------
+@app.route('/api/ai_allocate', methods=['POST'])
+@login_required
+def ai_allocate():
+    user = get_current_user()
+    data = request.json
+    selected_categories = data.get('categories', [])
+    monthly_budget = data.get('monthly_budget', user.monthly_budget_limit or 10000)
+
+    recent_spending = defaultdict(float)
+    transactions = Transaction.query.filter_by(user_id=user.id, tx_type='expense').order_by(Transaction.tx_date.desc()).limit(20).all()
+    for t in transactions:
+        recent_spending[t.category] += t.amount
+
+    budget_limits = {b.category: b.limit_amount for b in Budget.query.filter_by(user_id=user.id).all()}
+    mindset = user.spending_mindset.lower()
+    status = user.social_status.lower()
+
+    prompt = f"""
+You are a financial AI. Allocate 100% of a monthly budget of ₱{monthly_budget} among these categories: {selected_categories}.
+User profile:
+- Social status: {status}
+- Spending mindset: {mindset}
+- Recent spending: {dict(recent_spending)}
+- Existing budget limits (if any): {budget_limits}
+
+Rules:
+- If mindset is "saver": give at least 70% to needs (Food, Debt, Mortgage, Transport). Keep wants low.
+- If "spender": allow up to 40% to wants.
+- If "neutral": balanced.
+- Use existing budget limits as a reference but ensure total 100%.
+Return ONLY a JSON object with category names as keys and percentage values as floats summing to 100.
+No extra text.
+"""
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = model.generate_content(prompt)
+        allocation = json.loads(response.text.strip())
+        total = sum(allocation.values())
+        if abs(total - 100) > 0.1:
+            factor = 100 / total
+            allocation = {k: round(v * factor, 1) for k, v in allocation.items()}
+        return jsonify({'allocation': allocation}), 200
+    except Exception as e:
+        print(f"Gemini allocation error: {e}")
+        if recent_spending:
+            total_spent = sum(recent_spending.values())
+            if total_spent > 0:
+                allocation = {}
+                for cat in selected_categories:
+                    pct = (recent_spending.get(cat, 0) / total_spent) * 100
+                    allocation[cat] = round(pct, 1)
+                total = sum(allocation.values())
+                if total != 100:
+                    factor = 100 / total
+                    allocation = {k: round(v * factor, 1) for k, v in allocation.items()}
+                return jsonify({'allocation': allocation, 'fallback': 'recent_spending'}), 200
+        fallback_pct = 100 / len(selected_categories) if selected_categories else 0
+        fallback = {cat: round(fallback_pct, 1) for cat in selected_categories}
+        return jsonify({'allocation': fallback, 'fallback': 'equal'}), 200
+
+
+@app.route('/api/savings_plan', methods=['GET'])
+@login_required
+def savings_plan():
+    user = get_current_user()
+    summary = get_monthly_summary(user.id)
+    monthly_income = summary['income']
+    monthly_expense = summary['expense']
+    balance = summary['balance']
+    mindset = user.spending_mindset
+
+    prompt = f"""
+User monthly income: ₱{monthly_income:.2f}, monthly expenses: ₱{monthly_expense:.2f}, current balance: ₱{balance:.2f}.
+Spending mindset: {mindset}.
+Recommend how much they should save per day, per week, and per month. Give realistic, actionable amounts.
+Return a JSON object: {{"daily": float, "weekly": float, "monthly": float}}.
+No extra text.
+"""
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = model.generate_content(prompt)
+        plan = json.loads(response.text.strip())
+        return jsonify(plan), 200
+    except Exception as e:
+        print(f"Savings plan error: {e}")
+        disposable = max(0, monthly_income - monthly_expense)
+        monthly_save = disposable * 0.2
+        return jsonify({
+            "daily": round(monthly_save / 30, 2),
+            "weekly": round(monthly_save / 4, 2),
+            "monthly": round(monthly_save, 2)
+        }), 200
+
+
+@app.route('/api/apply_future_expenses', methods=['POST'])
+@login_required
+def apply_future_expenses():
+    user = get_current_user()
+    today = datetime.now(timezone.utc).date()
+    future_expenses = FutureExpense.query.filter(
+        FutureExpense.user_id == user.id,
+        FutureExpense.expense_date <= today,
+        FutureExpense.cycle == 'One-time'
+    ).all()
+    applied = []
+    for exp in future_expenses:
+        tx = Transaction(
+            user_id=user.id,
+            amount=exp.amount,
+            category=exp.category,
+            tx_type='expense',
+            is_need=(exp.category in ['Food & dining', 'Debt repayment', 'Mortgage', 'Transport']),
+            priority=1,
+            note=f"Auto-deducted future expense: {exp.description}"
+        )
+        db.session.add(tx)
+        applied.append(exp.description)
+        db.session.delete(exp)
+    db.session.commit()
+    return jsonify({'applied': applied, 'count': len(applied)}), 200
+
+
+# ----------------------------------------------------------------------
+# Standard routes (register, login, transactions, budgets, etc.)
+# ----------------------------------------------------------------------
 @app.route('/')
 def index():
     return HTML_PAGE
 
+
 @app.route('/api/register', methods=['POST'])
 def register():
     data = request.json
-    if not data or not data.get('email') or not data.get('password') or not data.get('name'):
+    name = data.get('name')
+    email = data.get('email')
+    password = data.get('password')
+    if not name or not email or not password:
         return jsonify({'error': 'Missing fields'}), 400
-    if User.query.filter_by(email=data['email']).first():
+    if User.query.filter_by(email=email).first():
         return jsonify({'error': 'Email already exists'}), 400
-    hashed = hash_password(data['password'])
-    user = User(name=data['name'], email=data['email'], password=hashed, role='user')
+    user = User(name=name, email=email)
+    user.set_password(password)
     db.session.add(user)
     db.session.commit()
-    return jsonify({'message': 'User created successfully'}), 201
+    session['user_id'] = user.id
+    return jsonify(user.to_dict()), 201
+
 
 @app.route('/api/login', methods=['POST'])
 def login():
     data = request.json
-    user = User.query.filter_by(email=data.get('email')).first()
-    if not user or user.password != hash_password(data.get('password', '')):
+    email = data.get('email')
+    password = data.get('password')
+    user = User.query.filter_by(email=email).first()
+    if not user or not user.check_password(password):
         return jsonify({'error': 'Invalid credentials'}), 401
     session['user_id'] = user.id
-    session['user_name'] = user.name
-    return jsonify({'user': {'id': user.id, 'name': user.name, 'email': user.email, 'role': user.role}})
+    return jsonify(user.to_dict()), 200
+
 
 @app.route('/api/logout', methods=['POST'])
 def logout():
-    session.clear()
-    return jsonify({'message': 'Logged out'})
+    session.pop('user_id', None)
+    return jsonify({'message': 'Logged out'}), 200
 
-@app.route('/api/me')
+
+@app.route('/api/me', methods=['GET'])
 def me():
-    if 'user_id' not in session:
-        return jsonify({'error': 'Unauthorized'}), 401
-    user = User.query.get(session['user_id'])
+    user = get_current_user()
     if not user:
-        session.clear()
-        return jsonify({'error': 'User not found'}), 401
-    return jsonify({'id': user.id, 'name': user.name, 'email': user.email, 'role': user.role})
+        return jsonify({'error': 'Unauthorized'}), 401
+    return jsonify(user.to_dict()), 200
 
-@app.route('/api/user/profile', methods=['GET', 'POST'])
+
+@app.route('/api/transactions', methods=['GET'])
 @login_required
-def user_profile():
-    user_id = session['user_id']
-    if request.method == 'GET':
-        profile = UserProfile.query.filter_by(user_id=user_id).first()
-        if not profile:
-            return jsonify({'social_status': 'Middle', 'spending_mindset': 'Neutral', 'wants_needs': {}})
-        return jsonify({'social_status': profile.social_status, 'spending_mindset': profile.spending_mindset, 'wants_needs': json.loads(profile.wants_needs_json) if profile.wants_needs_json else {}})
-    else:
-        data = request.json
-        profile = UserProfile.query.filter_by(user_id=user_id).first()
-        if not profile:
-            profile = UserProfile(user_id=user_id)
-            db.session.add(profile)
-        profile.social_status = data.get('social_status', 'Middle')
-        profile.spending_mindset = data.get('spending_mindset', 'Neutral')
-        profile.wants_needs_json = json.dumps(data.get('wants_needs', {}))
+def list_transactions():
+    user = get_current_user()
+    transactions = Transaction.query.filter_by(user_id=user.id).order_by(Transaction.tx_date.desc()).all()
+    return jsonify([t.to_dict() for t in transactions]), 200
+
+
+@app.route('/api/transactions', methods=['POST'])
+@login_required
+def create_transaction():
+    user = get_current_user()
+    data = request.json
+    required = ['amount', 'category', 'tx_type']
+    if not all(k in data for k in required):
+        return jsonify({'error': 'Missing required fields'}), 400
+
+    tx = Transaction(
+        user_id=user.id,
+        amount=data['amount'],
+        category=data['category'],
+        tx_type=data['tx_type'],
+        is_need=data.get('is_need', True),
+        priority=data.get('priority', 1),
+        note=data.get('note', '')
+    )
+    db.session.add(tx)
+    db.session.commit()
+
+    # Auto-apply future expenses if salary income
+    if tx.tx_type == 'income' and tx.category.lower() == 'salary':
+        today = datetime.now(timezone.utc).date()
+        future_expenses = FutureExpense.query.filter(
+            FutureExpense.user_id == user.id,
+            FutureExpense.expense_date <= today,
+            FutureExpense.cycle == 'One-time'
+        ).all()
+        for exp in future_expenses:
+            auto_tx = Transaction(
+                user_id=user.id,
+                amount=exp.amount,
+                category=exp.category,
+                tx_type='expense',
+                is_need=(exp.category in ['Food & dining', 'Debt repayment', 'Mortgage', 'Transport']),
+                priority=1,
+                note=f"Auto-deducted future expense: {exp.description}"
+            )
+            db.session.add(auto_tx)
+            db.session.delete(exp)
         db.session.commit()
-        return jsonify({'message': 'Profile updated'})
+    return jsonify(tx.to_dict()), 201
 
-@app.route('/api/budgets/<int:user_id>', methods=['GET', 'POST'])
+
+@app.route('/api/transactions/<int:tx_id>', methods=['PATCH'])
 @login_required
-def manage_budgets(user_id):
-    if session['user_id'] != user_id:
+def patch_transaction(tx_id):
+    user = get_current_user()
+    tx = Transaction.query.get(tx_id)
+    if not tx or tx.user_id != user.id:
+        return jsonify({'error': 'Not found'}), 404
+    data = request.json
+    if 'is_need' in data:
+        tx.is_need = data['is_need']
+    if 'priority' in data:
+        tx.priority = data['priority']
+    if 'note' in data:
+        tx.note = data['note']
+    db.session.commit()
+    return jsonify(tx.to_dict()), 200
+
+
+@app.route('/api/budgets/<int:user_id>', methods=['GET'])
+@login_required
+def get_budgets(user_id):
+    current = get_current_user()
+    if current.id != user_id:
         return jsonify({'error': 'Forbidden'}), 403
-    if request.method == 'GET':
-        budgets = Budget.query.filter_by(user_id=user_id).all()
-        return jsonify([{'category': b.category, 'limit': b.limit_amount} for b in budgets])
-    else:
-        data = request.json
-        category = data.get('category')
-        limit = data.get('limit')
-        if not category or limit is None:
-            return jsonify({'error': 'Category and limit required'}), 400
-        budget = Budget.query.filter_by(user_id=user_id, category=category).first()
-        if budget:
-            budget.limit_amount = limit
-        else:
-            budget = Budget(user_id=user_id, category=category, limit_amount=limit)
-            db.session.add(budget)
-        db.session.commit()
-        return jsonify({'message': 'Budget saved'})
+    budgets = Budget.query.filter_by(user_id=user_id).all()
+    return jsonify([{'category': b.category, 'limit': b.limit_amount} for b in budgets]), 200
 
-@app.route('/api/budgets/bulk/<int:user_id>', methods=['POST'])
+
+@app.route('/api/budgets/<int:user_id>', methods=['POST'])
 @login_required
-def bulk_budgets(user_id):
-    if session['user_id'] != user_id:
+def upsert_budget(user_id):
+    current = get_current_user()
+    if current.id != user_id:
         return jsonify({'error': 'Forbidden'}), 403
     data = request.json
-    limits = data.get('limits', {})
-    for category, limit_amount in limits.items():
-        budget = Budget.query.filter_by(user_id=user_id, category=category).first()
-        if budget:
-            budget.limit_amount = limit_amount
-        else:
-            budget = Budget(user_id=user_id, category=category, limit_amount=limit_amount)
-            db.session.add(budget)
-    db.session.commit()
-    return jsonify({'message': 'Budgets applied'})
-
-@app.route('/api/transactions', methods=['GET', 'POST'])
-@login_required
-def transactions():
-    user_id = session['user_id']
-    if request.method == 'GET':
-        txns = Transaction.query.filter_by(user_id=user_id).order_by(Transaction.tx_date.desc()).all()
-        return jsonify([{
-            'id': t.id, 'amount': t.amount, 'category': t.category, 'tx_type': t.tx_type,
-            'is_need': t.is_need, 'note': t.note, 'tx_date': t.tx_date.isoformat()
-        } for t in txns])
+    category = data.get('category')
+    limit = data.get('limit')
+    if not category or limit is None:
+        return jsonify({'error': 'Category and limit required'}), 400
+    existing = Budget.query.filter_by(user_id=user_id, category=category).first()
+    if existing:
+        existing.limit_amount = limit
     else:
-        data = request.json
-        if not data or 'amount' not in data or 'category' not in data or 'tx_type' not in data:
-            return jsonify({'error': 'Invalid transaction data'}), 400
-        txn = Transaction(
-            user_id=user_id,
-            amount=data['amount'],
-            category=data['category'],
-            tx_type=data['tx_type'],
-            is_need=data.get('is_need', False),
-            note=data.get('note', ''),
-            tx_date=datetime.datetime.utcnow()
-        )
-        db.session.add(txn)
-        db.session.commit()
-        return jsonify({'message': 'Transaction added', 'id': txn.id})
+        existing = Budget(user_id=user_id, category=category, limit_amount=limit)
+        db.session.add(existing)
+    db.session.commit()
+    return jsonify({'category': category, 'limit': limit}), 200
+
+
+@app.route('/api/user/profile', methods=['POST'])
+@login_required
+def update_profile():
+    user = get_current_user()
+    data = request.json
+    if 'social_status' in data:
+        user.social_status = data['social_status']
+    if 'spending_mindset' in data:
+        user.spending_mindset = data['spending_mindset']
+    if 'monthly_budget_limit' in data:
+        user.monthly_budget_limit = data['monthly_budget_limit']
+    db.session.commit()
+    return jsonify(user.to_dict()), 200
+
 
 @app.route('/api/summary/<int:user_id>')
 @login_required
 def summary(user_id):
-    if session['user_id'] != user_id:
+    current = get_current_user()
+    if current.id != user_id:
         return jsonify({'error': 'Forbidden'}), 403
-    txns = Transaction.query.filter_by(user_id=user_id).all()
-    balance = 0
-    expense = 0
-    income = 0
-    monthly = {}
-    for t in txns:
-        if t.tx_type == 'income':
-            balance += t.amount
-            income += t.amount
-        else:
-            balance -= t.amount
-            expense += t.amount
-        month_key = t.tx_date.strftime('%Y-%m')
-        if month_key not in monthly:
-            monthly[month_key] = {'income': 0, 'expense': 0}
-        if t.tx_type == 'income':
-            monthly[month_key]['income'] += t.amount
-        else:
-            monthly[month_key]['expense'] += t.amount
-    return jsonify({'balance': balance, 'expense': expense, 'income': income, 'monthly': monthly})
+    return jsonify(get_monthly_summary(user_id)), 200
+
 
 @app.route('/api/predict/<int:user_id>')
 @login_required
 def predict(user_id):
-    if session['user_id'] != user_id:
+    current = get_current_user()
+    if current.id != user_id:
         return jsonify({'error': 'Forbidden'}), 403
-    txns = Transaction.query.filter_by(user_id=user_id).all()
-    if not txns:
-        return jsonify({'has_data': False, 'score': None, 'predictions': {}, 'advice': []})
-    tx_list = [{'amount': t.amount, 'category': t.category, 'tx_type': t.tx_type,
-                'is_need': t.is_need, 'tx_date': t.tx_date} for t in txns]
-    budgets = Budget.query.filter_by(user_id=user_id).all()
-    budget_dict = {b.category: b.limit_amount for b in budgets}
-    health_score = calculate_health_score(tx_list, budget_dict)
-    weekly_forecast = forecast_spending(tx_list)
-    cat_spending = {}
-    for t in tx_list:
-        if t['tx_type'] == 'expense':
-            cat_spending[t['category']] = cat_spending.get(t['category'], 0) + t['amount']
-    advice = generate_advice(tx_list, budget_dict)
+    expenses = Transaction.query.filter_by(user_id=user_id, tx_type='expense').count()
+    has_data = expenses > 0
+    if not has_data:
+        return jsonify({
+            'has_data': False,
+            'score': None,
+            'predictions': {'weekly': {}, 'categories': {}},
+            'advice': []
+        }), 200
+    score = compute_health_score(user_id)
+    weekly = generate_weekly_forecast(user_id)
+    categories = get_category_forecast(user_id)
+    advice = generate_advice(user_id)
     return jsonify({
         'has_data': True,
-        'score': health_score,
-        'predictions': {'weekly': weekly_forecast, 'categories': cat_spending},
+        'score': score,
+        'predictions': {'weekly': weekly, 'categories': categories},
         'advice': advice
-    })
+    }), 200
 
-@app.route('/api/budget/scenarios/<int:user_id>')
-@login_required
-def budget_scenarios(user_id):
-    if session['user_id'] != user_id:
-        return jsonify({'error': 'Forbidden'}), 403
-    txns = Transaction.query.filter_by(user_id=user_id).all()
-    if not txns:
-        return jsonify({'scenarios': []})
-    tx_list = [{'amount': t.amount, 'category': t.category, 'tx_type': t.tx_type,
-                'is_need': t.is_need, 'tx_date': t.tx_date} for t in txns]
-    budgets = Budget.query.filter_by(user_id=user_id).all()
-    budget_dict = {b.category: b.limit_amount for b in budgets}
-    scenarios = generate_scenarios(user_id, tx_list, budget_dict)
-    return jsonify({'scenarios': scenarios})
 
 @app.route('/api/longevity/<int:user_id>')
 @login_required
-def budget_longevity(user_id):
-    """Calculate how long current balance will last based on average daily spending."""
-    if session['user_id'] != user_id:
+def longevity(user_id):
+    current = get_current_user()
+    if current.id != user_id:
         return jsonify({'error': 'Forbidden'}), 403
-    txns = Transaction.query.filter_by(user_id=user_id).all()
-    balance = 0
-    total_expense = 0
-    for t in txns:
-        if t.tx_type == 'income':
-            balance += t.amount
-        else:
-            balance -= t.amount
-            total_expense += t.amount
-    if total_expense == 0:
-        return jsonify({'error': 'No expense data yet'}), 400
+    return jsonify(compute_longevity(user_id)), 200
 
-    now = datetime.datetime.utcnow()
-    thirty_days_ago = now - datetime.timedelta(days=30)
-    recent_expenses = [t for t in txns if t.tx_type == 'expense' and t.tx_date >= thirty_days_ago]
-    if recent_expenses:
-        avg_daily = sum(e.amount for e in recent_expenses) / 30.0
-    else:
-        avg_daily = total_expense / 30.0
-    if avg_daily <= 0:
-        return jsonify({'error': 'No spending to project'}), 400
 
-    days_left = balance / avg_daily if avg_daily > 0 else 0
-    hours_left = days_left * 24
-    weeks_left = days_left / 7
-    months_left = days_left / 30.44
-    years_left = days_left / 365.25
+@app.route('/api/export/csv')
+@login_required
+def export_csv():
+    user = get_current_user()
+    transactions = Transaction.query.filter_by(user_id=user.id).order_by(Transaction.tx_date.desc()).all()
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(['Date', 'Category', 'Type', 'Need?', 'Priority', 'Note', 'Amount'])
+    for t in transactions:
+        writer.writerow([
+            t.tx_date.strftime('%Y-%m-%d %H:%M'),
+            t.category,
+            t.tx_type,
+            'Need' if t.is_need else 'Want' if t.tx_type == 'expense' else '',
+            t.priority,
+            t.note,
+            t.amount
+        ])
+    response = Response(output.getvalue(), mimetype='text/csv')
+    response.headers.set('Content-Disposition', 'attachment', filename='transactions.csv')
+    return response
 
-    return jsonify({
-        'balance': balance,
-        'avg_daily_spend': round(avg_daily, 2),
-        'hours': round(max(0, hours_left), 1),
-        'days': round(max(0, days_left), 1),
-        'weeks': round(max(0, weeks_left), 1),
-        'months': round(max(0, months_left), 1),
-        'years': round(max(0, years_left), 2)
-    })
 
-# ---------- NEW: CHATBOT ENDPOINT ----------
 @app.route('/api/chat', methods=['POST'])
 @login_required
 def chat():
-    user_id = session['user_id']
+    """Fully AI-powered chatbot using Gemini – no hardcoded responses."""
+    user = get_current_user()
     data = request.json
-    msg = data.get('message', '').strip().lower()
-    if not msg:
-        return jsonify({'reply': "I didn't catch that. Ask me about your balance, budget, forecast, or health score."})
+    user_message = data.get('message', '')
 
-    # Gather all current data for the user
-    txns = Transaction.query.filter_by(user_id=user_id).all()
-    tx_list = [{'amount': t.amount, 'category': t.category, 'tx_type': t.tx_type,
-                'is_need': t.is_need, 'tx_date': t.tx_date} for t in txns]
-    budgets = Budget.query.filter_by(user_id=user_id).all()
-    budget_dict = {b.category: b.limit_amount for b in budgets}
-    profile = get_user_profile(user_id)
+    summary = get_monthly_summary(user.id)
+    recent_transactions = Transaction.query.filter_by(user_id=user.id).order_by(Transaction.tx_date.desc()).limit(10).all()
+    recent_list = [f"{t.category}: ₱{t.amount:.2f} on {t.tx_date.strftime('%Y-%m-%d')}" for t in recent_transactions]
+    health = compute_health_score(user.id)
+    advice = generate_advice(user.id)
+    future_cnt = FutureExpense.query.filter_by(user_id=user.id).count()
 
-    # Quick keywords
-    if any(word in msg for word in ['balance', 'how much money', 'net worth']):
-        balance = sum(t.amount if t.tx_type == 'income' else -t.amount for t in txns)
-        return jsonify({'reply': f"Your current balance is ₱{balance:,.2f}."})
+    prompt = f"""
+You are SmartSpend AI, a friendly personal finance assistant for {user.name}.
 
-    if 'health score' in msg or 'score' in msg:
-        score = calculate_health_score(tx_list, budget_dict)
-        return jsonify({'reply': f"Your ML Health Score is {score}/100. Keep expenses under control and save more to raise it."})
+Current snapshot:
+- Balance: ₱{summary['balance']:,.2f}
+- Monthly income: ₱{summary['income']:,.2f}
+- Monthly expenses: ₱{summary['expense']:,.2f}
+- Health score: {health}/100
+- Recent advice: {advice}
+- Number of future pinned expenses: {future_cnt}
 
-    if 'forecast' in msg or 'next week' in msg:
-        forecast = forecast_spending(tx_list)
-        lines = "\n".join([f"{k}: ₱{v:,.2f}" for k, v in forecast.items()])
-        return jsonify({'reply': f"📈 Weekly spending forecast:\n{lines}"})
+Recent transactions:
+{chr(10).join(recent_list) if recent_list else 'None'}
 
-    if 'longevity' in msg or 'how long' in msg:
-        balance = sum(t.amount if t.tx_type == 'income' else -t.amount for t in txns)
-        recent = [t for t in txns if t.tx_type == 'expense' and t.tx_date >= datetime.datetime.utcnow()-datetime.timedelta(days=30)]
-        if not recent:
-            return jsonify({'reply': "Not enough expense data to calculate longevity."})
-        avg_daily = sum(r.amount for r in recent) / 30.0
-        if avg_daily == 0:
-            return jsonify({'reply': "Your daily spending is zero – your balance will last indefinitely!"})
-        days = balance / avg_daily
-        weeks = days / 7
-        months = days / 30.44
-        return jsonify({'reply': f"💰 With an average daily spend of ₱{avg_daily:,.2f}, your balance will last about {days:.0f} days ({weeks:.1f} weeks, {months:.1f} months)."})
+User asks: "{user_message}"
 
-    if 'advice' in msg or 'tip' in msg:
-        advice = generate_advice(tx_list, budget_dict)
-        reply = "🧠 Smart Advice:\n" + "\n".join([f"- {a['cat']}: {a['msg']}" for a in advice])
-        return jsonify({'reply': reply})
+Provide helpful, actionable, concise advice (max 200 words). Include future insights, saving tips, and suggestions to reduce wants if needed. Never say you are an AI unless asked.
+"""
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = model.generate_content(prompt)
+        reply = response.text.strip()
+    except Exception as e:
+        print(f"Chat error: {e}")
+        reply = "Sorry, I'm having trouble connecting. Please try again later."
+    return jsonify({'reply': reply}), 200
 
-    if 'scenario' in msg or 'allocation' in msg or 'plan' in msg:
-        scenarios = generate_scenarios(user_id, tx_list, budget_dict)
-        reply = "📊 Budget Scenarios (apply one from the Add screen):\n"
-        for s in scenarios:
-            reply += f"\n🔹 {s['name']}: save ₱{s['savings_goal']:,}, invest ₱{s['investment_goal']:,}, limits: {s['budget_limits']}"
-        return jsonify({'reply': reply})
 
-    if 'budget limit' in msg or 'my limits' in msg:
-        if not budget_dict:
-            return jsonify({'reply': "You haven't set any budget limits yet. Go to the Add Transaction screen and use the AI Budget Engine."})
-        reply = "📋 Your current budget limits:\n" + "\n".join([f"- {cat}: ₱{limit:,.2f}" for cat, limit in budget_dict.items()])
-        return jsonify({'reply': reply})
+@app.route('/api/future_expenses', methods=['GET'])
+@login_required
+def get_future_expenses():
+    user = get_current_user()
+    expenses = FutureExpense.query.filter_by(user_id=user.id).order_by(FutureExpense.expense_date).all()
+    return jsonify([e.to_dict() for e in expenses]), 200
 
-    # fallback
-    return jsonify({'reply': "I can answer questions about your balance, health score, forecast, longevity, advice, scenarios, and budget limits. Try asking: 'Show my balance' or 'Give me a spending forecast'."})
 
-# ========== HTML FRONTEND (Updated – no Budgets panel, Chat added) ==========
+@app.route('/api/future_expenses', methods=['POST'])
+@login_required
+def create_future_expense():
+    user = get_current_user()
+    data = request.json
+    required = ['description', 'amount', 'category', 'date']
+    if not all(k in data for k in required):
+        return jsonify({'error': 'Missing fields'}), 400
+    expense = FutureExpense(
+        user_id=user.id,
+        description=data['description'],
+        amount=data['amount'],
+        category=data['category'],
+        cycle=data.get('cycle', 'One-time'),
+        expense_date=datetime.fromisoformat(data['date']).date()
+    )
+    db.session.add(expense)
+    db.session.commit()
+    return jsonify(expense.to_dict()), 201
+
+
+@app.route('/api/future_expenses/<int:exp_id>', methods=['DELETE'])
+@login_required
+def delete_future_expense(exp_id):
+    user = get_current_user()
+    expense = FutureExpense.query.get(exp_id)
+    if not expense or expense.user_id != user.id:
+        return jsonify({'error': 'Not found'}), 404
+    db.session.delete(expense)
+    db.session.commit()
+    return jsonify({'message': 'Deleted'}), 200
+
+
+@app.route('/api/allocations', methods=['GET'])
+@login_required
+def get_allocations():
+    user = get_current_user()
+    allocs = UserAllocation.query.filter_by(user_id=user.id).all()
+    return jsonify([{'category_name': a.category_name, 'type': a.type, 'percentage': a.percentage} for a in allocs]), 200
+
+
+@app.route('/api/allocations', methods=['POST'])
+@login_required
+def update_allocations():
+    user = get_current_user()
+    data = request.json
+    if not isinstance(data, list):
+        return jsonify({'error': 'Expected list of allocations'}), 400
+    UserAllocation.query.filter_by(user_id=user.id).delete()
+    for item in data:
+        alloc = UserAllocation(
+            user_id=user.id,
+            category_name=item['category_name'],
+            type=item['type'],
+            percentage=item['percentage']
+        )
+        db.session.add(alloc)
+    db.session.commit()
+    return jsonify({'message': 'Allocations saved'}), 200
+
+
+# ----------------------------------------------------------------------
+# Create tables and run migration
+# ----------------------------------------------------------------------
+with app.app_context():
+    db.create_all()
+    ensure_schema()
+
+
+# ----------------------------------------------------------------------
+# Embedded HTML (full frontend with draggable/resizable/undeletable chatbot)
+# ----------------------------------------------------------------------
 HTML_PAGE = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>SmartSpend · AI-Powered Finance</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SmartSpend - AI Finance</title>
     <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <style>
@@ -553,58 +862,144 @@ HTML_PAGE = """
         :root {
             --bg: #0a0f1a; --bg2: #0f1622; --bg3: #151e2d;
             --panel: rgba(21, 30, 45, 0.9); --border: rgba(0, 210, 130, 0.2);
-            --border2: rgba(255, 255, 255, 0.05); --green: #00d282;
-            --green-dim: rgba(0, 210, 130, 0.15); --red: #ff4d6d;
-            --blue: #3b82f6; --purple: #a855f7;
+            --border2: rgba(255, 255, 255, 0.05); --green: #00d282; --green2: #00ff9d;
+            --green-dim: rgba(0, 210, 130, 0.15); --red: #ff4d6d; --red-dim: rgba(255, 77, 109, 0.15);
+            --amber: #f0a500; --blue: #3b82f6; --purple: #a855f7;
             --muted: #6c86a0; --text: #e2eff8;
-            --sans: 'Space Grotesk', sans-serif; --r: 16px;
+            --mono: 'JetBrains Mono', monospace; --sans: 'Space Grotesk', sans-serif; --r: 16px;
         }
         body { font-family: var(--sans); background: var(--bg); color: var(--text); }
-        .sidebar { position: fixed; left: 0; top: 0; bottom: 0; width: 80px; background: rgba(15,22,34,0.98); backdrop-filter: blur(12px); border-right: 1px solid var(--border2); display: flex; flex-direction: column; align-items: center; padding: 24px 0; gap: 10px; z-index: 100; transition: width 0.3s; }
+        .sidebar { position: fixed; left: 0; top: 0; bottom: 0; width: 80px; background: rgba(15, 22, 34, 0.98); backdrop-filter: blur(12px); border-right: 1px solid var(--border2); display: flex; flex-direction: column; align-items: center; padding: 24px 0; gap: 10px; z-index: 100; transition: width 0.3s; }
         .sidebar:hover { width: 240px; }
-        .sidebar-logo { width: 48px; height: 48px; border-radius: 14px; background: linear-gradient(135deg, var(--green), #009e5f); display: flex; align-items: center; justify-content: center; margin-bottom: 28px; cursor: pointer; }
-        .nav-item { width: 100%; display: flex; align-items: center; gap: 16px; padding: 12px 24px; border-radius: 12px; cursor: pointer; background: transparent; color: var(--muted); white-space: nowrap; overflow: hidden; transition: all 0.2s; }
+        .sidebar-logo { width: 48px; height: 48px; border-radius: 14px; background: linear-gradient(135deg, var(--green), #009e5f); display: flex; align-items: center; justify-content: center; margin-bottom: 28px; cursor: pointer; font-size: 1.5rem; }
+        .nav-item { width: 100%; display: flex; align-items: center; gap: 16px; padding: 12px 24px; border-radius: 12px; cursor: pointer; border: none; background: transparent; color: var(--muted); font-size: 0.9rem; font-weight: 500; white-space: nowrap; overflow: hidden; transition: all 0.2s; }
         .nav-item:hover { background: var(--green-dim); color: var(--text); transform: translateX(6px); }
         .nav-item.active { background: var(--green-dim); color: var(--green); border-left: 3px solid var(--green); }
         .nav-label { opacity: 0; transition: opacity 0.2s; }
         .sidebar:hover .nav-label { opacity: 1; }
         .sidebar-bottom { margin-top: auto; width: 100%; }
-        .main { margin-left: 80px; padding: 24px 32px; }
+        .main { margin-left: 80px; padding: 24px 32px; min-height: 100vh; }
         @media (max-width: 768px) { .sidebar { width: 70px; } .main { margin-left: 70px; padding: 20px; } }
-        @media (max-width: 600px) { .sidebar { display: none; } .main { margin-left: 0; } }
-        .topbar { display: flex; justify-content: space-between; margin-bottom: 28px; flex-wrap: wrap; gap: 16px; }
-        .topbar h1 { background: linear-gradient(135deg, #fff, var(--green)); background-clip: text; -webkit-background-clip: text; color: transparent; }
+        .topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 28px; flex-wrap: wrap; gap: 16px; }
+        .topbar h1 { font-size: 1.75rem; font-weight: 700; background: linear-gradient(135deg, #fff, var(--green)); background-clip: text; -webkit-background-clip: text; color: transparent; }
         .score-pill { display: flex; align-items: center; gap: 10px; padding: 8px 20px; border-radius: 99px; background: var(--green-dim); border: 1px solid var(--border); font-size: 0.85rem; font-weight: 600; }
         .avatar { width: 42px; height: 42px; border-radius: 50%; background: linear-gradient(135deg, var(--blue), var(--purple)); display: flex; align-items: center; justify-content: center; font-weight: 700; cursor: pointer; }
-        .signout-btn { background: rgba(255,77,109,0.2); border: 1px solid rgba(255,77,109,0.2); color: var(--red); padding: 8px 18px; border-radius: 10px; cursor: pointer; }
+        .signout-btn { background: var(--red-dim); border: 1px solid rgba(255, 77, 109, 0.2); color: var(--red); padding: 8px 18px; border-radius: 10px; cursor: pointer; }
         .screen { display: none; animation: fadeUp 0.35s ease; }
         .screen.active { display: block; }
         @keyframes fadeUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
         .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 20px; margin-bottom: 28px; }
-        .stat-card { background: var(--panel); backdrop-filter: blur(10px); border: 1px solid var(--border2); border-radius: var(--r); padding: 22px; transition: all 0.25s; }
-        .stat-value { font-size: 1.8rem; font-weight: 700; font-family: monospace; }
+        .stat-card { background: var(--panel); backdrop-filter: blur(10px); border: 1px solid var(--border2); border-radius: var(--r); padding: 22px; cursor: pointer; }
+        .stat-value { font-size: 1.8rem; font-weight: 700; font-family: var(--mono); }
+        .stat-label { font-size: 0.7rem; text-transform: uppercase; color: var(--muted); margin-top: 8px; }
         .panel { background: var(--panel); backdrop-filter: blur(10px); border: 1px solid var(--border2); border-radius: var(--r); padding: 22px; margin-bottom: 20px; }
         .panel-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 12px; }
-        .btn-green { background: linear-gradient(135deg, var(--green), #009e5f); color: #000; border: none; padding: 10px 18px; border-radius: 10px; cursor: pointer; font-weight: 600; }
+        .btn { background: var(--bg3); color: var(--text); border: 1px solid var(--border2); border-radius: 10px; padding: 10px 14px; cursor: pointer; font-weight: 600; }
+        .btn-green { background: linear-gradient(135deg, var(--green), #009e5f); color: #000; border: none; }
+        .btn-ai { background: linear-gradient(135deg, var(--purple), var(--blue)); color: white; border: none; }
         input, select { background: var(--bg3); color: var(--text); border: 1px solid var(--border2); border-radius: 10px; padding: 10px 14px; outline: none; }
-        .flex-form { display: flex; flex-direction: column; gap: 16px; }
-        .need-checkbox { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
-        .longevity-card { background: var(--bg3); border-radius: 12px; padding: 16px; margin-top: 16px; }
-        .longevity-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px,1fr)); gap: 12px; margin-top: 12px; }
+        .cat-row { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; flex-wrap: wrap; }
+        .cat-row input[type="number"] { width: 80px; }
+        .allocation-box { background: var(--bg3); border-radius: 12px; padding: 16px; margin: 12px 0; }
+        .ml-badge { background: linear-gradient(135deg, var(--purple), var(--blue)); padding: 2px 8px; border-radius: 12px; font-size: 0.7rem; font-weight: 600; margin-left: 8px; }
+        .forecast-scenarios { display: flex; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
+        .scenario-card { background: var(--bg3); border-radius: 12px; padding: 12px; flex: 1; text-align: center; cursor: pointer; }
+        .scenario-card.active { border: 2px solid var(--green); background: var(--green-dim); }
+        .future-expense-item { background: var(--bg3); border-radius: 12px; padding: 12px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
+        .warning { color: var(--red); font-size: 0.8rem; margin-top: 8px; }
+        .last-expense-item { background: var(--bg3); border-radius: 10px; padding: 10px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
+        .forecast-row { display: flex; align-items: center; gap: 14px; margin-bottom: 14px; }
+        .forecast-week { width: 70px; font-weight: 600; color: var(--green); }
+        .forecast-bar-track { flex: 1; height: 8px; background: var(--bg3); border-radius: 99px; overflow: hidden; }
+        .forecast-bar-fill { height: 100%; background: linear-gradient(90deg, var(--green), var(--green2)); width: 0; border-radius: 99px; transition: width 1s ease; }
+        .form-row { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; align-items: center; }
+        .form-row > * { flex: 1; min-width: 120px; }
+        /* Chatbot styles (draggable, resizable, no close button) */
+        .chat-container {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            width: 380px;
+            height: 480px;
+            min-width: 280px;
+            min-height: 320px;
+            max-width: 80vw;
+            max-height: 80vh;
+            resize: both;
+            overflow: auto;
+            z-index: 10001;
+            cursor: default;
+        }
+        .chat-window {
+            width: 100%;
+            height: 100%;
+            background: var(--bg2);
+            backdrop-filter: blur(10px);
+            border: 1px solid var(--green);
+            border-radius: 24px;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+        }
+        .chat-header {
+            padding: 14px 18px;
+            background: var(--bg3);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            cursor: move;
+            user-select: none;
+        }
+        .chat-header span {
+            font-weight: 600;
+        }
+        .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .message {
+            max-width: 85%;
+            padding: 10px 14px;
+            border-radius: 18px;
+            font-size: 0.85rem;
+        }
+        .user-message {
+            align-self: flex-end;
+            background: var(--green-dim);
+            color: var(--green);
+            border-bottom-right-radius: 4px;
+        }
+        .bot-message {
+            align-self: flex-start;
+            background: var(--bg3);
+            color: var(--text);
+            border-bottom-left-radius: 4px;
+        }
+        .chat-input {
+            display: flex;
+            padding: 14px;
+            gap: 10px;
+            background: var(--bg3);
+            border-top: 1px solid var(--border);
+        }
+        #chatInput {
+            flex: 1;
+        }
+        #sendChatBtn {
+            background: var(--green-dim);
+            border: none;
+            color: var(--green);
+        }
+        #toast { position: fixed; bottom: 24px; right: 24px; background: var(--bg2); border: 1px solid var(--green); border-radius: 12px; padding: 12px 24px; opacity: 0; transition: all 0.25s; z-index: 10000; }
+        #toast.show { opacity: 1; }
         .auth-overlay { position: fixed; inset: 0; background: rgba(8,13,20,0.98); backdrop-filter: blur(20px); z-index: 9999; display: flex; align-items: center; justify-content: center; }
         .auth-card { background: linear-gradient(145deg, #0d1520, #0a1220); border: 1px solid rgba(0,210,130,0.2); border-radius: 28px; padding: 40px; width: 400px; max-width: 90%; }
-        .auth-input { width: 100%; margin-bottom: 14px; background: #0a1525; }
-        .auth-btn { width: 100%; padding: 14px; background: linear-gradient(135deg, #00d282, #009e5f); border: none; border-radius: 12px; color: #000; font-weight: 700; cursor: pointer; }
-        .toast { position: fixed; bottom: 24px; right: 24px; background: var(--bg2); border: 1px solid var(--green); border-radius: 12px; padding: 12px 24px; opacity: 0; transition: 0.25s; z-index: 10000; }
-        .toast.show { opacity: 1; }
-        /* Chat styles */
-        .chat-window { display: flex; flex-direction: column; height: 60vh; }
-        .chat-messages { flex: 1; overflow-y: auto; background: var(--bg3); border-radius: var(--r); padding: 16px; margin-bottom: 12px; }
-        .chat-bubble { margin-bottom: 12px; padding: 10px 14px; border-radius: 12px; max-width: 80%; }
-        .chat-bubble.user { background: var(--green-dim); color: var(--text); align-self: flex-end; }
-        .chat-bubble.bot { background: var(--border2); color: var(--text); align-self: flex-start; }
-        .chat-input-area { display: flex; gap: 8px; }
-        .chat-input-area input { flex: 1; }
     </style>
 </head>
 <body>
@@ -613,20 +1008,20 @@ HTML_PAGE = """
     <button class="nav-item active" data-nav="dashboard"><span class="nav-label">Dashboard</span></button>
     <button class="nav-item" data-nav="add"><span class="nav-label">Add Transaction</span></button>
     <button class="nav-item" data-nav="analytics"><span class="nav-label">Analytics</span></button>
-    <button class="nav-item" data-nav="chatbot"><span class="nav-label">Chat</span></button>       <!-- NEW -->
+    <button class="nav-item" data-nav="budgets"><span class="nav-label">Budgets</span></button>
     <button class="nav-item" data-nav="transactions"><span class="nav-label">History</span></button>
-    <div class="sidebar-bottom"><button class="nav-item" id="exportBtn"><span class="nav-label">Export</span></button></div>
+    <div class="sidebar-bottom"><button class="nav-item" id="exportBtn"><span class="nav-label">Export CSV</span></button></div>
 </nav>
 <main class="main">
     <div class="topbar">
-        <h1 id="pageTitle">Dashboard</h1>
-        <div class="topbar-right" style="display:flex; gap:16px; align-items:center;">
-            <div class="score-pill">Health: <strong id="topScore">—</strong></div>
+        <div><h1 id="pageTitle">Dashboard</h1></div>
+        <div class="topbar-right">
+            <div class="score-pill" id="scorePill"><div class="score-dot"></div><span>Health: <strong id="topScore">—</strong><span class="ml-badge">ML</span></span></div>
             <div class="avatar" id="userAvatar">US</div>
             <button class="signout-btn" id="signoutBtn">Sign Out</button>
         </div>
     </div>
-    <div id="toast" class="toast"></div>
+    <div id="toast"></div>
 
     <!-- DASHBOARD -->
     <div class="screen active" id="screen-dashboard">
@@ -637,116 +1032,354 @@ HTML_PAGE = """
             <div class="stat-card"><div class="stat-value" id="sScore">—</div><div class="stat-label">ML Health Score</div></div>
         </div>
         <div class="panel"><div class="panel-header">Income vs Expense Trend</div><canvas id="monthlyChart" height="200"></canvas></div>
-        <div class="panel"><div class="panel-header">Spending Forecast (4 weeks)</div><div id="forecastBars"></div></div>
+        <div class="panel"><div class="panel-header">ML Spending Forecast (4 weeks)</div><div id="forecastBars"></div></div>
         <div class="panel"><div class="panel-header">AI Advice</div><div id="adviceList"></div></div>
     </div>
 
-    <!-- ADD TRANSACTION -->
+    <!-- ADD TRANSACTION SCREEN (with transaction form + all AI features) -->
     <div class="screen" id="screen-add">
-        <div class="stats-grid">
-            <div class="panel">
-                <div class="panel-header">➕ Add Income</div>
-                <form id="incomeForm" class="flex-form">
-                    <input type="number" id="incomeAmount" placeholder="Amount (₱)" step="0.01" required>
-                    <input type="text" id="incomeNote" placeholder="Note (optional)">
-                    <button type="submit" class="btn-green">Record Income</button>
-                </form>
-            </div>
-            <div class="panel">
-                <div class="panel-header">📝 Record Expense (with Needs/Wants)</div>
-                <form id="expenseForm" class="flex-form">
-                    <input type="number" id="expenseAmount" placeholder="Amount (₱)" step="0.01" required>
-                    <select id="expenseCategory" required>
-                        <option value="Food & Dining">Food & Dining</option>
-                        <option value="Transport">Transport</option>
-                        <option value="Groceries">Groceries</option>
-                        <option value="Entertainment">Entertainment</option>
-                        <option value="Health">Health</option>
-                        <option value="Other">Other</option>
-                    </select>
-                    <label class="need-checkbox"><input type="checkbox" id="isNeed"> ✅ Mark as NEED (essential, higher budget priority)</label>
-                    <input type="text" id="expenseNote" placeholder="Note (optional)">
-                    <button type="submit" class="btn-green">Record Expense</button>
-                </form>
+        <!-- Transaction entry form -->
+        <div class="panel">
+            <div class="panel-header">📝 Add New Transaction</div>
+            <div class="form-row">
+                <input type="number" id="txAmount" placeholder="Amount (₱)" step="0.01">
+                <select id="txCategory">
+                    <option>Food & Dining</option><option>Transport</option><option>Groceries</option><option>Entertainment</option>
+                    <option>Health</option><option>Debt repayment</option><option>Mortgage</option><option>Subscription</option>
+                    <option>Hobbies</option><option>Salary</option><option>Other</option>
+                </select>
+                <select id="txType">
+                    <option value="expense">Expense</option>
+                    <option value="income">Income</option>
+                </select>
+                <select id="txNeedWant">
+                    <option value="need">Need</option>
+                    <option value="want">Want</option>
+                </select>
+                <select id="txPriority">
+                    <option value="0">Low</option><option value="1" selected>Medium</option>
+                    <option value="2">High</option><option value="3">Critical</option>
+                </select>
+                <input type="text" id="txNote" placeholder="Note (optional)">
+                <button id="submitTransactionBtn" class="btn btn-green">➕ Add Transaction</button>
             </div>
         </div>
+
+        <!-- AI Autonomous Budget Allocation (same as before) -->
         <div class="panel">
-            <div class="panel-header">🧠 AI Budget Engine</div>
-            <div style="display:flex; gap:16px; flex-wrap:wrap;">
-                <select id="socialStatus"><option>Low</option><option selected>Middle</option><option>Upper</option></select>
-                <select id="spendingMindset"><option>Saver</option><option selected>Neutral</option><option>Spender</option></select>
-                <button id="saveProfileBtn" class="btn-green">Save & Generate Scenarios</button>
+            <div class="panel-header">🧠 AI Autonomous Budget Allocation <span class="ml-badge">GEMINI AI</span></div>
+            <div style="display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 16px;">
+                <div style="flex:1;"><label>Monthly Budget (₱)</label><input type="number" id="monthlyBudgetCap" placeholder="Auto from income" step="100"></div>
+                <div style="flex:1;"><label>Social Status</label><select id="socialStatusDiagram"><option>Low</option><option selected>Middle</option><option>Upper</option></select></div>
+                <div style="flex:1;"><label>Mindset</label><select id="mindsetDiagram"><option>Saver</option><option selected>Neutral</option><option>Spender</option></select></div>
+                <div style="flex:1;"><label>Cycle</label><select id="budgetCycle"><option>Daily</option><option>Weekly</option><option selected>Monthly</option><option>Yearly</option></select></div>
             </div>
-            <div id="scenariosContainer" style="margin-top:20px;"></div>
+            <div style="text-align: right; margin-bottom: 10px;">
+                <button id="aiAutoAllocateBtn" class="btn btn-ai">🤖 AI Auto-Allocate (Gemini)</button>
+                <span class="ml-badge">100% autonomous</span>
+            </div>
+            <div id="categoryAllocationList"></div>
+            <div class="allocation-box" id="allocationDisplay">Needs: -- / Wants: -- / Savings: --</div>
+            <div class="pref-checkbox"><label><input type="checkbox" id="autoRemainingToWants" checked> Automatically allocate remaining % to Wants</label></div>
+            <div id="allocationWarning" class="warning" style="display: none;">⚠️ Total allocation must be 100%</div>
+        </div>
+
+        <!-- PIN FUTURE EXPENSE -->
+        <div class="panel">
+            <div class="panel-header">📌 PIN FUTURE EXPENSE</div>
+            <div style="display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 16px;">
+                <input type="text" id="futureDesc" placeholder="Description" style="flex:2">
+                <input type="number" id="futureAmount" placeholder="Amount (₱)" style="flex:1">
+                <select id="futureCategory"><option>Entertainment</option><option>Food & Dining</option><option>Transport</option><option>Groceries</option><option>Health</option><option>Other</option></select>
+                <select id="futureCycle"><option>One-time</option><option>Weekly</option><option>Monthly</option></select>
+                <input type="date" id="futureDate">
+                <button id="pinFutureExpenseBtn" class="btn btn-green">Pin Expense</button>
+                <button id="applyFutureBtn" class="btn btn-ai">💰 Process Pending Future Expenses</button>
+            </div>
+            <div id="futureExpensesList"></div>
+        </div>
+
+        <!-- LAST 3 EXPENSES -->
+        <div class="panel">
+            <div class="panel-header">📝 LAST 3 EXPENSES (History)</div>
+            <div id="lastExpenseList"></div>
+        </div>
+
+        <!-- ML FORECAST -->
+        <div class="panel">
+            <div class="panel-header">📈 ML FORECAST</div>
+            <select id="forecastScenarioSelect"><option value="optimistic">Optimistic</option><option value="realistic" selected>Realistic</option><option value="pessimistic">Pessimistic</option></select>
+            <button id="linkToAnalyticsBtn" class="btn">View in Analytics →</button>
+            <div id="forecastScenariosDisplay" class="forecast-scenarios"></div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header">⚙️ REAL‑TIME ML Preferences</div>
+            <label><input type="checkbox" id="prefAlertWant"> Alert me before any want expense</label>
+            <label><input type="checkbox" id="prefDailyForecast" checked> Show forecast summary</label>
+        </div>
+
+        <div class="panel budget-limit-panel">
+            <div class="panel-header">💰 Budget Limits (by category) <span class="auto-badge">auto-save</span></div>
+            <div id="budgetInputsAdd" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px;"></div>
         </div>
     </div>
 
-    <!-- ANALYTICS -->
+    <!-- ANALYTICS SCREEN -->
     <div class="screen" id="screen-analytics">
-        <div class="panel">
-            <div class="panel-header">⏳ Budget Longevity</div>
-            <div id="longevityContainer">Loading...</div>
-        </div>
+        <div class="panel"><div class="panel-header">⏳ Budget Longevity</div><div id="longevityContainer">Loading...</div></div>
         <div class="panel"><div class="panel-header">Weekly Forecast</div><canvas id="forecastChart" height="200"></canvas></div>
         <div class="panel"><div class="panel-header">Category Breakdown</div><canvas id="catBarChart" height="200"></canvas></div>
     </div>
 
-    <!-- CHATBOT (NEW) -->
-    <div class="screen" id="screen-chatbot">
-        <div class="panel chat-window">
-            <div class="panel-header">🤖 AI Finance Chat</div>
-            <div class="chat-messages" id="chatMessages"></div>
-            <div class="chat-input-area">
-                <input type="text" id="chatInput" placeholder="Ask me about your balance, forecast, scenarios...">
-                <button class="btn-green" id="chatSendBtn">Send</button>
-            </div>
-        </div>
+    <!-- BUDGETS SCREEN -->
+    <div class="screen" id="screen-budgets">
+        <div class="panel"><div class="panel-header">Set Monthly Budget Limits <span class="auto-badge">auto-save</span></div><div id="budgetInputsStandalone" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:16px;"></div></div>
     </div>
 
-    <!-- HISTORY -->
+    <!-- TRANSACTIONS SCREEN -->
     <div class="screen" id="screen-transactions">
-        <div class="table-wrap"><table><thead><tr><th>Date</th><th>Category</th><th>Need?</th><th>Note</th><th>Type</th><th>Amount</th></tr></thead><tbody id="txTableBody"></tbody></table></div>
+        <div class="table-wrap"><table><thead><th>Date</th><th>Category</th><th>Need?</th><th>Priority</th><th>Note</th><th>Type</th><th>Amount</th></thead><tbody id="txTableBody"></tbody></table></div>
     </div>
 
-    <!-- AUTH -->
-    <div id="authOverlay" class="auth-overlay">
-        <div class="auth-card"><h2 id="authTitle">Welcome back</h2>
-        <input type="text" id="regName" class="auth-input" placeholder="Full Name" style="display:none">
-        <input type="email" id="authEmail" class="auth-input" placeholder="Email">
-        <input type="password" id="authPass" class="auth-input" placeholder="Password">
-        <input type="password" id="authConfirm" class="auth-input" placeholder="Confirm Password" style="display:none">
-        <div id="termsRow" style="display:none;"><label><input type="checkbox" id="termsCheck"> Accept Terms</label></div>
-        <div id="authMsg" style="color:#ff4d6d;"></div>
-        <button id="authBtn" class="auth-btn">Sign In</button>
-        <div id="toggleAuthLink" class="auth-link" style="cursor:pointer; margin-top:12px;">Don't have an account? Register</div>
+    <!-- AUTH OVERLAY -->
+    <div id="authOverlay" class="auth-overlay"><div class="auth-card"><h2 id="authTitle">Welcome back</h2><input type="text" id="regName" placeholder="Full Name" style="display:none"><input type="email" id="authEmail" placeholder="Email"><input type="password" id="authPass" placeholder="Password"><input type="password" id="authConfirm" placeholder="Confirm Password" style="display:none"><div id="termsRow" style="display:none;"><label><input type="checkbox" id="termsCheck"> Accept Terms</label></div><div id="authMsg" style="color:#ff4d6d;"></div><button id="authBtn">Sign In</button><div id="toggleAuthLink">Don't have an account? Register</div></div></div>
+
+    <!-- CHATBOT (draggable, resizable, no close button) -->
+    <div id="chatContainer" class="chat-container">
+        <div class="chat-window">
+            <div class="chat-header" id="chatHeader">
+                <span>🤖 SmartSpend AI <span class="ml-badge">Gemini</span></span>
+                <!-- No close button - undeletable -->
+            </div>
+            <div class="chat-messages" id="chatMessages">
+                <div class="message bot-message">💬 I'm SmartSpend AI. Ask me about your spending, savings, future expenses, or how to improve your finances.</div>
+            </div>
+            <div class="chat-input">
+                <input id="chatInput" placeholder="Ask...">
+                <button id="sendChatBtn">Send</button>
+            </div>
         </div>
     </div>
 </main>
 
 <script>
-let currentUser = null;
-let allTransactions = [];
-let currentSummary = { balance:0, expense:0, income:0 };
-let currentPrediction = { has_data:false, score:null, predictions:{ weekly:{}, categories:{} }, advice:[] };
-let monthlyChart, forecastChart, catBarChart;
-let isLogin = true;
-
+let currentUser = null, allTransactions = [], currentSummary = { balance:0, expense:0, income:0 }, currentPrediction = { has_data:false, score:null, predictions:{ weekly:{}, categories:{} }, advice:[] };
+let monthlyChart, forecastChart, catBarChart, isLogin = true;
+const PRIO_MAP = {0:'Low',1:'Medium',2:'High',3:'Critical'};
 function fmt(amt) { return '₱' + Number(amt).toLocaleString('en-PH', { minimumFractionDigits:2 }); }
 function toast(msg) { let t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2500); }
-async function apiFetch(url, opts={}) {
-    let res = await fetch(url, {...opts, credentials:'include', headers:{'Content-Type':'application/json'}});
-    if(!res.ok) throw new Error((await res.json()).error || 'Request failed');
-    return res.json();
+async function apiFetch(url, opts={}) { let res = await fetch(url, {...opts, credentials:'include', headers:{'Content-Type':'application/json'}}); if(!res.ok) throw new Error((await res.json()).error); return res.json(); }
+
+// Category config
+let categoryConfig = [
+    { name: "Food & dining", defaultPct: 0, type: "need" },
+    { name: "Debt repayment", defaultPct: 0, type: "need" },
+    { name: "Mortgage", defaultPct: 0, type: "need" },
+    { name: "Entertainment", defaultPct: 0, type: "want" },
+    { name: "Transport", defaultPct: 0, type: "need" },
+    { name: "Subscription", defaultPct: 0, type: "want" },
+    { name: "Hobbies", defaultPct: 0, type: "want" }
+];
+
+function renderCategoryAllocation() {
+    let container = document.getElementById('categoryAllocationList');
+    let html = '';
+    categoryConfig.forEach((cat, idx) => {
+        html += `<div class="cat-row">
+            <select class="need-want" data-idx="${idx}">
+                <option value="need" ${cat.type === 'need' ? 'selected' : ''}>Need</option>
+                <option value="want" ${cat.type === 'want' ? 'selected' : ''}>Want</option>
+            </select>
+            <label><input type="checkbox" class="cat-enabled" data-idx="${idx}" ${cat.pct > 0 ? 'checked' : ''}> ${cat.name}</label>
+            <input type="number" class="cat-pct" data-idx="${idx}" value="${cat.pct || 0}" step="1" min="0" max="100" style="width:80px;"> %
+        </div>`;
+    });
+    container.innerHTML = html;
+    document.querySelectorAll('.need-want').forEach(sel => sel.addEventListener('change', updateAllocationFromCategories));
+    document.querySelectorAll('.cat-enabled').forEach(chk => chk.addEventListener('change', () => { updateAllocationFromCategories(); validateAllocation(); }));
+    document.querySelectorAll('.cat-pct').forEach(inp => inp.addEventListener('input', () => { updateAllocationFromCategories(); validateAllocation(); }));
 }
+
+function updateAllocationFromCategories() {
+    let selected = [];
+    for (let i = 0; i < categoryConfig.length; i++) {
+        let enabled = document.querySelector(`.cat-enabled[data-idx="${i}"]`)?.checked;
+        let type = document.querySelector(`.need-want[data-idx="${i}"]`)?.value;
+        let pct = parseFloat(document.querySelector(`.cat-pct[data-idx="${i}"]`)?.value || 0);
+        if (enabled && pct > 0) selected.push({ name: categoryConfig[i].name, type, pct });
+    }
+    let totalNeedPct = selected.filter(c => c.type === 'need').reduce((s,c)=>s+c.pct,0);
+    let totalWantPct = selected.filter(c => c.type === 'want').reduce((s,c)=>s+c.pct,0);
+    let auto = document.getElementById('autoRemainingToWants').checked;
+    if (auto && (totalNeedPct + totalWantPct) < 100) totalWantPct = 100 - totalNeedPct;
+    totalNeedPct = Math.min(100, totalNeedPct);
+    totalWantPct = Math.min(100 - totalNeedPct, totalWantPct);
+    let budget = parseFloat(document.getElementById('monthlyBudgetCap').value) || 10000;
+    let needAmount = budget * totalNeedPct / 100;
+    let wantAmount = budget * totalWantPct / 100;
+    let savings = budget - needAmount - wantAmount;
+    document.getElementById('allocationDisplay').innerHTML = `Needs (${totalNeedPct}%): ${fmt(needAmount)} 🔒 | Wants (${totalWantPct}%): ${fmt(wantAmount)} ⚡ | Savings (${(savings/budget*100).toFixed(0)}%): ${fmt(savings)} 🏦`;
+}
+
+function validateAllocation() {
+    let total = 0;
+    for (let i = 0; i < categoryConfig.length; i++) {
+        if (document.querySelector(`.cat-enabled[data-idx="${i}"]`)?.checked) {
+            total += parseFloat(document.querySelector(`.cat-pct[data-idx="${i}"]`)?.value || 0);
+        }
+    }
+    let warn = document.getElementById('allocationWarning');
+    if (Math.abs(total - 100) > 0.01) { warn.style.display = 'block'; warn.innerText = `⚠️ Total is ${total}% – must be 100%.`; }
+    else { warn.style.display = 'none'; }
+}
+
+async function aiAutoAllocate() {
+    if (!currentUser) return;
+    let selected = [];
+    for (let i = 0; i < categoryConfig.length; i++) {
+        if (document.querySelector(`.cat-enabled[data-idx="${i}"]`)?.checked) selected.push(categoryConfig[i].name);
+    }
+    if (selected.length === 0) { toast("Check at least one category"); return; }
+    toast("🤖 AI allocating...");
+    let budget = parseFloat(document.getElementById('monthlyBudgetCap').value) || 10000;
+    try {
+        let res = await apiFetch('/api/ai_allocate', { method: 'POST', body: JSON.stringify({ categories: selected, monthly_budget: budget }) });
+        let alloc = res.allocation;
+        for (let i = 0; i < categoryConfig.length; i++) {
+            let cat = categoryConfig[i].name;
+            if (alloc[cat] !== undefined) {
+                let inp = document.querySelector(`.cat-pct[data-idx="${i}"]`);
+                if (inp) inp.value = alloc[cat].toFixed(1);
+                let chk = document.querySelector(`.cat-enabled[data-idx="${i}"]`);
+                if (chk && !chk.checked) chk.checked = true;
+            }
+        }
+        updateAllocationFromCategories();
+        validateAllocation();
+        toast("✅ AI allocation complete! Total 100%");
+    } catch(e) { toast("AI failed, using fallback"); console.error(e); }
+}
+
+let futureExpenses = [];
+function renderFutureExpenses() {
+    let container = document.getElementById('futureExpensesList');
+    if (!container) return;
+    if (futureExpenses.length === 0) { container.innerHTML = '<div class="future-expense-item">No pinned future expenses.</div>'; return; }
+    let html = '';
+    futureExpenses.forEach((exp, idx) => {
+        html += `<div class="future-expense-item"><div><strong>${exp.description}</strong><br>${fmt(exp.amount)} | ${exp.category} | ${exp.cycle} | ${exp.date}</div><button class="btn" data-future-idx="${idx}" style="background:var(--red-dim);">Delete</button></div>`;
+    });
+    container.innerHTML = html;
+    document.querySelectorAll('[data-future-idx]').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+            let idx = parseInt(btn.dataset.futureIdx);
+            let id = futureExpenses[idx].id;
+            try { await apiFetch(`/api/future_expenses/${id}`, { method: 'DELETE' }); toast('Future expense removed'); await loadFutureExpenses(); } catch(e) { toast('Delete failed'); }
+        });
+    });
+}
+document.getElementById('pinFutureExpenseBtn')?.addEventListener('click', async () => {
+    let desc = document.getElementById('futureDesc').value.trim();
+    let amount = parseFloat(document.getElementById('futureAmount').value);
+    let category = document.getElementById('futureCategory').value;
+    let cycle = document.getElementById('futureCycle').value;
+    let date = document.getElementById('futureDate').value;
+    if (!desc || isNaN(amount) || amount<=0 || !date) { toast("Fill all fields"); return; }
+    try {
+        let res = await apiFetch('/api/future_expenses', { method: 'POST', body: JSON.stringify({ description: desc, amount, category, cycle, date }) });
+        toast('Future expense pinned');
+        await loadFutureExpenses();
+        document.getElementById('futureDesc').value = '';
+        document.getElementById('futureAmount').value = '';
+        document.getElementById('futureDate').value = '';
+    } catch(e) { toast('Error pinning'); }
+});
+document.getElementById('applyFutureBtn')?.addEventListener('click', async () => {
+    toast("Processing pending future expenses...");
+    try { let res = await apiFetch('/api/apply_future_expenses', { method: 'POST' }); toast(`Applied ${res.count} expenses.`); await loadDashboard(); loadFutureExpenses(); } catch(e) { toast("Error applying"); }
+});
+async function loadFutureExpenses() { try { futureExpenses = await apiFetch('/api/future_expenses'); renderFutureExpenses(); } catch(e) {} }
+
+async function updateLastExpenses() {
+    let expenses = allTransactions.filter(t=>t.tx_type==='expense').sort((a,b)=>new Date(b.tx_date)-new Date(a.tx_date)).slice(0,3);
+    let container = document.getElementById('lastExpenseList');
+    if (!container) return;
+    if (expenses.length === 0) { container.innerHTML = '<div>No expenses yet.</div>'; return; }
+    let html = '';
+    expenses.forEach((exp, idx) => {
+        html += `<div class="last-expense-item"><strong>${exp.category}</strong>: ${fmt(exp.amount)} (${exp.is_need ? 'Need' : 'Want'})<br><small>${new Date(exp.tx_date).toLocaleDateString()}</small>${idx===0 ? `<button class="btn small" id="toggleLastBtn">Mark as ${exp.is_need ? 'Want' : 'Need'}</button>` : ''}</div>`;
+    });
+    container.innerHTML = html;
+    let toggleBtn = document.getElementById('toggleLastBtn');
+    if (toggleBtn && expenses[0]) {
+        toggleBtn.addEventListener('click', async () => {
+            let last = expenses[0];
+            await apiFetch(`/api/transactions/${last.id}`, { method:'PATCH', body:JSON.stringify({ is_need: !last.is_need }) });
+            toast("Updated! Reloading...");
+            await loadDashboard();
+            updateLastExpenses();
+        });
+    }
+}
+
+async function updateForecastScenarios() {
+    if(!currentUser) return;
+    let monthlyBudget = parseFloat(document.getElementById('monthlyBudgetCap').value) || (currentSummary.income || 10000);
+    let expenses = allTransactions.filter(t=>t.tx_type==='expense');
+    let now = new Date();
+    let cycle = document.getElementById('budgetCycle').value;
+    let startOfCycle, totalDays;
+    if(cycle === 'Daily') { startOfCycle = new Date(now.getFullYear(), now.getMonth(), now.getDate()); totalDays = 1; }
+    else if(cycle === 'Weekly') { let day = now.getDay(); startOfCycle = new Date(now); startOfCycle.setDate(now.getDate() - day); totalDays = 7; }
+    else if(cycle === 'Monthly') { startOfCycle = new Date(now.getFullYear(), now.getMonth(), 1); totalDays = new Date(now.getFullYear(), now.getMonth()+1, 0).getDate(); }
+    else { startOfCycle = new Date(now.getFullYear(), 0, 1); totalDays = 366; }
+    let spentThisCycle = expenses.filter(e=> new Date(e.tx_date) >= startOfCycle).reduce((s,e)=>s+e.amount,0);
+    let daysElapsed = Math.min(totalDays, Math.floor((now - startOfCycle) / (1000*60*60*24)));
+    let remainingDays = Math.max(1, totalDays - daysElapsed);
+    let avgDailySpent = spentThisCycle / Math.max(1, daysElapsed);
+    let realisticRemaining = avgDailySpent * remainingDays;
+    let optimisticRemaining = (avgDailySpent * 0.8) * remainingDays;
+    let pessimisticRemaining = (avgDailySpent * 1.2) * remainingDays;
+    let remainingBudget = monthlyBudget - spentThisCycle;
+    let opt = Math.max(0, remainingBudget - optimisticRemaining);
+    let real = Math.max(0, remainingBudget - realisticRemaining);
+    let pess = Math.max(0, remainingBudget - pessimisticRemaining);
+    document.getElementById('forecastOpt').innerText = fmt(opt);
+    document.getElementById('forecastReal').innerText = fmt(real);
+    document.getElementById('forecastPess').innerText = fmt(pess);
+    let selected = document.getElementById('forecastScenarioSelect').value;
+    document.querySelectorAll('.scenario-card').forEach(card => {
+        let scenario = card.dataset.scenario;
+        if(scenario === selected) card.classList.add('active');
+        else card.classList.remove('active');
+    });
+}
+document.getElementById('forecastScenarioSelect')?.addEventListener('change', updateForecastScenarios);
+document.getElementById('linkToAnalyticsBtn')?.addEventListener('click', () => navigate('analytics'));
+
+async function updateMLDiagram() {
+    if(!currentUser) return;
+    let incomeTotal = allTransactions.filter(t=>t.tx_type==='income').reduce((s,t)=>s+t.amount,0);
+    let budget = parseFloat(document.getElementById('monthlyBudgetCap').value) || incomeTotal || 10000;
+    updateAllocationFromCategories();
+    await updateForecastScenarios();
+    let status = document.getElementById('socialStatusDiagram').value;
+    let mindset = document.getElementById('mindsetDiagram').value;
+    await apiFetch('/api/user/profile', { method:'POST', body:JSON.stringify({ social_status:status, spending_mindset:mindset }) });
+}
+async function autoSaveBudget(cat, val) { if(!currentUser) return; if(val && !isNaN(parseFloat(val)) && parseFloat(val)>0) { await apiFetch(`/api/budgets/${currentUser.id}`, { method:'POST', body:JSON.stringify({ category: cat, limit: parseFloat(val) }) }); toast(`Saved ${cat} limit`); } }
+function attachAutoSave(container, cats) { cats.forEach(cat=>{ let inp = document.getElementById(`${container}_${cat.replace(/\\s/g,'')}`); if(inp && !inp.hasAttribute('data-auto')){ inp.setAttribute('data-auto','true'); inp.addEventListener('change',()=>autoSaveBudget(cat,inp.value)); } }); }
+async function loadBudgetsForAdd() { let budgets = await apiFetch(`/api/budgets/${currentUser.id}`); let limits = Object.fromEntries(budgets.map(b=>[b.category, b.limit])); let cats = ['Food & Dining','Transport','Groceries','Entertainment','Health','Other']; let html = cats.map(c=>`<div><label>${c}</label><input type="number" id="budgetAdd_${c.replace(/\\s/g,'')}" value="${limits[c]||''}" placeholder="₱ limit"></div>`).join(''); document.getElementById('budgetInputsAdd').innerHTML = html; attachAutoSave('budgetAdd', cats); }
+async function loadBudgetsStandalone() { let budgets = await apiFetch(`/api/budgets/${currentUser.id}`); let limits = Object.fromEntries(budgets.map(b=>[b.category, b.limit])); let cats = ['Food & Dining','Transport','Groceries','Entertainment','Health','Other']; let html = cats.map(c=>`<div><label>${c}</label><input type="number" id="budgetStand_${c.replace(/\\s/g,'')}" value="${limits[c]||''}" placeholder="₱ limit"></div>`).join(''); document.getElementById('budgetInputsStandalone').innerHTML = html; attachAutoSave('budgetStand', cats); }
 
 async function loadDashboard() {
     if(!currentUser) return;
     try {
         let summary = await apiFetch(`/api/summary/${currentUser.id}`);
         let pred = await apiFetch(`/api/predict/${currentUser.id}`);
-        allTransactions = await apiFetch(`/api/transactions?user_id=${currentUser.id}`);
-        currentSummary = summary;
-        currentPrediction = pred;
+        allTransactions = await apiFetch(`/api/transactions`);
+        currentSummary = summary; currentPrediction = pred;
         document.getElementById('sBalance').innerText = fmt(summary.balance);
         document.getElementById('sExpense').innerText = fmt(summary.expense);
         document.getElementById('sIncome').innerText = fmt(summary.income);
@@ -756,169 +1389,110 @@ async function loadDashboard() {
         if(pred.has_data) {
             let weeks = pred.predictions.weekly;
             let maxVal = Math.max(...Object.values(weeks),1);
-            document.getElementById('forecastBars').innerHTML = Object.entries(weeks).map(([w,v])=>`<div>${w}: ${fmt(v)}</div>`).join('');
-            document.getElementById('adviceList').innerHTML = pred.advice.map(a=>`<div>🔹 ${a.cat}: ${a.msg}</div>`).join('');
+            document.getElementById('forecastBars').innerHTML = Object.entries(weeks).map(([w,v])=>`<div class="forecast-row"><span class="forecast-week">${w}</span><div class="forecast-bar-track"><div class="forecast-bar-fill" style="width:${(v/maxVal*100)}%"></div></div><span>${fmt(v)}</span></div>`).join('');
+            document.getElementById('adviceList').innerHTML = pred.advice.map(a=>`<div class="advice-item"><strong>${a.cat}:</strong> ${a.msg}</div>`).join('');
             if(monthlyChart) monthlyChart.destroy();
             let months = Object.keys(summary.monthly).slice(-6);
-            monthlyChart = new Chart(document.getElementById('monthlyChart'), {
-                type:'bar', data:{ labels:months, datasets:[
-                    { label:'Income', data:months.map(m=>summary.monthly[m]?.income||0), backgroundColor:'rgba(0,210,130,0.6)' },
-                    { label:'Expense', data:months.map(m=>summary.monthly[m]?.expense||0), backgroundColor:'rgba(255,77,109,0.6)' }
-                ]}
-            });
+            monthlyChart = new Chart(document.getElementById('monthlyChart'), { type:'bar', data:{ labels:months, datasets:[{ label:'Income', data:months.map(m=>summary.monthly[m]?.income||0), backgroundColor:'rgba(0,210,130,0.6)' },{ label:'Expense', data:months.map(m=>summary.monthly[m]?.expense||0), backgroundColor:'rgba(255,77,109,0.6)' }] } });
         }
         renderTransactions();
         loadAnalytics();
-    } catch(e) { toast('Error loading data'); }
+        updateLastExpenses();
+        updateMLDiagram();
+        await loadBudgetsForAdd();
+        await loadBudgetsStandalone();
+    } catch(e) { toast('Error loading data'); console.error(e); }
 }
-
+function renderTransactions() { document.getElementById('txTableBody').innerHTML = allTransactions.slice(0,50).map(t=>`<tr><td>${new Date(t.tx_date).toLocaleDateString()}</td><td>${t.category}</td><td>${t.is_need ? 'Need' : 'Want'}</td><td>${PRIO_MAP[t.priority] || ''}</td><td>${t.note||''}</td><td>${t.tx_type}</td><td>${fmt(t.amount)}</td></tr>`).join(''); }
 async function loadAnalytics() {
     if(!currentUser) return;
     try {
         let longevity = await apiFetch(`/api/longevity/${currentUser.id}`);
-        document.getElementById('longevityContainer').innerHTML = `<div class="longevity-card"><strong>💰 Current Balance:</strong> ${fmt(longevity.balance)}<br>
-        <strong>📉 Avg Daily Spend:</strong> ${fmt(longevity.avg_daily_spend)}<br><div class="longevity-grid">
-        <div>⏱️ Hours: ${longevity.hours}</div><div>📅 Days: ${longevity.days}</div><div>📆 Weeks: ${longevity.weeks}</div>
-        <div>🗓️ Months: ${longevity.months}</div><div>📅 Years: ${longevity.years}</div></div></div>`;
-    } catch(e) { document.getElementById('longevityContainer').innerHTML = '<div class="panel">Add some expenses first.</div>'; }
+        document.getElementById('longevityContainer').innerHTML = `<div>💰 Balance: ${fmt(longevity.balance)}<br>📉 Avg Daily: ${fmt(longevity.avg_daily_spend)}<br>📅 Days left: ${longevity.days}</div>`;
+    } catch(e) {}
     if(currentPrediction.has_data) {
         if(forecastChart) forecastChart.destroy();
-        forecastChart = new Chart(document.getElementById('forecastChart'), {
-            type:'line', data:{ labels:Object.keys(currentPrediction.predictions.weekly), datasets:[{ label:'Forecast', data:Object.values(currentPrediction.predictions.weekly), borderColor:'#00d282' }] }
-        });
+        forecastChart = new Chart(document.getElementById('forecastChart'), { type:'line', data:{ labels:Object.keys(currentPrediction.predictions.weekly), datasets:[{ label:'ML Forecast', data:Object.values(currentPrediction.predictions.weekly), borderColor:'#00d282' }] } });
         if(catBarChart) catBarChart.destroy();
-        catBarChart = new Chart(document.getElementById('catBarChart'), {
-            type:'bar', data:{ labels:Object.keys(currentPrediction.predictions.categories), datasets:[{ label:'Spent', data:Object.values(currentPrediction.predictions.categories), backgroundColor:'#3b82f6' }] }, options:{ indexAxis:'y' }
-        });
+        catBarChart = new Chart(document.getElementById('catBarChart'), { type:'bar', data:{ labels:Object.keys(currentPrediction.predictions.categories), datasets:[{ label:'Spent', data:Object.values(currentPrediction.predictions.categories), backgroundColor:'#3b82f6' }] }, options:{ indexAxis:'y' } });
     }
 }
 
-function renderTransactions() {
-    document.getElementById('txTableBody').innerHTML = allTransactions.slice(0,50).map(t=>`<tr><td>${new Date(t.tx_date).toLocaleDateString()}</td><td>${t.category}</td><td>${t.is_need ? '✅ Need' : '⚪ Want'}</td><td>${t.note||''}</td><td>${t.tx_type}</td><td>${fmt(t.amount)}</td></tr>`).join('');
-}
-
-async function saveProfileAndGenerate() {
-    let social = document.getElementById('socialStatus').value;
-    let mindset = document.getElementById('spendingMindset').value;
-    await apiFetch('/api/user/profile', { method:'POST', body:JSON.stringify({ social_status:social, spending_mindset:mindset }) });
-    toast('Profile saved. Generating scenarios...');
-    let res = await apiFetch(`/api/budget/scenarios/${currentUser.id}`);
-    let container = document.getElementById('scenariosContainer');
-    if(!res.scenarios.length) { container.innerHTML = '<div>No data yet.</div>'; return; }
-    container.innerHTML = '<h4>ML Scenarios</h4>';
-    for(let s of res.scenarios) {
-        let div = document.createElement('div');
-        div.className = 'panel';
-        div.innerHTML = `<strong>${s.name}</strong><br>Savings Goal: ${fmt(s.savings_goal)} | Investment: ${fmt(s.investment_goal)}<br>
-        <button class="btn-green" onclick='applyBudgets(${JSON.stringify(s.budget_limits)})'>Apply Budgets</button>`;
-        container.appendChild(div);
-    }
-}
-window.applyBudgets = async (limits) => {
-    await apiFetch(`/api/budgets/bulk/${currentUser.id}`, { method:'POST', body:JSON.stringify({ limits }) });
-    toast('Budgets applied!');
-    await loadDashboard();
-};
-
-// Income & Expense forms
-document.getElementById('incomeForm').addEventListener('submit', async(e)=>{
-    e.preventDefault();
-    let amount = parseFloat(document.getElementById('incomeAmount').value);
-    let note = document.getElementById('incomeNote').value;
-    await apiFetch('/api/transactions', { method:'POST', body:JSON.stringify({ amount, category:'Income', tx_type:'income', note }) });
-    toast('Income recorded');
-    document.getElementById('incomeForm').reset();
-    await loadDashboard();
-});
-document.getElementById('expenseForm').addEventListener('submit', async(e)=>{
-    e.preventDefault();
-    let amount = parseFloat(document.getElementById('expenseAmount').value);
-    let category = document.getElementById('expenseCategory').value;
-    let isNeed = document.getElementById('isNeed').checked;
-    let note = document.getElementById('expenseNote').value;
-    await apiFetch('/api/transactions', { method:'POST', body:JSON.stringify({ amount, category, tx_type:'expense', is_need:isNeed, note }) });
-    toast('Expense recorded');
-    document.getElementById('expenseForm').reset();
-    document.getElementById('isNeed').checked = false;
-    await loadDashboard();
-});
-
-// Navigation
-document.querySelectorAll('.nav-item').forEach(btn=>btn.addEventListener('click',()=>{ let scr = btn.dataset.nav; if(scr) navigate(scr); }));
 function navigate(screenId) {
     document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
     document.getElementById(`screen-${screenId}`).classList.add('active');
-    if(screenId === 'analytics') loadAnalytics();
-    // No separate budgets screen to load
     document.getElementById('pageTitle').innerText = screenId.charAt(0).toUpperCase()+screenId.slice(1);
+    if(screenId === 'analytics') loadAnalytics();
+    if(screenId === 'add') { updateMLDiagram(); loadBudgetsForAdd(); renderCategoryAllocation(); updateAllocationFromCategories(); renderFutureExpenses(); validateAllocation(); updateLastExpenses(); }
+    if(screenId === 'budgets') loadBudgetsStandalone();
 }
-document.getElementById('saveProfileBtn').addEventListener('click', saveProfileAndGenerate);
-
-// Chatbot
-async function sendChatMessage() {
-    let input = document.getElementById('chatInput');
-    let msg = input.value.trim();
-    if(!msg) return;
-    let chatDiv = document.getElementById('chatMessages');
-    chatDiv.innerHTML += `<div class="chat-bubble user">${msg}</div>`;
-    input.value = '';
-    chatDiv.scrollTop = chatDiv.scrollHeight;
-    try {
-        let res = await apiFetch('/api/chat', { method:'POST', body:JSON.stringify({ message: msg }) });
-        chatDiv.innerHTML += `<div class="chat-bubble bot">${res.reply.replace(/\\n/g,'<br>')}</div>`;
-    } catch {
-        chatDiv.innerHTML += `<div class="chat-bubble bot">⚠️ Could not get a reply.</div>`;
-    }
-    chatDiv.scrollTop = chatDiv.scrollHeight;
-}
-document.getElementById('chatSendBtn').addEventListener('click', sendChatMessage);
-document.getElementById('chatInput').addEventListener('keypress', (e)=>{ if(e.key==='Enter') sendChatMessage(); });
-
-// Auth
+document.querySelectorAll('.nav-item').forEach(btn=>btn.addEventListener('click',()=>{ let scr = btn.dataset.nav; if(scr) navigate(scr); }));
+document.getElementById('exportBtn').addEventListener('click', ()=> window.location.href='/api/export/csv');
 document.getElementById('signoutBtn').addEventListener('click', async()=>{ await fetch('/api/logout',{method:'POST',credentials:'include'}); location.reload(); });
-document.getElementById('toggleAuthLink').addEventListener('click',()=>{
-    isLogin=!isLogin;
-    document.getElementById('authTitle').innerText = isLogin ? 'Welcome back' : 'Create Account';
-    document.getElementById('regName').style.display = isLogin ? 'none' : 'block';
-    document.getElementById('authConfirm').style.display = isLogin ? 'none' : 'block';
-    document.getElementById('termsRow').style.display = isLogin ? 'none' : 'block';
-    document.getElementById('authBtn').innerText = isLogin ? 'Sign In' : 'Create Account';
-    document.getElementById('toggleAuthLink').innerHTML = isLogin ? "Don't have an account? Register" : "Already have an account? Sign In";
-});
-document.getElementById('authBtn').addEventListener('click', async()=>{
-    let email = document.getElementById('authEmail').value;
-    let pass = document.getElementById('authPass').value;
-    if(!isLogin) {
-        let name = document.getElementById('regName').value;
-        let confirm = document.getElementById('authConfirm').value;
-        let terms = document.getElementById('termsCheck').checked;
-        if(pass !== confirm) { document.getElementById('authMsg').innerText='Passwords mismatch'; return; }
-        if(!terms) { document.getElementById('authMsg').innerText='Accept terms'; return; }
-        await fetch('/api/register', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ name, email, password:pass, accepted_terms:true }), credentials:'include' });
-        document.getElementById('authMsg').innerText='Account created! Please login.';
-        setTimeout(()=>document.getElementById('toggleAuthLink').click(),1500);
-        return;
-    }
-    let res = await fetch('/api/login', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ email, password:pass }), credentials:'include' });
-    if(res.ok) {
-        let data = await res.json();
-        currentUser = data.user;
-        document.getElementById('authOverlay').style.display = 'none';
-        document.getElementById('userAvatar').innerText = currentUser.name.slice(0,2).toUpperCase();
-        await loadDashboard();
-        navigate('dashboard');
-    } else { document.getElementById('authMsg').innerText='Invalid credentials'; }
+document.getElementById('socialStatusDiagram')?.addEventListener('change', updateMLDiagram);
+document.getElementById('mindsetDiagram')?.addEventListener('change', updateMLDiagram);
+document.getElementById('budgetCycle')?.addEventListener('change', updateMLDiagram);
+document.getElementById('monthlyBudgetCap')?.addEventListener('input', updateMLDiagram);
+document.getElementById('autoRemainingToWants')?.addEventListener('change', updateAllocationFromCategories);
+document.getElementById('aiAutoAllocateBtn')?.addEventListener('click', aiAutoAllocate);
+
+// Handle new transaction submission
+document.getElementById('submitTransactionBtn')?.addEventListener('click', async () => {
+    let amount = parseFloat(document.getElementById('txAmount').value);
+    let category = document.getElementById('txCategory').value;
+    let tx_type = document.getElementById('txType').value;
+    let is_need = document.getElementById('txNeedWant').value === 'need';
+    let priority = parseInt(document.getElementById('txPriority').value);
+    let note = document.getElementById('txNote').value;
+    if (isNaN(amount) || amount <= 0) { toast("Please enter a valid amount"); return; }
+    try {
+        await apiFetch('/api/transactions', {
+            method: 'POST',
+            body: JSON.stringify({ amount, category, tx_type, is_need, priority, note })
+        });
+        toast("Transaction added! Refreshing dashboard...");
+        await loadDashboard();      // refresh all data
+        loadFutureExpenses();       // refresh future expenses
+        navigate('dashboard');      // switch to dashboard to see updated stats
+    } catch(e) { toast("Error adding transaction"); }
 });
 
-async function init() {
-    let res = await fetch('/api/me', { credentials:'include' });
-    if(res.ok) {
-        currentUser = await res.json();
-        document.getElementById('authOverlay').style.display = 'none';
-        document.getElementById('userAvatar').innerText = currentUser.name.slice(0,2).toUpperCase();
-        await loadDashboard();
-    } else { document.getElementById('authOverlay').style.display = 'flex'; }
-}
+// Draggable chatbot (simple)
+const chatContainer = document.getElementById('chatContainer');
+const chatHeader = document.getElementById('chatHeader');
+let isDragging = false;
+let dragOffsetX = 0, dragOffsetY = 0;
+
+chatHeader.addEventListener('mousedown', (e) => {
+    isDragging = true;
+    dragOffsetX = e.clientX - chatContainer.offsetLeft;
+    dragOffsetY = e.clientY - chatContainer.offsetTop;
+    chatContainer.style.transition = 'none';
+});
+window.addEventListener('mousemove', (e) => {
+    if (isDragging) {
+        let newLeft = e.clientX - dragOffsetX;
+        let newTop = e.clientY - dragOffsetY;
+        // Constrain within viewport
+        newLeft = Math.min(Math.max(newLeft, 0), window.innerWidth - chatContainer.offsetWidth);
+        newTop = Math.min(Math.max(newTop, 0), window.innerHeight - chatContainer.offsetHeight);
+        chatContainer.style.left = newLeft + 'px';
+        chatContainer.style.top = newTop + 'px';
+        chatContainer.style.right = 'auto';
+        chatContainer.style.bottom = 'auto';
+    }
+});
+window.addEventListener('mouseup', () => {
+    isDragging = false;
+    chatContainer.style.transition = '';
+});
+
+let authBtn = document.getElementById('authBtn'), toggleLink = document.getElementById('toggleAuthLink');
+toggleLink?.addEventListener('click', ()=>{ isLogin = !isLogin; document.getElementById('authTitle').innerText = isLogin ? 'Welcome back' : 'Create account'; document.getElementById('regName').style.display = isLogin ? 'none' : 'block'; document.getElementById('authConfirm').style.display = isLogin ? 'none' : 'block'; document.getElementById('termsRow').style.display = isLogin ? 'none' : 'flex'; authBtn.innerText = isLogin ? 'Sign In' : 'Register'; });
+authBtn?.addEventListener('click', async()=>{ let email = document.getElementById('authEmail').value, pass = document.getElementById('authPass').value, name = document.getElementById('regName').value; if(!isLogin && (!name || !document.getElementById('termsCheck').checked)) { document.getElementById('authMsg').innerText = 'Accept terms & name required'; return; } let endpoint = isLogin ? '/api/login' : '/api/register'; let body = isLogin ? { email, password:pass } : { name, email, password:pass }; try { let res = await fetch(endpoint, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body), credentials:'include' }); if(res.ok) { location.reload(); } else { let err = await res.json(); document.getElementById('authMsg').innerText = err.error || 'Auth failed'; } } catch(e){ document.getElementById('authMsg').innerText = 'Error connecting'; } });
+document.getElementById('sendChatBtn')?.addEventListener('click', async()=>{ let input = document.getElementById('chatInput'); let msg = input.value.trim(); if(!msg) return; let chatDiv = document.getElementById('chatMessages'); chatDiv.innerHTML += `<div class="message user-message">${escapeHtml(msg)}</div>`; input.value = ''; chatDiv.scrollTop = chatDiv.scrollHeight; try { let res = await fetch('/api/chat', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ message:msg }), credentials:'include' }); let data = await res.json(); let reply = data.reply || "AI: I'll analyze."; chatDiv.innerHTML += `<div class="message bot-message">${escapeHtml(reply)}</div>`; } catch(e) { chatDiv.innerHTML += `<div class="message bot-message">💬 Error, try again later.</div>`; } chatDiv.scrollTop = chatDiv.scrollHeight; });
+function escapeHtml(str) { return str.replace(/[&<>]/g, function(m){ if(m === '&') return '&amp;'; if(m === '<') return '&lt;'; if(m === '>') return '&gt;'; return m;}); }
+async function init() { let res = await fetch('/api/me', { credentials:'include' }); if(res.ok) { currentUser = await res.json(); document.getElementById('authOverlay').style.display = 'none'; document.getElementById('userAvatar').innerText = currentUser.name.slice(0,2).toUpperCase(); renderCategoryAllocation(); await loadDashboard(); loadFutureExpenses(); } else { document.getElementById('authOverlay').style.display = 'flex'; } }
 init();
 </script>
 </body>
