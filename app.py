@@ -17,11 +17,12 @@ from sqlalchemy import inspect, text
 # ----------------------------------------------------------------------
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-change-in-production')
-# Use Render’s PostgreSQL URL (already set in environment)
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'postgresql://makamandag_db_user:zcDibuXdlpEpcZNGEYLc9nqpgWwuTTfO@dpg-d7od7md7vvec739acfj0-a/makamandag_db')
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get(
+    'DATABASE_URL',
+    'postgresql://makamandag_db_user:zcDibuXdlpEpcZNGEYLc9nqpgWwuTTfO@dpg-d7od7md7vvec739acfj0-a/makamandag_db'
+)
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-# Configure Gemini AI with your provided API key
 GEMINI_API_KEY = "AIzaSyDADCUZKxOPf6NKQ7uhCcTZWqnd50HoPVY"
 genai.configure(api_key=GEMINI_API_KEY)
 
@@ -29,7 +30,7 @@ db = SQLAlchemy(app)
 bcrypt = Bcrypt(app)
 
 # ----------------------------------------------------------------------
-# Database models (from first app – fully featured)
+# Models
 # ----------------------------------------------------------------------
 class User(db.Model):
     __tablename__ = 'users'
@@ -134,49 +135,32 @@ class UserAllocation(db.Model):
 
 
 # ----------------------------------------------------------------------
-# Schema migration (add missing columns, drop old password column)
+# Schema migration
 # ----------------------------------------------------------------------
 def ensure_schema():
     inspector = inspect(db.engine)
     if inspector.has_table('users'):
         existing_columns = [col['name'] for col in inspector.get_columns('users')]
-        
-        # Remove old 'password' column if it exists (from second app)
         if 'password' in existing_columns:
             with db.engine.connect() as conn:
                 conn.execute(text('ALTER TABLE users DROP COLUMN password'))
                 conn.commit()
-            print("✅ Dropped obsolete 'password' column from users table.")
-        
-        # Add missing columns from the first app's schema
-        if 'password_hash' not in existing_columns:
-            with db.engine.connect() as conn:
-                conn.execute(text('ALTER TABLE users ADD COLUMN password_hash VARCHAR(128) NOT NULL DEFAULT \'\''))
-                conn.commit()
-            print("✅ Added password_hash column to users table.")
-        if 'social_status' not in existing_columns:
-            with db.engine.connect() as conn:
-                conn.execute(text('ALTER TABLE users ADD COLUMN social_status VARCHAR(20) DEFAULT \'Middle\''))
-                conn.commit()
-            print("✅ Added social_status column to users table.")
-        if 'spending_mindset' not in existing_columns:
-            with db.engine.connect() as conn:
-                conn.execute(text('ALTER TABLE users ADD COLUMN spending_mindset VARCHAR(20) DEFAULT \'Neutral\''))
-                conn.commit()
-            print("✅ Added spending_mindset column to users table.")
-        if 'monthly_budget_limit' not in existing_columns:
-            with db.engine.connect() as conn:
-                conn.execute(text('ALTER TABLE users ADD COLUMN monthly_budget_limit FLOAT DEFAULT 0.0'))
-                conn.commit()
-            print("✅ Added monthly_budget_limit column to users table.")
-
-    # Ensure future_expenses table exists
+        for col, defn in [
+            ('password_hash', "VARCHAR(128) NOT NULL DEFAULT ''"),
+            ('social_status', "VARCHAR(20) DEFAULT 'Middle'"),
+            ('spending_mindset', "VARCHAR(20) DEFAULT 'Neutral'"),
+            ('monthly_budget_limit', "FLOAT DEFAULT 0.0"),
+        ]:
+            if col not in existing_columns:
+                with db.engine.connect() as conn:
+                    conn.execute(text(f'ALTER TABLE users ADD COLUMN {col} {defn}'))
+                    conn.commit()
     if not inspector.has_table('future_expenses'):
-        db.create_all()  # create any missing tables
+        db.create_all()
 
 
 # ----------------------------------------------------------------------
-# Authentication helpers
+# Auth helpers
 # ----------------------------------------------------------------------
 def login_required(f):
     @wraps(f)
@@ -188,141 +172,71 @@ def login_required(f):
 
 
 def get_current_user():
-    user_id = session.get('user_id')
-    return User.query.get(user_id) if user_id else None
+    return User.query.get(session.get('user_id')) if 'user_id' in session else None
 
 
 # ----------------------------------------------------------------------
-# ML / Prediction helpers (from first app)
+# Analytics helpers
 # ----------------------------------------------------------------------
 def compute_health_score(user_id):
-    user = User.query.get(user_id)
-    if not user:
-        return 50
     thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
-    expenses = Transaction.query.filter(
-        Transaction.user_id == user_id,
-        Transaction.tx_type == 'expense',
-        Transaction.tx_date >= thirty_days_ago
-    ).all()
-    income = Transaction.query.filter(
-        Transaction.user_id == user_id,
-        Transaction.tx_type == 'income',
-        Transaction.tx_date >= thirty_days_ago
-    ).all()
+    expenses = Transaction.query.filter(Transaction.user_id == user_id, Transaction.tx_type == 'expense', Transaction.tx_date >= thirty_days_ago).all()
+    income = Transaction.query.filter(Transaction.user_id == user_id, Transaction.tx_type == 'income', Transaction.tx_date >= thirty_days_ago).all()
     total_expense = sum(e.amount for e in expenses)
     total_income = sum(i.amount for i in income)
     savings_rate = max(0, (total_income - total_expense) / total_income) if total_income > 0 else 0
     want_expense = sum(e.amount for e in expenses if not e.is_need)
-    need_expense = sum(e.amount for e in expenses if e.is_need)
-    total_exp = want_expense + need_expense
-    want_ratio = want_expense / total_exp if total_exp > 0 else 0
-    budgets = Budget.query.filter_by(user_id=user_id).all()
-    budget_dict = {b.category: b.limit_amount for b in budgets}
-    overspend_penalty = 0
-    for cat, limit in budget_dict.items():
-        cat_spent = sum(e.amount for e in expenses if e.category == cat)
-        if cat_spent > limit:
-            overspend_penalty += (cat_spent - limit) / limit
-    score = 70
-    score += int(savings_rate * 20)
-    score -= int(want_ratio * 15)
-    score -= min(20, int(overspend_penalty * 10))
+    total_exp = total_expense or 1
+    want_ratio = want_expense / total_exp
+    budgets = {b.category: b.limit_amount for b in Budget.query.filter_by(user_id=user_id).all()}
+    overspend_penalty = sum(
+        (sum(e.amount for e in expenses if e.category == cat) - limit) / limit
+        for cat, limit in budgets.items()
+        if sum(e.amount for e in expenses if e.category == cat) > limit
+    )
+    score = 70 + int(savings_rate * 20) - int(want_ratio * 15) - min(20, int(overspend_penalty * 10))
     return max(0, min(100, score))
 
 
 def generate_weekly_forecast(user_id):
     thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
-    expenses = Transaction.query.filter(
-        Transaction.user_id == user_id,
-        Transaction.tx_type == 'expense',
-        Transaction.tx_date >= thirty_days_ago
-    ).all()
-    if len(expenses) < 7:
-        avg_daily = sum(e.amount for e in expenses) / max(1, len(expenses))
-    else:
-        daily_totals = defaultdict(float)
-        for e in expenses:
-            key = e.tx_date.date()
-            daily_totals[key] += e.amount
-        days_sorted = sorted(daily_totals.keys())
-        values = [daily_totals[d] for d in days_sorted]
-        n = len(values)
-        if n > 1:
-            x_mean = (n - 1) / 2
-            y_mean = sum(values) / n
-            numerator = sum((i - x_mean) * (values[i] - y_mean) for i in range(n))
-            denominator = sum((i - x_mean) ** 2 for i in range(n))
-            slope = numerator / denominator if denominator != 0 else 0
-            intercept = y_mean - slope * x_mean
-            week_sums = [0, 0, 0, 0]
-            for day in range(1, 29):
-                predicted = max(0, intercept + slope * (n + day))
-                week_sums[(day - 1) // 7] += predicted
-            return {
-                'Week 1': week_sums[0],
-                'Week 2': week_sums[1],
-                'Week 3': week_sums[2],
-                'Week 4': week_sums[3]
-            }
-    daily_avg = sum(e.amount for e in expenses) / max(1, len(expenses))
-    weekly = daily_avg * 7
-    return {'Week 1': weekly, 'Week 2': weekly, 'Week 3': weekly, 'Week 4': weekly}
+    expenses = Transaction.query.filter(Transaction.user_id == user_id, Transaction.tx_type == 'expense', Transaction.tx_date >= thirty_days_ago).all()
+    if not expenses:
+        return {'Week 1': 0, 'Week 2': 0, 'Week 3': 0, 'Week 4': 0}
+    daily_totals = defaultdict(float)
+    for e in expenses:
+        daily_totals[e.tx_date.date()] += e.amount
+    days_sorted = sorted(daily_totals.keys())
+    values = [daily_totals[d] for d in days_sorted]
+    n = len(values)
+    if n > 1:
+        x_mean = (n - 1) / 2
+        y_mean = sum(values) / n
+        num = sum((i - x_mean) * (values[i] - y_mean) for i in range(n))
+        den = sum((i - x_mean) ** 2 for i in range(n))
+        slope = num / den if den else 0
+        intercept = y_mean - slope * x_mean
+        week_sums = [0, 0, 0, 0]
+        for day in range(1, 29):
+            week_sums[(day - 1) // 7] += max(0, intercept + slope * (n + day))
+        return {f'Week {i+1}': week_sums[i] for i in range(4)}
+    avg = sum(values) / n * 7
+    return {f'Week {i+1}': avg for i in range(4)}
 
 
-def get_category_forecast(user_id):
+def get_category_totals(user_id):
     now = datetime.now(timezone.utc)
     first_of_month = datetime(now.year, now.month, 1)
-    expenses = Transaction.query.filter(
-        Transaction.user_id == user_id,
-        Transaction.tx_type == 'expense',
-        Transaction.tx_date >= first_of_month
-    ).all()
-    cat_totals = defaultdict(float)
+    expenses = Transaction.query.filter(Transaction.user_id == user_id, Transaction.tx_type == 'expense', Transaction.tx_date >= first_of_month).all()
+    totals = defaultdict(float)
     for e in expenses:
-        cat_totals[e.category] += e.amount
-    return dict(cat_totals)
-
-
-def generate_advice(user_id):
-    user = User.query.get(user_id)
-    if not user:
-        return []
-    budgets = {b.category: b.limit_amount for b in Budget.query.filter_by(user_id=user_id).all()}
-    current_month_expenses = get_category_forecast(user_id)
-    advice = []
-    for category, spent in current_month_expenses.items():
-        limit = budgets.get(category)
-        if limit and spent > limit:
-            advice.append({
-                'cat': category,
-                'msg': f"You've exceeded the {category} budget by ₱{spent - limit:.2f}. Consider reducing non-essential purchases."
-            })
-    expenses = Transaction.query.filter_by(user_id=user_id, tx_type='expense').all()
-    wants = sum(e.amount for e in expenses if not e.is_need)
-    needs = sum(e.amount for e in expenses if e.is_need)
-    total = wants + needs
-    if total > 0 and (wants / total) > 0.4:
-        advice.append({
-            'cat': 'Wants',
-            'msg': f"Your wants spending is {wants/total*100:.0f}% of total expenses. Try to keep wants below 30% for better savings."
-        })
-    if not advice:
-        advice.append({'cat': 'Great job!', 'msg': 'Your spending is well within budgets. Keep it up!'})
-    return advice
+        totals[e.category] += e.amount
+    return dict(totals)
 
 
 def get_monthly_summary(user_id):
-    user = User.query.get(user_id)
-    if not user:
-        return {'balance': 0, 'expense': 0, 'income': 0, 'monthly': {}}
     all_trans = Transaction.query.filter_by(user_id=user_id).all()
-    balance = 0
-    for t in all_trans:
-        if t.tx_type == 'income':
-            balance += t.amount
-        else:
-            balance -= t.amount
+    balance = sum(t.amount if t.tx_type == 'income' else -t.amount for t in all_trans)
     now = datetime.now(timezone.utc)
     first_of_month = datetime(now.year, now.month, 1)
     this_month_expense = sum(t.amount for t in all_trans if t.tx_type == 'expense' and t.tx_date >= first_of_month)
@@ -330,184 +244,37 @@ def get_monthly_summary(user_id):
     monthly = defaultdict(lambda: {'income': 0, 'expense': 0})
     for t in all_trans:
         key = t.tx_date.strftime('%Y-%m')
-        if t.tx_type == 'income':
-            monthly[key]['income'] += t.amount
-        else:
-            monthly[key]['expense'] += t.amount
+        monthly[key]['income' if t.tx_type == 'income' else 'expense'] += t.amount
     sorted_months = sorted(monthly.keys())[-6:]
-    monthly_hist = {m: monthly[m] for m in sorted_months}
     return {
         'balance': balance,
         'expense': this_month_expense,
         'income': this_month_income,
-        'monthly': monthly_hist
+        'monthly': {m: monthly[m] for m in sorted_months}
     }
 
 
 def compute_longevity(user_id):
     summary = get_monthly_summary(user_id)
-    balance = summary['balance']
     thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
-    expenses = Transaction.query.filter(
-        Transaction.user_id == user_id,
-        Transaction.tx_type == 'expense',
-        Transaction.tx_date >= thirty_days_ago
-    ).all()
-    total_spent = sum(e.amount for e in expenses)
-    avg_daily = total_spent / 30 if len(expenses) > 0 else 0
-    days = int(balance / avg_daily) if avg_daily > 0 else 0
-    return {
-        'balance': balance,
-        'avg_daily_spend': avg_daily,
-        'days': days
-    }
+    expenses = Transaction.query.filter(Transaction.user_id == user_id, Transaction.tx_type == 'expense', Transaction.tx_date >= thirty_days_ago).all()
+    avg_daily = sum(e.amount for e in expenses) / 30 if expenses else 0
+    days = int(summary['balance'] / avg_daily) if avg_daily > 0 else 0
+    return {'balance': summary['balance'], 'avg_daily_spend': avg_daily, 'days': days}
 
 
 # ----------------------------------------------------------------------
-# Gemini AI endpoints
+# Auth routes
 # ----------------------------------------------------------------------
-@app.route('/api/ai_allocate', methods=['POST'])
-@login_required
-def ai_allocate():
-    user = get_current_user()
-    data = request.json
-    selected_categories = data.get('categories', [])
-    monthly_budget = data.get('monthly_budget', user.monthly_budget_limit or 10000)
-
-    recent_spending = defaultdict(float)
-    transactions = Transaction.query.filter_by(user_id=user.id, tx_type='expense').order_by(Transaction.tx_date.desc()).limit(20).all()
-    for t in transactions:
-        recent_spending[t.category] += t.amount
-
-    budget_limits = {b.category: b.limit_amount for b in Budget.query.filter_by(user_id=user.id).all()}
-    mindset = user.spending_mindset.lower()
-    status = user.social_status.lower()
-
-    prompt = f"""
-You are a financial AI. Allocate 100% of a monthly budget of ₱{monthly_budget} among these categories: {selected_categories}.
-User profile:
-- Social status: {status}
-- Spending mindset: {mindset}
-- Recent spending: {dict(recent_spending)}
-- Existing budget limits (if any): {budget_limits}
-
-Rules:
-- If mindset is "saver": give at least 70% to needs (Food, Debt, Mortgage, Transport). Keep wants low.
-- If "spender": allow up to 40% to wants.
-- If "neutral": balanced.
-- Use existing budget limits as a reference but ensure total 100%.
-Return ONLY a JSON object with category names as keys and percentage values as floats summing to 100.
-No extra text.
-"""
-    try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        response = model.generate_content(prompt)
-        allocation = json.loads(response.text.strip())
-        total = sum(allocation.values())
-        if abs(total - 100) > 0.1:
-            factor = 100 / total
-            allocation = {k: round(v * factor, 1) for k, v in allocation.items()}
-        return jsonify({'allocation': allocation}), 200
-    except Exception as e:
-        print(f"Gemini allocation error: {e}")
-        if recent_spending:
-            total_spent = sum(recent_spending.values())
-            if total_spent > 0:
-                allocation = {}
-                for cat in selected_categories:
-                    pct = (recent_spending.get(cat, 0) / total_spent) * 100
-                    allocation[cat] = round(pct, 1)
-                total = sum(allocation.values())
-                if total != 100:
-                    factor = 100 / total
-                    allocation = {k: round(v * factor, 1) for k, v in allocation.items()}
-                return jsonify({'allocation': allocation, 'fallback': 'recent_spending'}), 200
-        fallback_pct = 100 / len(selected_categories) if selected_categories else 0
-        fallback = {cat: round(fallback_pct, 1) for cat in selected_categories}
-        return jsonify({'allocation': fallback, 'fallback': 'equal'}), 200
-
-
-@app.route('/api/savings_plan', methods=['GET'])
-@login_required
-def savings_plan():
-    user = get_current_user()
-    summary = get_monthly_summary(user.id)
-    monthly_income = summary['income']
-    monthly_expense = summary['expense']
-    balance = summary['balance']
-    mindset = user.spending_mindset
-
-    prompt = f"""
-User monthly income: ₱{monthly_income:.2f}, monthly expenses: ₱{monthly_expense:.2f}, current balance: ₱{balance:.2f}.
-Spending mindset: {mindset}.
-Recommend how much they should save per day, per week, and per month. Give realistic, actionable amounts.
-Return a JSON object: {{"daily": float, "weekly": float, "monthly": float}}.
-No extra text.
-"""
-    try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        response = model.generate_content(prompt)
-        plan = json.loads(response.text.strip())
-        return jsonify(plan), 200
-    except Exception as e:
-        print(f"Savings plan error: {e}")
-        disposable = max(0, monthly_income - monthly_expense)
-        monthly_save = disposable * 0.2
-        return jsonify({
-            "daily": round(monthly_save / 30, 2),
-            "weekly": round(monthly_save / 4, 2),
-            "monthly": round(monthly_save, 2)
-        }), 200
-
-
-@app.route('/api/apply_future_expenses', methods=['POST'])
-@login_required
-def apply_future_expenses():
-    user = get_current_user()
-    today = datetime.now(timezone.utc).date()
-    future_expenses = FutureExpense.query.filter(
-        FutureExpense.user_id == user.id,
-        FutureExpense.expense_date <= today,
-        FutureExpense.cycle == 'One-time'
-    ).all()
-    applied = []
-    for exp in future_expenses:
-        tx = Transaction(
-            user_id=user.id,
-            amount=exp.amount,
-            category=exp.category,
-            tx_type='expense',
-            is_need=(exp.category in ['Food & dining', 'Debt repayment', 'Mortgage', 'Transport']),
-            priority=1,
-            note=f"Auto-deducted future expense: {exp.description}"
-        )
-        db.session.add(tx)
-        applied.append(exp.description)
-        db.session.delete(exp)
-    db.session.commit()
-    return jsonify({'applied': applied, 'count': len(applied)}), 200
-
-
-# ----------------------------------------------------------------------
-# Standard routes (register, login, transactions, budgets, etc.)
-# ----------------------------------------------------------------------
-@app.route('/')
-def index():
-    return HTML_PAGE
-
-
 @app.route('/api/register', methods=['POST'])
 def register():
     data = request.json
-    name = data.get('name')
-    email = data.get('email')
-    password = data.get('password')
-    if not name or not email or not password:
+    if not all(k in data for k in ['name', 'email', 'password']):
         return jsonify({'error': 'Missing fields'}), 400
-    if User.query.filter_by(email=email).first():
+    if User.query.filter_by(email=data['email']).first():
         return jsonify({'error': 'Email already exists'}), 400
-    user = User(name=name, email=email)
-    user.set_password(password)
+    user = User(name=data['name'], email=data['email'])
+    user.set_password(data['password'])
     db.session.add(user)
     db.session.commit()
     session['user_id'] = user.id
@@ -517,10 +284,8 @@ def register():
 @app.route('/api/login', methods=['POST'])
 def login():
     data = request.json
-    email = data.get('email')
-    password = data.get('password')
-    user = User.query.filter_by(email=email).first()
-    if not user or not user.check_password(password):
+    user = User.query.filter_by(email=data.get('email')).first()
+    if not user or not user.check_password(data.get('password', '')):
         return jsonify({'error': 'Invalid credentials'}), 401
     session['user_id'] = user.id
     return jsonify(user.to_dict()), 200
@@ -535,17 +300,17 @@ def logout():
 @app.route('/api/me', methods=['GET'])
 def me():
     user = get_current_user()
-    if not user:
-        return jsonify({'error': 'Unauthorized'}), 401
-    return jsonify(user.to_dict()), 200
+    return jsonify(user.to_dict()) if user else (jsonify({'error': 'Unauthorized'}), 401)
 
 
+# ----------------------------------------------------------------------
+# Transaction routes
+# ----------------------------------------------------------------------
 @app.route('/api/transactions', methods=['GET'])
 @login_required
 def list_transactions():
     user = get_current_user()
-    transactions = Transaction.query.filter_by(user_id=user.id).order_by(Transaction.tx_date.desc()).all()
-    return jsonify([t.to_dict() for t in transactions]), 200
+    return jsonify([t.to_dict() for t in Transaction.query.filter_by(user_id=user.id).order_by(Transaction.tx_date.desc()).all()])
 
 
 @app.route('/api/transactions', methods=['POST'])
@@ -553,10 +318,8 @@ def list_transactions():
 def create_transaction():
     user = get_current_user()
     data = request.json
-    required = ['amount', 'category', 'tx_type']
-    if not all(k in data for k in required):
+    if not all(k in data for k in ['amount', 'category', 'tx_type']):
         return jsonify({'error': 'Missing required fields'}), 400
-
     tx = Transaction(
         user_id=user.id,
         amount=data['amount'],
@@ -568,212 +331,75 @@ def create_transaction():
     )
     db.session.add(tx)
     db.session.commit()
-
-    # Auto-apply future expenses if salary income
+    # Auto-apply future expenses on salary income
     if tx.tx_type == 'income' and tx.category.lower() == 'salary':
         today = datetime.now(timezone.utc).date()
-        future_expenses = FutureExpense.query.filter(
-            FutureExpense.user_id == user.id,
-            FutureExpense.expense_date <= today,
-            FutureExpense.cycle == 'One-time'
-        ).all()
-        for exp in future_expenses:
-            auto_tx = Transaction(
-                user_id=user.id,
-                amount=exp.amount,
-                category=exp.category,
-                tx_type='expense',
-                is_need=(exp.category in ['Food & dining', 'Debt repayment', 'Mortgage', 'Transport']),
-                priority=1,
-                note=f"Auto-deducted future expense: {exp.description}"
-            )
-            db.session.add(auto_tx)
+        for exp in FutureExpense.query.filter(FutureExpense.user_id == user.id, FutureExpense.expense_date <= today, FutureExpense.cycle == 'One-time').all():
+            db.session.add(Transaction(
+                user_id=user.id, amount=exp.amount, category=exp.category,
+                tx_type='expense', is_need=(exp.category in ['Food & Dining', 'Debt repayment', 'Mortgage', 'Transport']),
+                priority=1, note=f"Auto: {exp.description}"
+            ))
             db.session.delete(exp)
         db.session.commit()
     return jsonify(tx.to_dict()), 201
 
 
-@app.route('/api/transactions/<int:tx_id>', methods=['PATCH'])
+@app.route('/api/transactions/<int:tx_id>', methods=['DELETE'])
 @login_required
-def patch_transaction(tx_id):
+def delete_transaction(tx_id):
     user = get_current_user()
     tx = Transaction.query.get(tx_id)
     if not tx or tx.user_id != user.id:
         return jsonify({'error': 'Not found'}), 404
-    data = request.json
-    if 'is_need' in data:
-        tx.is_need = data['is_need']
-    if 'priority' in data:
-        tx.priority = data['priority']
-    if 'note' in data:
-        tx.note = data['note']
+    db.session.delete(tx)
     db.session.commit()
-    return jsonify(tx.to_dict()), 200
+    return jsonify({'message': 'Deleted'}), 200
 
 
-@app.route('/api/budgets/<int:user_id>', methods=['GET'])
-@login_required
-def get_budgets(user_id):
-    current = get_current_user()
-    if current.id != user_id:
-        return jsonify({'error': 'Forbidden'}), 403
-    budgets = Budget.query.filter_by(user_id=user_id).all()
-    return jsonify([{'category': b.category, 'limit': b.limit_amount} for b in budgets]), 200
-
-
-@app.route('/api/budgets/<int:user_id>', methods=['POST'])
-@login_required
-def upsert_budget(user_id):
-    current = get_current_user()
-    if current.id != user_id:
-        return jsonify({'error': 'Forbidden'}), 403
-    data = request.json
-    category = data.get('category')
-    limit = data.get('limit')
-    if not category or limit is None:
-        return jsonify({'error': 'Category and limit required'}), 400
-    existing = Budget.query.filter_by(user_id=user_id, category=category).first()
-    if existing:
-        existing.limit_amount = limit
-    else:
-        existing = Budget(user_id=user_id, category=category, limit_amount=limit)
-        db.session.add(existing)
-    db.session.commit()
-    return jsonify({'category': category, 'limit': limit}), 200
-
-
-@app.route('/api/user/profile', methods=['POST'])
-@login_required
-def update_profile():
-    user = get_current_user()
-    data = request.json
-    if 'social_status' in data:
-        user.social_status = data['social_status']
-    if 'spending_mindset' in data:
-        user.spending_mindset = data['spending_mindset']
-    if 'monthly_budget_limit' in data:
-        user.monthly_budget_limit = data['monthly_budget_limit']
-    db.session.commit()
-    return jsonify(user.to_dict()), 200
-
-
+# ----------------------------------------------------------------------
+# Summary / predict routes
+# ----------------------------------------------------------------------
 @app.route('/api/summary/<int:user_id>')
 @login_required
 def summary(user_id):
-    current = get_current_user()
-    if current.id != user_id:
+    if get_current_user().id != user_id:
         return jsonify({'error': 'Forbidden'}), 403
-    return jsonify(get_monthly_summary(user_id)), 200
+    return jsonify(get_monthly_summary(user_id))
 
 
 @app.route('/api/predict/<int:user_id>')
 @login_required
 def predict(user_id):
-    current = get_current_user()
-    if current.id != user_id:
+    if get_current_user().id != user_id:
         return jsonify({'error': 'Forbidden'}), 403
-    expenses = Transaction.query.filter_by(user_id=user_id, tx_type='expense').count()
-    has_data = expenses > 0
+    has_data = Transaction.query.filter_by(user_id=user_id, tx_type='expense').count() > 0
     if not has_data:
-        return jsonify({
-            'has_data': False,
-            'score': None,
-            'predictions': {'weekly': {}, 'categories': {}},
-            'advice': []
-        }), 200
-    score = compute_health_score(user_id)
-    weekly = generate_weekly_forecast(user_id)
-    categories = get_category_forecast(user_id)
-    advice = generate_advice(user_id)
+        return jsonify({'has_data': False, 'score': None, 'predictions': {'weekly': {}, 'categories': {}}, 'advice': []})
     return jsonify({
         'has_data': True,
-        'score': score,
-        'predictions': {'weekly': weekly, 'categories': categories},
-        'advice': advice
-    }), 200
+        'score': compute_health_score(user_id),
+        'predictions': {'weekly': generate_weekly_forecast(user_id), 'categories': get_category_totals(user_id)},
+        'advice': []
+    })
 
 
 @app.route('/api/longevity/<int:user_id>')
 @login_required
 def longevity(user_id):
-    current = get_current_user()
-    if current.id != user_id:
+    if get_current_user().id != user_id:
         return jsonify({'error': 'Forbidden'}), 403
-    return jsonify(compute_longevity(user_id)), 200
+    return jsonify(compute_longevity(user_id))
 
 
-@app.route('/api/export/csv')
-@login_required
-def export_csv():
-    user = get_current_user()
-    transactions = Transaction.query.filter_by(user_id=user.id).order_by(Transaction.tx_date.desc()).all()
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(['Date', 'Category', 'Type', 'Need?', 'Priority', 'Note', 'Amount'])
-    for t in transactions:
-        writer.writerow([
-            t.tx_date.strftime('%Y-%m-%d %H:%M'),
-            t.category,
-            t.tx_type,
-            'Need' if t.is_need else 'Want' if t.tx_type == 'expense' else '',
-            t.priority,
-            t.note,
-            t.amount
-        ])
-    response = Response(output.getvalue(), mimetype='text/csv')
-    response.headers.set('Content-Disposition', 'attachment', filename='transactions.csv')
-    return response
-
-
-@app.route('/api/chat', methods=['POST'])
-@login_required
-def chat():
-    """Fully AI-powered chatbot using Gemini – no hardcoded responses."""
-    user = get_current_user()
-    data = request.json
-    user_message = data.get('message', '')
-
-    summary = get_monthly_summary(user.id)
-    recent_transactions = Transaction.query.filter_by(user_id=user.id).order_by(Transaction.tx_date.desc()).limit(10).all()
-    recent_list = [f"{t.category}: ₱{t.amount:.2f} on {t.tx_date.strftime('%Y-%m-%d')}" for t in recent_transactions]
-    health = compute_health_score(user.id)
-    advice = generate_advice(user.id)
-    future_cnt = FutureExpense.query.filter_by(user_id=user.id).count()
-
-    prompt = f"""
-You are SmartSpend AI, a friendly personal finance assistant for {user.name}.
-
-Current snapshot:
-- Balance: ₱{summary['balance']:,.2f}
-- Monthly income: ₱{summary['income']:,.2f}
-- Monthly expenses: ₱{summary['expense']:,.2f}
-- Health score: {health}/100
-- Recent advice: {advice}
-- Number of future pinned expenses: {future_cnt}
-
-Recent transactions:
-{chr(10).join(recent_list) if recent_list else 'None'}
-
-User asks: "{user_message}"
-
-Provide helpful, actionable, concise advice (max 200 words). Include future insights, saving tips, and suggestions to reduce wants if needed. Never say you are an AI unless asked.
-"""
-    try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        response = model.generate_content(prompt)
-        reply = response.text.strip()
-    except Exception as e:
-        print(f"Chat error: {e}")
-        reply = "Sorry, I'm having trouble connecting. Please try again later."
-    return jsonify({'reply': reply}), 200
-
-
+# ----------------------------------------------------------------------
+# Future expenses routes
+# ----------------------------------------------------------------------
 @app.route('/api/future_expenses', methods=['GET'])
 @login_required
 def get_future_expenses():
     user = get_current_user()
-    expenses = FutureExpense.query.filter_by(user_id=user.id).order_by(FutureExpense.expense_date).all()
-    return jsonify([e.to_dict() for e in expenses]), 200
+    return jsonify([e.to_dict() for e in FutureExpense.query.filter_by(user_id=user.id).order_by(FutureExpense.expense_date).all()])
 
 
 @app.route('/api/future_expenses', methods=['POST'])
@@ -781,10 +407,9 @@ def get_future_expenses():
 def create_future_expense():
     user = get_current_user()
     data = request.json
-    required = ['description', 'amount', 'category', 'date']
-    if not all(k in data for k in required):
+    if not all(k in data for k in ['description', 'amount', 'category', 'date']):
         return jsonify({'error': 'Missing fields'}), 400
-    expense = FutureExpense(
+    exp = FutureExpense(
         user_id=user.id,
         description=data['description'],
         amount=data['amount'],
@@ -792,29 +417,32 @@ def create_future_expense():
         cycle=data.get('cycle', 'One-time'),
         expense_date=datetime.fromisoformat(data['date']).date()
     )
-    db.session.add(expense)
+    db.session.add(exp)
     db.session.commit()
-    return jsonify(expense.to_dict()), 201
+    return jsonify(exp.to_dict()), 201
 
 
 @app.route('/api/future_expenses/<int:exp_id>', methods=['DELETE'])
 @login_required
 def delete_future_expense(exp_id):
     user = get_current_user()
-    expense = FutureExpense.query.get(exp_id)
-    if not expense or expense.user_id != user.id:
+    exp = FutureExpense.query.get(exp_id)
+    if not exp or exp.user_id != user.id:
         return jsonify({'error': 'Not found'}), 404
-    db.session.delete(expense)
+    db.session.delete(exp)
     db.session.commit()
     return jsonify({'message': 'Deleted'}), 200
 
 
+# ----------------------------------------------------------------------
+# Allocations routes
+# ----------------------------------------------------------------------
 @app.route('/api/allocations', methods=['GET'])
 @login_required
 def get_allocations():
     user = get_current_user()
-    allocs = UserAllocation.query.filter_by(user_id=user.id).all()
-    return jsonify([{'category_name': a.category_name, 'type': a.type, 'percentage': a.percentage} for a in allocs]), 200
+    return jsonify([{'category_name': a.category_name, 'type': a.type, 'percentage': a.percentage}
+                    for a in UserAllocation.query.filter_by(user_id=user.id).all()])
 
 
 @app.route('/api/allocations', methods=['POST'])
@@ -823,22 +451,273 @@ def update_allocations():
     user = get_current_user()
     data = request.json
     if not isinstance(data, list):
-        return jsonify({'error': 'Expected list of allocations'}), 400
+        return jsonify({'error': 'Expected list'}), 400
     UserAllocation.query.filter_by(user_id=user.id).delete()
     for item in data:
-        alloc = UserAllocation(
+        db.session.add(UserAllocation(
             user_id=user.id,
             category_name=item['category_name'],
             type=item['type'],
             percentage=item['percentage']
-        )
-        db.session.add(alloc)
+        ))
     db.session.commit()
-    return jsonify({'message': 'Allocations saved'}), 200
+    return jsonify({'message': 'Saved'}), 200
 
 
 # ----------------------------------------------------------------------
-# Create tables and run migration
+# Export
+# ----------------------------------------------------------------------
+@app.route('/api/export/csv')
+@login_required
+def export_csv():
+    user = get_current_user()
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(['Date', 'Category', 'Type', 'Need?', 'Priority', 'Note', 'Amount'])
+    for t in Transaction.query.filter_by(user_id=user.id).order_by(Transaction.tx_date.desc()).all():
+        writer.writerow([t.tx_date.strftime('%Y-%m-%d %H:%M'), t.category, t.tx_type,
+                         'Need' if t.is_need else 'Want', t.priority, t.note, t.amount])
+    resp = Response(output.getvalue(), mimetype='text/csv')
+    resp.headers.set('Content-Disposition', 'attachment', filename='transactions.csv')
+    return resp
+
+
+# ----------------------------------------------------------------------
+# ★ AUTONOMOUS AI ENDPOINTS
+# ----------------------------------------------------------------------
+
+@app.route('/api/ai/full_setup', methods=['POST'])
+@login_required
+def ai_full_setup():
+    """
+    MASTER autonomous endpoint.
+    Called whenever income changes or user updates profile.
+    Returns: allocation, savings_plan, advice, budget_limits — all from Gemini in one shot.
+    """
+    user = get_current_user()
+    data = request.json or {}
+    monthly_income = data.get('monthly_income', user.monthly_budget_limit or 0)
+    mindset = data.get('mindset', user.spending_mindset)
+    social_status = data.get('social_status', user.social_status)
+
+    # Update profile
+    user.monthly_budget_limit = monthly_income
+    user.spending_mindset = mindset
+    user.social_status = social_status
+    db.session.commit()
+
+    # Gather spending context
+    recent_spending = defaultdict(float)
+    for t in Transaction.query.filter_by(user_id=user.id, tx_type='expense').order_by(Transaction.tx_date.desc()).limit(30).all():
+        recent_spending[t.category] += t.amount
+
+    categories = ['Food & Dining', 'Transport', 'Groceries', 'Health', 'Entertainment',
+                  'Debt repayment', 'Hobbies', 'Subscription', 'Savings']
+
+    prompt = f"""
+You are an expert financial planner AI for a Filipino user.
+
+User profile:
+- Monthly income: ₱{monthly_income:,.2f}
+- Spending mindset: {mindset} (Saver = prioritize needs/savings; Neutral = balanced; Spender = allow more wants)
+- Social status: {social_status}
+- Recent category spending (last 30 days): {dict(recent_spending)}
+
+Your job: create a complete autonomous financial plan.
+
+Categories to allocate across: {categories}
+
+Rules:
+- Saver mindset: Savings ≥ 20%, Needs ≥ 60%, Wants ≤ 20%
+- Neutral mindset: Savings ≥ 15%, Needs ≥ 50%, Wants ≤ 35%
+- Spender mindset: Savings ≥ 10%, Needs ≥ 45%, Wants ≤ 45%
+- Groceries, Food & Dining, Transport, Health, Debt repayment = NEEDS
+- Entertainment, Hobbies, Subscription = WANTS
+- Savings = SAVINGS (treat as non-negotiable)
+- All percentages must sum to exactly 100
+
+Return ONLY valid JSON (no markdown, no explanation):
+{{
+  "allocation": {{
+    "Food & Dining": <float>,
+    "Transport": <float>,
+    "Groceries": <float>,
+    "Health": <float>,
+    "Entertainment": <float>,
+    "Debt repayment": <float>,
+    "Hobbies": <float>,
+    "Subscription": <float>,
+    "Savings": <float>
+  }},
+  "savings_plan": {{
+    "daily": <float>,
+    "weekly": <float>,
+    "monthly": <float>,
+    "tip": "<one actionable saving tip>"
+  }},
+  "advice": [
+    {{"title": "<short title>", "body": "<actionable advice 1-2 sentences>", "type": "info|warning|success"}},
+    {{"title": "<short title>", "body": "<actionable advice 1-2 sentences>", "type": "info|warning|success"}},
+    {{"title": "<short title>", "body": "<actionable advice 1-2 sentences>", "type": "info|warning|success"}}
+  ],
+  "financial_summary": "<2-sentence overall assessment of their financial health>"
+}}
+"""
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = model.generate_content(prompt)
+        raw = response.text.strip()
+        # Strip markdown code fences if present
+        if raw.startswith('```'):
+            raw = raw.split('```')[1]
+            if raw.startswith('json'):
+                raw = raw[4:]
+        result = json.loads(raw.strip())
+
+        # Normalize allocation to 100%
+        alloc = result.get('allocation', {})
+        total = sum(alloc.values())
+        if total > 0 and abs(total - 100) > 0.5:
+            factor = 100 / total
+            alloc = {k: round(v * factor, 1) for k, v in alloc.items()}
+            result['allocation'] = alloc
+
+        # Persist allocation to DB
+        UserAllocation.query.filter_by(user_id=user.id).delete()
+        needs = {'Food & Dining', 'Transport', 'Groceries', 'Health', 'Debt repayment'}
+        savings_cats = {'Savings'}
+        for cat, pct in alloc.items():
+            t = 'need' if cat in needs else ('savings' if cat in savings_cats else 'want')
+            db.session.add(UserAllocation(user_id=user.id, category_name=cat, type=t, percentage=pct))
+
+        # Persist budget limits
+        Budget.query.filter_by(user_id=user.id).delete()
+        for cat, pct in alloc.items():
+            db.session.add(Budget(user_id=user.id, category=cat, limit_amount=round(monthly_income * pct / 100, 2)))
+
+        db.session.commit()
+
+        # Add peso amounts to allocation
+        result['allocation_amounts'] = {cat: round(monthly_income * pct / 100, 2) for cat, pct in alloc.items()}
+        result['monthly_income'] = monthly_income
+        return jsonify(result), 200
+
+    except Exception as e:
+        print(f"AI full_setup error: {e}")
+        # Intelligent fallback based on mindset
+        mindset_lower = mindset.lower()
+        if mindset_lower == 'saver':
+            alloc = {'Food & Dining': 20, 'Transport': 10, 'Groceries': 15, 'Health': 5,
+                     'Entertainment': 5, 'Debt repayment': 15, 'Hobbies': 3, 'Subscription': 2, 'Savings': 25}
+        elif mindset_lower == 'spender':
+            alloc = {'Food & Dining': 22, 'Transport': 10, 'Groceries': 13, 'Health': 5,
+                     'Entertainment': 12, 'Debt repayment': 10, 'Hobbies': 8, 'Subscription': 5, 'Savings': 15}
+        else:
+            alloc = {'Food & Dining': 20, 'Transport': 10, 'Groceries': 14, 'Health': 5,
+                     'Entertainment': 8, 'Debt repayment': 12, 'Hobbies': 5, 'Subscription': 4, 'Savings': 22}
+        monthly_save = monthly_income * (alloc['Savings'] / 100)
+        return jsonify({
+            'allocation': alloc,
+            'allocation_amounts': {k: round(monthly_income * v / 100, 2) for k, v in alloc.items()},
+            'savings_plan': {'daily': round(monthly_save/30, 2), 'weekly': round(monthly_save/4, 2), 'monthly': round(monthly_save, 2), 'tip': 'Automate your savings on payday.'},
+            'advice': [
+                {'title': 'Stay Consistent', 'body': 'Track every expense to improve your score.', 'type': 'info'},
+                {'title': 'Savings First', 'body': 'Transfer savings immediately after receiving income.', 'type': 'success'},
+                {'title': 'Review Wants', 'body': 'Audit subscriptions and entertainment monthly.', 'type': 'warning'}
+            ],
+            'financial_summary': 'Your AI plan is ready. Start by logging your expenses to get personalized insights.',
+            'monthly_income': monthly_income
+        }), 200
+
+
+@app.route('/api/ai/classify_transaction', methods=['POST'])
+@login_required
+def ai_classify_transaction():
+    """
+    Gemini classifies a transaction: is_need, priority, suggested_note.
+    Called automatically when user adds a transaction.
+    """
+    user = get_current_user()
+    data = request.json
+    category = data.get('category', '')
+    amount = data.get('amount', 0)
+    tx_type = data.get('tx_type', 'expense')
+    note = data.get('note', '')
+
+    if tx_type == 'income':
+        return jsonify({'is_need': True, 'priority': 3, 'suggested_note': 'Income received'}), 200
+
+    prompt = f"""
+Classify this expense for a Filipino user:
+- Category: {category}
+- Amount: ₱{amount}
+- Note: {note or 'none'}
+
+Return ONLY valid JSON:
+{{
+  "is_need": <true if essential/need, false if want/luxury>,
+  "priority": <integer 0=low, 1=medium, 2=high, 3=critical>,
+  "suggested_note": "<short helpful context about this expense, max 8 words>"
+}}
+"""
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = model.generate_content(prompt)
+        raw = response.text.strip()
+        if raw.startswith('```'):
+            raw = raw.split('```')[1]
+            if raw.startswith('json'):
+                raw = raw[4:]
+        result = json.loads(raw.strip())
+        return jsonify(result), 200
+    except Exception as e:
+        needs = {'Food & Dining', 'Transport', 'Groceries', 'Health', 'Debt repayment', 'Mortgage'}
+        return jsonify({'is_need': category in needs, 'priority': 2 if category in needs else 1, 'suggested_note': note or ''}), 200
+
+
+@app.route('/api/ai/chat', methods=['POST'])
+@login_required
+def ai_chat():
+    """Full Gemini-powered chat with complete financial context."""
+    user = get_current_user()
+    data = request.json
+    user_message = data.get('message', '')
+    summary = get_monthly_summary(user.id)
+    score = compute_health_score(user.id)
+    future_cnt = FutureExpense.query.filter_by(user_id=user.id).count()
+    allocs = UserAllocation.query.filter_by(user_id=user.id).all()
+    alloc_str = ', '.join([f"{a.category_name}: {a.percentage}%" for a in allocs]) or 'Not set'
+    recent = Transaction.query.filter_by(user_id=user.id).order_by(Transaction.tx_date.desc()).limit(8).all()
+    recent_str = '\n'.join([f"  {t.category}: ₱{t.amount:.2f} ({t.tx_type}) on {t.tx_date.strftime('%b %d')}" for t in recent]) or 'None'
+
+    prompt = f"""You are SmartSpend AI, an expert Filipino personal finance assistant for {user.name}.
+
+Financial snapshot:
+- Balance: ₱{summary['balance']:,.2f}
+- Monthly income: ₱{summary['income']:,.2f}
+- Monthly expenses: ₱{summary['expense']:,.2f}
+- Health score: {score}/100
+- Mindset: {user.spending_mindset}
+- AI budget allocation: {alloc_str}
+- Upcoming pinned expenses: {future_cnt}
+
+Recent transactions:
+{recent_str}
+
+User asks: "{user_message}"
+
+Reply in 3-5 sentences max. Be specific, warm, and actionable. Use peso signs. Reference their actual data. Do not mention being an AI unless directly asked."""
+
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = model.generate_content(prompt)
+        return jsonify({'reply': response.text.strip()}), 200
+    except Exception as e:
+        return jsonify({'reply': "I'm having connectivity issues. Please try again in a moment."}), 200
+
+
+# ----------------------------------------------------------------------
+# Initialize DB
 # ----------------------------------------------------------------------
 with app.app_context():
     db.create_all()
@@ -846,658 +725,1184 @@ with app.app_context():
 
 
 # ----------------------------------------------------------------------
-# Embedded HTML (full frontend with draggable/resizable/undeletable chatbot)
+# Frontend
 # ----------------------------------------------------------------------
-HTML_PAGE = """
-<!DOCTYPE html>
+@app.route('/')
+def index():
+    return HTML_PAGE
+
+
+HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SmartSpend - AI Finance</title>
-    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        :root {
-            --bg: #0a0f1a; --bg2: #0f1622; --bg3: #151e2d;
-            --panel: rgba(21, 30, 45, 0.9); --border: rgba(0, 210, 130, 0.2);
-            --border2: rgba(255, 255, 255, 0.05); --green: #00d282; --green2: #00ff9d;
-            --green-dim: rgba(0, 210, 130, 0.15); --red: #ff4d6d; --red-dim: rgba(255, 77, 109, 0.15);
-            --amber: #f0a500; --blue: #3b82f6; --purple: #a855f7;
-            --muted: #6c86a0; --text: #e2eff8;
-            --mono: 'JetBrains Mono', monospace; --sans: 'Space Grotesk', sans-serif; --r: 16px;
-        }
-        body { font-family: var(--sans); background: var(--bg); color: var(--text); }
-        .sidebar { position: fixed; left: 0; top: 0; bottom: 0; width: 80px; background: rgba(15, 22, 34, 0.98); backdrop-filter: blur(12px); border-right: 1px solid var(--border2); display: flex; flex-direction: column; align-items: center; padding: 24px 0; gap: 10px; z-index: 100; transition: width 0.3s; }
-        .sidebar:hover { width: 240px; }
-        .sidebar-logo { width: 48px; height: 48px; border-radius: 14px; background: linear-gradient(135deg, var(--green), #009e5f); display: flex; align-items: center; justify-content: center; margin-bottom: 28px; cursor: pointer; font-size: 1.5rem; }
-        .nav-item { width: 100%; display: flex; align-items: center; gap: 16px; padding: 12px 24px; border-radius: 12px; cursor: pointer; border: none; background: transparent; color: var(--muted); font-size: 0.9rem; font-weight: 500; white-space: nowrap; overflow: hidden; transition: all 0.2s; }
-        .nav-item:hover { background: var(--green-dim); color: var(--text); transform: translateX(6px); }
-        .nav-item.active { background: var(--green-dim); color: var(--green); border-left: 3px solid var(--green); }
-        .nav-label { opacity: 0; transition: opacity 0.2s; }
-        .sidebar:hover .nav-label { opacity: 1; }
-        .sidebar-bottom { margin-top: auto; width: 100%; }
-        .main { margin-left: 80px; padding: 24px 32px; min-height: 100vh; }
-        @media (max-width: 768px) { .sidebar { width: 70px; } .main { margin-left: 70px; padding: 20px; } }
-        .topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 28px; flex-wrap: wrap; gap: 16px; }
-        .topbar h1 { font-size: 1.75rem; font-weight: 700; background: linear-gradient(135deg, #fff, var(--green)); background-clip: text; -webkit-background-clip: text; color: transparent; }
-        .score-pill { display: flex; align-items: center; gap: 10px; padding: 8px 20px; border-radius: 99px; background: var(--green-dim); border: 1px solid var(--border); font-size: 0.85rem; font-weight: 600; }
-        .avatar { width: 42px; height: 42px; border-radius: 50%; background: linear-gradient(135deg, var(--blue), var(--purple)); display: flex; align-items: center; justify-content: center; font-weight: 700; cursor: pointer; }
-        .signout-btn { background: var(--red-dim); border: 1px solid rgba(255, 77, 109, 0.2); color: var(--red); padding: 8px 18px; border-radius: 10px; cursor: pointer; }
-        .screen { display: none; animation: fadeUp 0.35s ease; }
-        .screen.active { display: block; }
-        @keyframes fadeUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
-        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 20px; margin-bottom: 28px; }
-        .stat-card { background: var(--panel); backdrop-filter: blur(10px); border: 1px solid var(--border2); border-radius: var(--r); padding: 22px; cursor: pointer; }
-        .stat-value { font-size: 1.8rem; font-weight: 700; font-family: var(--mono); }
-        .stat-label { font-size: 0.7rem; text-transform: uppercase; color: var(--muted); margin-top: 8px; }
-        .panel { background: var(--panel); backdrop-filter: blur(10px); border: 1px solid var(--border2); border-radius: var(--r); padding: 22px; margin-bottom: 20px; }
-        .panel-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 12px; }
-        .btn { background: var(--bg3); color: var(--text); border: 1px solid var(--border2); border-radius: 10px; padding: 10px 14px; cursor: pointer; font-weight: 600; }
-        .btn-green { background: linear-gradient(135deg, var(--green), #009e5f); color: #000; border: none; }
-        .btn-ai { background: linear-gradient(135deg, var(--purple), var(--blue)); color: white; border: none; }
-        input, select { background: var(--bg3); color: var(--text); border: 1px solid var(--border2); border-radius: 10px; padding: 10px 14px; outline: none; }
-        .cat-row { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; flex-wrap: wrap; }
-        .cat-row input[type="number"] { width: 80px; }
-        .allocation-box { background: var(--bg3); border-radius: 12px; padding: 16px; margin: 12px 0; }
-        .ml-badge { background: linear-gradient(135deg, var(--purple), var(--blue)); padding: 2px 8px; border-radius: 12px; font-size: 0.7rem; font-weight: 600; margin-left: 8px; }
-        .forecast-scenarios { display: flex; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
-        .scenario-card { background: var(--bg3); border-radius: 12px; padding: 12px; flex: 1; text-align: center; cursor: pointer; }
-        .scenario-card.active { border: 2px solid var(--green); background: var(--green-dim); }
-        .future-expense-item { background: var(--bg3); border-radius: 12px; padding: 12px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
-        .warning { color: var(--red); font-size: 0.8rem; margin-top: 8px; }
-        .last-expense-item { background: var(--bg3); border-radius: 10px; padding: 10px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
-        .forecast-row { display: flex; align-items: center; gap: 14px; margin-bottom: 14px; }
-        .forecast-week { width: 70px; font-weight: 600; color: var(--green); }
-        .forecast-bar-track { flex: 1; height: 8px; background: var(--bg3); border-radius: 99px; overflow: hidden; }
-        .forecast-bar-fill { height: 100%; background: linear-gradient(90deg, var(--green), var(--green2)); width: 0; border-radius: 99px; transition: width 1s ease; }
-        .form-row { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; align-items: center; }
-        .form-row > * { flex: 1; min-width: 120px; }
-        /* Chatbot styles (draggable, resizable, no close button) */
-        .chat-container {
-            position: fixed;
-            bottom: 20px;
-            right: 20px;
-            width: 380px;
-            height: 480px;
-            min-width: 280px;
-            min-height: 320px;
-            max-width: 80vw;
-            max-height: 80vh;
-            resize: both;
-            overflow: auto;
-            z-index: 10001;
-            cursor: default;
-        }
-        .chat-window {
-            width: 100%;
-            height: 100%;
-            background: var(--bg2);
-            backdrop-filter: blur(10px);
-            border: 1px solid var(--green);
-            border-radius: 24px;
-            display: flex;
-            flex-direction: column;
-            overflow: hidden;
-            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
-        }
-        .chat-header {
-            padding: 14px 18px;
-            background: var(--bg3);
-            border-bottom: 1px solid var(--border);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            cursor: move;
-            user-select: none;
-        }
-        .chat-header span {
-            font-weight: 600;
-        }
-        .chat-messages {
-            flex: 1;
-            overflow-y: auto;
-            padding: 16px;
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-        }
-        .message {
-            max-width: 85%;
-            padding: 10px 14px;
-            border-radius: 18px;
-            font-size: 0.85rem;
-        }
-        .user-message {
-            align-self: flex-end;
-            background: var(--green-dim);
-            color: var(--green);
-            border-bottom-right-radius: 4px;
-        }
-        .bot-message {
-            align-self: flex-start;
-            background: var(--bg3);
-            color: var(--text);
-            border-bottom-left-radius: 4px;
-        }
-        .chat-input {
-            display: flex;
-            padding: 14px;
-            gap: 10px;
-            background: var(--bg3);
-            border-top: 1px solid var(--border);
-        }
-        #chatInput {
-            flex: 1;
-        }
-        #sendChatBtn {
-            background: var(--green-dim);
-            border: none;
-            color: var(--green);
-        }
-        #toast { position: fixed; bottom: 24px; right: 24px; background: var(--bg2); border: 1px solid var(--green); border-radius: 12px; padding: 12px 24px; opacity: 0; transition: all 0.25s; z-index: 10000; }
-        #toast.show { opacity: 1; }
-        .auth-overlay { position: fixed; inset: 0; background: rgba(8,13,20,0.98); backdrop-filter: blur(20px); z-index: 9999; display: flex; align-items: center; justify-content: center; }
-        .auth-card { background: linear-gradient(145deg, #0d1520, #0a1220); border: 1px solid rgba(0,210,130,0.2); border-radius: 28px; padding: 40px; width: 400px; max-width: 90%; }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SmartSpend — AI Finance</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@300;400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+:root{
+  --void:#060A10;--bg:#0B1120;--bg2:#111928;--bg3:#17223A;--bg4:#1E2E4A;
+  --green:#00E5A0;--green-dim:rgba(0,229,160,0.1);--green-glow:rgba(0,229,160,0.35);
+  --red:#FF3B5C;--red-dim:rgba(255,59,92,0.12);
+  --amber:#F5A623;--blue:#3B8BFF;--purple:#9B59F5;
+  --muted:#4A6080;--muted2:#6B88A8;--text:#D8EAF8;--text2:#B0C8E0;
+  --border:rgba(0,229,160,0.15);--border2:rgba(255,255,255,0.06);
+  --r:14px;--r2:20px;
+  --font-display:'Syne',sans-serif;
+  --font-mono:'IBM Plex Mono',monospace;
+}
+body{font-family:var(--font-display);background:var(--void);color:var(--text);min-height:100vh;overflow-x:hidden;}
+::selection{background:var(--green-dim);color:var(--green);}
+
+/* Noise texture overlay */
+body::before{
+  content:'';position:fixed;inset:0;
+  background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.03'/%3E%3C/svg%3E");
+  pointer-events:none;z-index:0;opacity:0.4;
+}
+
+/* SIDEBAR */
+.sidebar{
+  position:fixed;left:0;top:0;bottom:0;width:72px;
+  background:rgba(11,17,32,0.95);backdrop-filter:blur(20px);
+  border-right:1px solid var(--border2);
+  display:flex;flex-direction:column;align-items:center;
+  padding:20px 0;gap:6px;z-index:200;
+  transition:width 0.3s cubic-bezier(0.4,0,0.2,1);
+}
+.sidebar:hover{width:220px;}
+.logo{
+  width:44px;height:44px;border-radius:12px;margin-bottom:20px;
+  background:linear-gradient(135deg,var(--green),#009e6a);
+  display:flex;align-items:center;justify-content:center;
+  font-size:1.4rem;cursor:pointer;flex-shrink:0;
+  box-shadow:0 0 24px var(--green-glow);
+}
+.nav-item{
+  width:calc(100% - 16px);display:flex;align-items:center;gap:14px;
+  padding:12px 14px;border-radius:10px;cursor:pointer;
+  border:none;background:transparent;color:var(--muted2);
+  font-family:var(--font-display);font-size:0.875rem;font-weight:500;
+  white-space:nowrap;overflow:hidden;transition:all 0.2s;text-align:left;
+}
+.nav-item:hover{background:var(--green-dim);color:var(--text);}
+.nav-item.active{background:var(--green-dim);color:var(--green);box-shadow:inset 2px 0 0 var(--green);}
+.nav-icon{font-size:1.1rem;flex-shrink:0;width:20px;text-align:center;}
+.nav-label{opacity:0;transition:opacity 0.2s;font-size:0.85rem;}
+.sidebar:hover .nav-label{opacity:1;}
+.sidebar-sep{width:40px;height:1px;background:var(--border2);margin:8px 0;}
+.sidebar:hover .sidebar-sep{width:calc(100% - 28px);}
+
+/* MAIN */
+.main{margin-left:72px;padding:28px 36px;min-height:100vh;position:relative;z-index:1;}
+@media(max-width:768px){.main{margin-left:0;padding:16px;}.sidebar{display:none;}}
+
+/* TOPBAR */
+.topbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:32px;gap:16px;flex-wrap:wrap;}
+.page-title{font-size:1.6rem;font-weight:800;letter-spacing:-0.5px;}
+.topbar-right{display:flex;align-items:center;gap:12px;}
+.health-pill{
+  display:flex;align-items:center;gap:8px;
+  padding:7px 16px;border-radius:99px;
+  background:var(--green-dim);border:1px solid var(--border);
+  font-family:var(--font-mono);font-size:0.8rem;color:var(--green);
+}
+.health-dot{width:8px;height:8px;border-radius:50%;background:var(--green);animation:pulse 2s infinite;}
+@keyframes pulse{0%,100%{opacity:1;box-shadow:0 0 0 0 var(--green-glow);}50%{opacity:0.8;box-shadow:0 0 0 6px transparent;}}
+.avatar{
+  width:40px;height:40px;border-radius:10px;
+  background:linear-gradient(135deg,var(--blue),var(--purple));
+  display:flex;align-items:center;justify-content:center;
+  font-weight:700;font-size:0.9rem;cursor:pointer;
+}
+.btn-signout{background:var(--red-dim);border:1px solid rgba(255,59,92,0.2);color:var(--red);padding:8px 16px;border-radius:10px;cursor:pointer;font-family:var(--font-display);font-weight:600;font-size:0.85rem;}
+
+/* SCREENS */
+.screen{display:none;animation:fadeIn 0.3s ease;}
+.screen.active{display:block;}
+@keyframes fadeIn{from{opacity:0;transform:translateY(12px);}to{opacity:1;transform:translateY(0);}}
+
+/* CARDS */
+.card{background:var(--bg2);border:1px solid var(--border2);border-radius:var(--r2);padding:24px;margin-bottom:20px;transition:border-color 0.2s;}
+.card:hover{border-color:var(--border);}
+.card-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;flex-wrap:wrap;gap:12px;}
+.card-title{font-size:0.95rem;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;}
+.ai-badge{background:linear-gradient(90deg,var(--purple),var(--blue));color:#fff;padding:3px 10px;border-radius:99px;font-size:0.68rem;font-weight:600;letter-spacing:0.5px;}
+
+/* STATS GRID */
+.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:24px;}
+.stat-card{
+  background:var(--bg2);border:1px solid var(--border2);border-radius:var(--r2);padding:22px;
+  position:relative;overflow:hidden;transition:all 0.25s;cursor:default;
+}
+.stat-card::before{
+  content:'';position:absolute;top:0;right:0;width:80px;height:80px;
+  background:radial-gradient(circle,var(--green-dim),transparent 70%);
+  border-radius:50%;transform:translate(30px,-30px);
+}
+.stat-card.neg::before{background:radial-gradient(circle,var(--red-dim),transparent 70%);}
+.stat-card.blue-glow::before{background:radial-gradient(circle,rgba(59,139,255,0.1),transparent 70%);}
+.stat-value{font-family:var(--font-mono);font-size:1.7rem;font-weight:600;margin-bottom:6px;letter-spacing:-1px;}
+.stat-label{font-size:0.72rem;color:var(--muted2);text-transform:uppercase;letter-spacing:0.5px;}
+.stat-sub{font-size:0.75rem;color:var(--muted);font-family:var(--font-mono);margin-top:4px;}
+
+/* INCOME HERO */
+.income-hero{
+  background:linear-gradient(135deg,var(--bg2) 0%,rgba(0,229,160,0.05) 100%);
+  border:1px solid var(--border);border-radius:var(--r2);padding:32px;
+  margin-bottom:24px;position:relative;overflow:hidden;
+}
+.income-hero::after{
+  content:'';position:absolute;top:-60px;right:-60px;
+  width:200px;height:200px;border-radius:50%;
+  background:radial-gradient(circle,var(--green-glow),transparent 70%);
+}
+.income-label{font-size:0.8rem;color:var(--muted2);text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;}
+.income-input-row{display:flex;gap:12px;align-items:stretch;flex-wrap:wrap;}
+.income-peso{
+  font-family:var(--font-mono);font-size:2rem;font-weight:500;
+  color:var(--green);display:flex;align-items:center;padding:0 8px;
+}
+.income-input{
+  flex:1;min-width:200px;
+  font-family:var(--font-mono);font-size:1.8rem;font-weight:500;
+  background:transparent;border:none;border-bottom:2px solid var(--border);
+  color:var(--text);outline:none;padding:8px 4px;
+  transition:border-color 0.2s;
+}
+.income-input:focus{border-color:var(--green);}
+.mindset-row{display:flex;gap:10px;margin-top:20px;flex-wrap:wrap;}
+.mindset-btn{
+  padding:8px 20px;border-radius:99px;border:1px solid var(--border2);
+  background:transparent;color:var(--muted2);cursor:pointer;
+  font-family:var(--font-display);font-size:0.85rem;font-weight:500;
+  transition:all 0.2s;
+}
+.mindset-btn.active{background:var(--green-dim);border-color:var(--green);color:var(--green);}
+.btn-analyze{
+  background:linear-gradient(135deg,var(--green),#00b87a);color:#000;
+  border:none;border-radius:12px;padding:14px 28px;cursor:pointer;
+  font-family:var(--font-display);font-weight:700;font-size:0.95rem;
+  display:flex;align-items:center;gap:10px;transition:all 0.2s;flex-shrink:0;
+  box-shadow:0 4px 20px var(--green-glow);
+}
+.btn-analyze:hover{transform:translateY(-2px);box-shadow:0 8px 28px var(--green-glow);}
+.btn-analyze:disabled{opacity:0.5;cursor:not-allowed;transform:none;}
+
+/* AI STATUS FEED */
+.ai-feed{margin-bottom:24px;}
+.ai-feed-header{display:flex;align-items:center;gap:10px;margin-bottom:14px;}
+.ai-pulse{width:10px;height:10px;border-radius:50%;background:var(--green);animation:pulse 1.5s infinite;}
+.ai-feed-title{font-family:var(--font-mono);font-size:0.8rem;color:var(--green);text-transform:uppercase;letter-spacing:1px;}
+.ai-event{
+  display:flex;align-items:flex-start;gap:12px;
+  padding:10px 0;border-bottom:1px solid var(--border2);
+  animation:slideIn 0.4s ease;
+}
+@keyframes slideIn{from{opacity:0;transform:translateX(-10px);}to{opacity:1;transform:translateX(0);}}
+.ai-event:last-child{border-bottom:none;}
+.ai-event-icon{font-size:1rem;flex-shrink:0;margin-top:1px;}
+.ai-event-text{font-size:0.83rem;color:var(--text2);line-height:1.5;}
+.ai-event-time{font-family:var(--font-mono);font-size:0.7rem;color:var(--muted);margin-left:auto;flex-shrink:0;}
+
+/* ALLOCATION DISPLAY */
+.alloc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;}
+.alloc-item{background:var(--bg3);border-radius:12px;padding:16px;position:relative;overflow:hidden;}
+.alloc-item-bar{position:absolute;bottom:0;left:0;height:3px;background:var(--green);transition:width 1s ease;}
+.alloc-item-bar.want{background:var(--amber);}
+.alloc-item-bar.savings{background:var(--blue);}
+.alloc-cat{font-size:0.78rem;color:var(--muted2);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.3px;}
+.alloc-pct{font-family:var(--font-mono);font-size:1.4rem;font-weight:600;color:var(--text);}
+.alloc-amount{font-family:var(--font-mono);font-size:0.8rem;color:var(--muted2);margin-top:4px;}
+.alloc-type{font-size:0.65rem;padding:2px 8px;border-radius:99px;display:inline-block;margin-top:6px;font-weight:600;}
+.alloc-type.need{background:var(--green-dim);color:var(--green);}
+.alloc-type.want{background:rgba(245,166,35,0.12);color:var(--amber);}
+.alloc-type.savings{background:rgba(59,139,255,0.12);color:var(--blue);}
+
+/* SAVINGS PLAN */
+.savings-cards{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:16px;}
+.savings-card{background:var(--bg3);border-radius:12px;padding:16px;text-align:center;}
+.savings-period{font-size:0.72rem;color:var(--muted2);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px;}
+.savings-amount{font-family:var(--font-mono);font-size:1.3rem;font-weight:600;color:var(--green);}
+
+/* ADVICE CARDS */
+.advice-list{display:flex;flex-direction:column;gap:10px;}
+.advice-card{background:var(--bg3);border-radius:12px;padding:16px;display:flex;gap:12px;align-items:flex-start;border-left:3px solid var(--muted);}
+.advice-card.info{border-color:var(--blue);}
+.advice-card.warning{border-color:var(--amber);}
+.advice-card.success{border-color:var(--green);}
+.advice-icon{font-size:1.1rem;flex-shrink:0;}
+.advice-title{font-size:0.85rem;font-weight:600;margin-bottom:4px;}
+.advice-body{font-size:0.8rem;color:var(--text2);line-height:1.5;}
+
+/* TRANSACTION FORM */
+.tx-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;align-items:end;}
+.form-group{display:flex;flex-direction:column;gap:6px;}
+.form-label{font-size:0.72rem;color:var(--muted2);text-transform:uppercase;letter-spacing:0.5px;}
+.form-input,.form-select{
+  background:var(--bg3);color:var(--text);
+  border:1px solid var(--border2);border-radius:10px;
+  padding:11px 14px;outline:none;
+  font-family:var(--font-display);font-size:0.9rem;
+  transition:border-color 0.2s;width:100%;
+}
+.form-input:focus,.form-select:focus{border-color:var(--green);}
+.form-select option{background:var(--bg2);}
+.btn-add{
+  background:linear-gradient(135deg,var(--green),#00b87a);color:#000;
+  border:none;border-radius:10px;padding:12px 20px;cursor:pointer;
+  font-family:var(--font-display);font-weight:700;font-size:0.9rem;
+  transition:all 0.2s;white-space:nowrap;
+}
+.btn-add:hover{transform:translateY(-1px);}
+.btn-add:disabled{opacity:0.5;cursor:not-allowed;}
+
+/* AI CLASSIFICATION TAG */
+.ai-classify-result{
+  display:inline-flex;align-items:center;gap:6px;
+  background:var(--green-dim);border:1px solid var(--border);
+  color:var(--green);border-radius:8px;padding:6px 12px;
+  font-family:var(--font-mono);font-size:0.75rem;margin-top:8px;
+  animation:fadeIn 0.3s ease;
+}
+
+/* TRANSACTION LIST */
+.tx-list{display:flex;flex-direction:column;gap:8px;}
+.tx-item{
+  display:flex;align-items:center;gap:14px;
+  background:var(--bg3);border-radius:12px;padding:14px 16px;
+  transition:background 0.15s;
+}
+.tx-item:hover{background:var(--bg4);}
+.tx-cat-icon{width:36px;height:36px;border-radius:10px;background:var(--bg4);display:flex;align-items:center;justify-content:center;font-size:1rem;flex-shrink:0;}
+.tx-info{flex:1;}
+.tx-cat{font-size:0.88rem;font-weight:500;}
+.tx-meta{font-size:0.72rem;color:var(--muted);margin-top:2px;font-family:var(--font-mono);}
+.tx-amount{font-family:var(--font-mono);font-weight:600;font-size:0.95rem;flex-shrink:0;}
+.tx-amount.income{color:var(--green);}
+.tx-amount.expense{color:var(--red);}
+.tx-badge{font-size:0.65rem;padding:2px 7px;border-radius:99px;margin-left:6px;font-weight:600;}
+.tx-badge.need{background:var(--green-dim);color:var(--green);}
+.tx-badge.want{background:rgba(245,166,35,0.12);color:var(--amber);}
+.btn-del{background:none;border:none;color:var(--muted);cursor:pointer;font-size:1rem;padding:4px;border-radius:6px;transition:all 0.15s;}
+.btn-del:hover{color:var(--red);background:var(--red-dim);}
+
+/* FUTURE EXPENSES */
+.future-item{
+  display:flex;align-items:center;gap:14px;
+  background:var(--bg3);border-radius:12px;padding:14px 16px;margin-bottom:8px;
+}
+.future-info{flex:1;}
+.future-desc{font-size:0.88rem;font-weight:500;}
+.future-meta{font-size:0.72rem;color:var(--muted);margin-top:2px;font-family:var(--font-mono);}
+.future-amount{font-family:var(--font-mono);font-weight:600;font-size:0.9rem;color:var(--amber);}
+
+/* FORECAST BARS */
+.forecast-bar-row{display:flex;align-items:center;gap:14px;margin-bottom:14px;}
+.forecast-week-label{font-family:var(--font-mono);font-size:0.75rem;color:var(--green);width:60px;flex-shrink:0;}
+.forecast-track{flex:1;height:6px;background:var(--bg3);border-radius:99px;overflow:hidden;}
+.forecast-fill{height:100%;background:linear-gradient(90deg,var(--green),#00b87a);border-radius:99px;width:0;transition:width 1.2s cubic-bezier(0.4,0,0.2,1);}
+.forecast-val{font-family:var(--font-mono);font-size:0.75rem;color:var(--text2);width:90px;text-align:right;flex-shrink:0;}
+
+/* LONGEVITY */
+.longevity-display{display:flex;align-items:center;gap:24px;padding:20px 0;flex-wrap:wrap;}
+.longevity-days{font-family:var(--font-mono);font-size:3rem;font-weight:600;color:var(--green);line-height:1;}
+.longevity-label{color:var(--muted2);font-size:0.85rem;margin-top:6px;}
+.longevity-sep{width:1px;height:60px;background:var(--border2);}
+.longevity-stat{text-align:center;}
+.longevity-stat-val{font-family:var(--font-mono);font-size:1.1rem;font-weight:600;}
+.longevity-stat-label{font-size:0.72rem;color:var(--muted);margin-top:4px;}
+
+/* BUTTONS */
+.btn{
+  background:var(--bg3);color:var(--text);border:1px solid var(--border2);
+  border-radius:10px;padding:10px 16px;cursor:pointer;
+  font-family:var(--font-display);font-weight:600;font-size:0.85rem;
+  transition:all 0.2s;
+}
+.btn:hover{border-color:var(--border);background:var(--bg4);}
+.btn-primary{background:var(--green-dim);border-color:var(--border);color:var(--green);}
+.btn-danger{background:var(--red-dim);border-color:rgba(255,59,92,0.2);color:var(--red);}
+
+/* TOAST */
+#toast{
+  position:fixed;bottom:28px;left:50%;transform:translateX(-50%) translateY(80px);
+  background:var(--bg2);border:1px solid var(--border);border-radius:12px;
+  padding:12px 24px;font-size:0.875rem;
+  opacity:0;transition:all 0.3s cubic-bezier(0.4,0,0.2,1);
+  z-index:9999;white-space:nowrap;
+  box-shadow:0 8px 32px rgba(0,0,0,0.4);
+}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
+
+/* EMPTY STATE */
+.empty-state{text-align:center;padding:40px;color:var(--muted);}
+.empty-state-icon{font-size:2.5rem;margin-bottom:12px;}
+.empty-state-text{font-size:0.9rem;line-height:1.6;}
+
+/* AUTH */
+.auth-overlay{
+  position:fixed;inset:0;
+  background:rgba(6,10,16,0.97);backdrop-filter:blur(20px);
+  z-index:9000;display:flex;align-items:center;justify-content:center;
+}
+.auth-card{
+  background:var(--bg2);border:1px solid var(--border);border-radius:24px;
+  padding:40px;width:420px;max-width:90%;
+  box-shadow:0 24px 80px rgba(0,0,0,0.5);
+}
+.auth-logo{font-size:2rem;margin-bottom:4px;}
+.auth-title{font-size:1.6rem;font-weight:800;margin-bottom:4px;}
+.auth-sub{font-size:0.85rem;color:var(--muted2);margin-bottom:28px;}
+.auth-input{
+  display:block;width:100%;
+  background:var(--bg3);color:var(--text);
+  border:1px solid var(--border2);border-radius:12px;
+  padding:13px 16px;outline:none;font-family:var(--font-display);
+  font-size:0.9rem;margin-bottom:12px;transition:border-color 0.2s;
+}
+.auth-input:focus{border-color:var(--green);}
+.btn-auth{
+  width:100%;background:linear-gradient(135deg,var(--green),#00b87a);
+  color:#000;border:none;border-radius:12px;
+  padding:14px;font-family:var(--font-display);font-weight:700;
+  font-size:1rem;cursor:pointer;margin-top:8px;
+  box-shadow:0 4px 20px var(--green-glow);transition:all 0.2s;
+}
+.btn-auth:hover{transform:translateY(-2px);}
+.auth-toggle{text-align:center;margin-top:16px;font-size:0.85rem;color:var(--muted2);cursor:pointer;}
+.auth-toggle span{color:var(--green);font-weight:600;}
+.auth-error{color:var(--red);font-size:0.8rem;margin-top:8px;min-height:18px;}
+.auth-checkbox{display:flex;align-items:center;gap:8px;margin-bottom:12px;font-size:0.85rem;color:var(--muted2);cursor:pointer;}
+
+/* CHATBOT */
+.chatbot{
+  position:fixed;bottom:20px;right:20px;
+  width:360px;height:460px;
+  min-width:280px;min-height:300px;max-width:85vw;max-height:70vh;
+  resize:both;overflow:auto;
+  z-index:8000;
+}
+.chat-window{
+  width:100%;height:100%;
+  background:var(--bg2);border:1px solid var(--border);border-radius:20px;
+  display:flex;flex-direction:column;overflow:hidden;
+  box-shadow:0 12px 48px rgba(0,0,0,0.4);
+}
+.chat-header{
+  padding:14px 16px;background:var(--bg3);
+  border-bottom:1px solid var(--border2);
+  display:flex;align-items:center;gap:10px;cursor:move;user-select:none;
+  flex-shrink:0;
+}
+.chat-header-title{font-size:0.875rem;font-weight:600;}
+.chat-msgs{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:8px;}
+.chat-msgs::-webkit-scrollbar{width:4px;}
+.chat-msgs::-webkit-scrollbar-track{background:transparent;}
+.chat-msgs::-webkit-scrollbar-thumb{background:var(--bg4);border-radius:99px;}
+.msg{max-width:84%;padding:10px 14px;border-radius:16px;font-size:0.82rem;line-height:1.5;}
+.msg.user{align-self:flex-end;background:var(--green-dim);color:var(--green);border-bottom-right-radius:4px;}
+.msg.bot{align-self:flex-start;background:var(--bg3);color:var(--text2);border-bottom-left-radius:4px;}
+.chat-input-row{display:flex;padding:12px;gap:8px;background:var(--bg3);border-top:1px solid var(--border2);flex-shrink:0;}
+.chat-inp{flex:1;background:var(--bg4);border:1px solid var(--border2);color:var(--text);border-radius:10px;padding:9px 12px;font-family:var(--font-display);font-size:0.82rem;outline:none;transition:border-color 0.2s;}
+.chat-inp:focus{border-color:var(--green);}
+.chat-send{background:var(--green-dim);border:1px solid var(--border);color:var(--green);border-radius:10px;padding:8px 14px;cursor:pointer;font-weight:600;font-size:0.82rem;transition:all 0.15s;}
+.chat-send:hover{background:var(--green);color:#000;}
+
+/* SPINNER */
+.spinner{display:inline-block;width:16px;height:16px;border:2px solid rgba(0,229,160,0.3);border-top-color:var(--green);border-radius:50%;animation:spin 0.7s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg);}}
+
+/* SUMMARY LINE */
+.financial-summary-text{font-size:0.875rem;color:var(--text2);line-height:1.6;font-style:italic;border-left:3px solid var(--green);padding-left:14px;margin-bottom:20px;}
+
+/* CHART WRAPPER */
+.chart-wrapper{position:relative;height:220px;}
+
+/* TABS */
+.tabs{display:flex;gap:4px;background:var(--bg3);border-radius:12px;padding:4px;margin-bottom:20px;}
+.tab{flex:1;padding:8px;border:none;background:transparent;color:var(--muted2);border-radius:8px;cursor:pointer;font-family:var(--font-display);font-size:0.82rem;font-weight:500;transition:all 0.2s;}
+.tab.active{background:var(--bg2);color:var(--text);box-shadow:0 2px 8px rgba(0,0,0,0.3);}
+
+/* SCROLLBAR */
+::-webkit-scrollbar{width:6px;}
+::-webkit-scrollbar-track{background:transparent;}
+::-webkit-scrollbar-thumb{background:var(--bg4);border-radius:99px;}
+</style>
 </head>
 <body>
+
+<!-- SIDEBAR -->
 <nav class="sidebar">
-    <div class="sidebar-logo">💰</div>
-    <button class="nav-item active" data-nav="dashboard"><span class="nav-label">Dashboard</span></button>
-    <button class="nav-item" data-nav="add"><span class="nav-label">Add Transaction</span></button>
-    <button class="nav-item" data-nav="analytics"><span class="nav-label">Analytics</span></button>
-    <button class="nav-item" data-nav="budgets"><span class="nav-label">Budgets</span></button>
-    <button class="nav-item" data-nav="transactions"><span class="nav-label">History</span></button>
-    <div class="sidebar-bottom"><button class="nav-item" id="exportBtn"><span class="nav-label">Export CSV</span></button></div>
+  <div class="logo">💚</div>
+  <button class="nav-item active" data-nav="dashboard"><span class="nav-icon">⚡</span><span class="nav-label">Dashboard</span></button>
+  <button class="nav-item" data-nav="add"><span class="nav-icon">＋</span><span class="nav-label">Add Transaction</span></button>
+  <button class="nav-item" data-nav="insights"><span class="nav-icon">📈</span><span class="nav-label">Insights</span></button>
+  <button class="nav-item" data-nav="future"><span class="nav-icon">📌</span><span class="nav-label">Future Expenses</span></button>
+  <button class="nav-item" data-nav="history"><span class="nav-icon">📋</span><span class="nav-label">History</span></button>
+  <div class="sidebar-sep"></div>
+  <button class="nav-item" id="exportBtn"><span class="nav-icon">⬇</span><span class="nav-label">Export CSV</span></button>
 </nav>
+
+<!-- MAIN -->
 <main class="main">
-    <div class="topbar">
-        <div><h1 id="pageTitle">Dashboard</h1></div>
-        <div class="topbar-right">
-            <div class="score-pill" id="scorePill"><div class="score-dot"></div><span>Health: <strong id="topScore">—</strong><span class="ml-badge">ML</span></span></div>
-            <div class="avatar" id="userAvatar">US</div>
-            <button class="signout-btn" id="signoutBtn">Sign Out</button>
-        </div>
+  <div class="topbar">
+    <div class="page-title" id="pageTitle">Dashboard</div>
+    <div class="topbar-right">
+      <div class="health-pill"><div class="health-dot"></div><span id="topScore" style="font-family:var(--font-mono)">—</span>&nbsp;/ 100</div>
+      <div class="avatar" id="userAvatar">—</div>
+      <button class="btn-signout" id="signoutBtn">Sign Out</button>
     </div>
-    <div id="toast"></div>
+  </div>
 
-    <!-- DASHBOARD -->
-    <div class="screen active" id="screen-dashboard">
-        <div class="stats-grid">
-            <div class="stat-card"><div class="stat-value" id="sBalance">—</div><div class="stat-label">Balance</div></div>
-            <div class="stat-card"><div class="stat-value" id="sExpense">—</div><div class="stat-label">Monthly Expenses</div></div>
-            <div class="stat-card"><div class="stat-value" id="sIncome">—</div><div class="stat-label">Monthly Income</div></div>
-            <div class="stat-card"><div class="stat-value" id="sScore">—</div><div class="stat-label">ML Health Score</div></div>
-        </div>
-        <div class="panel"><div class="panel-header">Income vs Expense Trend</div><canvas id="monthlyChart" height="200"></canvas></div>
-        <div class="panel"><div class="panel-header">ML Spending Forecast (4 weeks)</div><div id="forecastBars"></div></div>
-        <div class="panel"><div class="panel-header">AI Advice</div><div id="adviceList"></div></div>
-    </div>
+  <!-- ── DASHBOARD ── -->
+  <div class="screen active" id="screen-dashboard">
 
-    <!-- ADD TRANSACTION SCREEN (with transaction form + all AI features) -->
-    <div class="screen" id="screen-add">
-        <!-- Transaction entry form -->
-        <div class="panel">
-            <div class="panel-header">📝 Add New Transaction</div>
-            <div class="form-row">
-                <input type="number" id="txAmount" placeholder="Amount (₱)" step="0.01">
-                <select id="txCategory">
-                    <option>Food & Dining</option><option>Transport</option><option>Groceries</option><option>Entertainment</option>
-                    <option>Health</option><option>Debt repayment</option><option>Mortgage</option><option>Subscription</option>
-                    <option>Hobbies</option><option>Salary</option><option>Other</option>
-                </select>
-                <select id="txType">
-                    <option value="expense">Expense</option>
-                    <option value="income">Income</option>
-                </select>
-                <select id="txNeedWant">
-                    <option value="need">Need</option>
-                    <option value="want">Want</option>
-                </select>
-                <select id="txPriority">
-                    <option value="0">Low</option><option value="1" selected>Medium</option>
-                    <option value="2">High</option><option value="3">Critical</option>
-                </select>
-                <input type="text" id="txNote" placeholder="Note (optional)">
-                <button id="submitTransactionBtn" class="btn btn-green">➕ Add Transaction</button>
-            </div>
-        </div>
-
-        <!-- AI Autonomous Budget Allocation (same as before) -->
-        <div class="panel">
-            <div class="panel-header">🧠 AI Autonomous Budget Allocation <span class="ml-badge">GEMINI AI</span></div>
-            <div style="display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 16px;">
-                <div style="flex:1;"><label>Monthly Budget (₱)</label><input type="number" id="monthlyBudgetCap" placeholder="Auto from income" step="100"></div>
-                <div style="flex:1;"><label>Social Status</label><select id="socialStatusDiagram"><option>Low</option><option selected>Middle</option><option>Upper</option></select></div>
-                <div style="flex:1;"><label>Mindset</label><select id="mindsetDiagram"><option>Saver</option><option selected>Neutral</option><option>Spender</option></select></div>
-                <div style="flex:1;"><label>Cycle</label><select id="budgetCycle"><option>Daily</option><option>Weekly</option><option selected>Monthly</option><option>Yearly</option></select></div>
-            </div>
-            <div style="text-align: right; margin-bottom: 10px;">
-                <button id="aiAutoAllocateBtn" class="btn btn-ai">🤖 AI Auto-Allocate (Gemini)</button>
-                <span class="ml-badge">100% autonomous</span>
-            </div>
-            <div id="categoryAllocationList"></div>
-            <div class="allocation-box" id="allocationDisplay">Needs: -- / Wants: -- / Savings: --</div>
-            <div class="pref-checkbox"><label><input type="checkbox" id="autoRemainingToWants" checked> Automatically allocate remaining % to Wants</label></div>
-            <div id="allocationWarning" class="warning" style="display: none;">⚠️ Total allocation must be 100%</div>
-        </div>
-
-        <!-- PIN FUTURE EXPENSE -->
-        <div class="panel">
-            <div class="panel-header">📌 PIN FUTURE EXPENSE</div>
-            <div style="display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 16px;">
-                <input type="text" id="futureDesc" placeholder="Description" style="flex:2">
-                <input type="number" id="futureAmount" placeholder="Amount (₱)" style="flex:1">
-                <select id="futureCategory"><option>Entertainment</option><option>Food & Dining</option><option>Transport</option><option>Groceries</option><option>Health</option><option>Other</option></select>
-                <select id="futureCycle"><option>One-time</option><option>Weekly</option><option>Monthly</option></select>
-                <input type="date" id="futureDate">
-                <button id="pinFutureExpenseBtn" class="btn btn-green">Pin Expense</button>
-                <button id="applyFutureBtn" class="btn btn-ai">💰 Process Pending Future Expenses</button>
-            </div>
-            <div id="futureExpensesList"></div>
-        </div>
-
-        <!-- LAST 3 EXPENSES -->
-        <div class="panel">
-            <div class="panel-header">📝 LAST 3 EXPENSES (History)</div>
-            <div id="lastExpenseList"></div>
-        </div>
-
-        <!-- ML FORECAST -->
-        <div class="panel">
-            <div class="panel-header">📈 ML FORECAST</div>
-            <select id="forecastScenarioSelect"><option value="optimistic">Optimistic</option><option value="realistic" selected>Realistic</option><option value="pessimistic">Pessimistic</option></select>
-            <button id="linkToAnalyticsBtn" class="btn">View in Analytics →</button>
-            <div id="forecastScenariosDisplay" class="forecast-scenarios"></div>
-        </div>
-
-        <div class="panel">
-            <div class="panel-header">⚙️ REAL‑TIME ML Preferences</div>
-            <label><input type="checkbox" id="prefAlertWant"> Alert me before any want expense</label>
-            <label><input type="checkbox" id="prefDailyForecast" checked> Show forecast summary</label>
-        </div>
-
-        <div class="panel budget-limit-panel">
-            <div class="panel-header">💰 Budget Limits (by category) <span class="auto-badge">auto-save</span></div>
-            <div id="budgetInputsAdd" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px;"></div>
-        </div>
+    <!-- Income Hero -->
+    <div class="income-hero">
+      <div class="income-label">Monthly Income — Tell AI, it handles the rest</div>
+      <div class="income-input-row">
+        <div class="income-peso">₱</div>
+        <input class="income-input" id="incomeInput" type="number" placeholder="0.00" step="100" min="0">
+        <button class="btn-analyze" id="analyzeBtn">
+          <span id="analyzeBtnContent">🤖 Let AI Plan</span>
+        </button>
+      </div>
+      <div class="mindset-row">
+        <span style="font-size:0.78rem;color:var(--muted);align-self:center;">Spending style:</span>
+        <button class="mindset-btn" data-mindset="Saver">🏦 Saver</button>
+        <button class="mindset-btn active" data-mindset="Neutral">⚖️ Balanced</button>
+        <button class="mindset-btn" data-mindset="Spender">🛍️ Spender</button>
+      </div>
     </div>
 
-    <!-- ANALYTICS SCREEN -->
-    <div class="screen" id="screen-analytics">
-        <div class="panel"><div class="panel-header">⏳ Budget Longevity</div><div id="longevityContainer">Loading...</div></div>
-        <div class="panel"><div class="panel-header">Weekly Forecast</div><canvas id="forecastChart" height="200"></canvas></div>
-        <div class="panel"><div class="panel-header">Category Breakdown</div><canvas id="catBarChart" height="200"></canvas></div>
+    <!-- Stats -->
+    <div class="stats-grid">
+      <div class="stat-card"><div class="stat-value" id="sBalance">—</div><div class="stat-label">Balance</div></div>
+      <div class="stat-card neg"><div class="stat-value" id="sExpense" style="color:var(--red)">—</div><div class="stat-label">Month Expenses</div></div>
+      <div class="stat-card"><div class="stat-value" id="sIncome" style="color:var(--green)">—</div><div class="stat-label">Month Income</div></div>
+      <div class="stat-card blue-glow"><div class="stat-value" id="sScore" style="color:var(--blue)">—</div><div class="stat-label">AI Health Score</div><div class="stat-sub" id="scoreLabel">awaiting data</div></div>
     </div>
 
-    <!-- BUDGETS SCREEN -->
-    <div class="screen" id="screen-budgets">
-        <div class="panel"><div class="panel-header">Set Monthly Budget Limits <span class="auto-badge">auto-save</span></div><div id="budgetInputsStandalone" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:16px;"></div></div>
+    <!-- AI Event Feed -->
+    <div class="card ai-feed">
+      <div class="ai-feed-header">
+        <div class="ai-pulse"></div>
+        <div class="ai-feed-title">AI Activity Feed</div>
+        <div class="ai-badge" style="margin-left:auto;">GEMINI</div>
+      </div>
+      <div id="aiFeed"><div class="empty-state"><div class="empty-state-icon">🤖</div><div class="empty-state-text">Enter your income above and click<br><strong style="color:var(--green)">Let AI Plan</strong> — Gemini will build your entire financial plan automatically.</div></div></div>
     </div>
 
-    <!-- TRANSACTIONS SCREEN -->
-    <div class="screen" id="screen-transactions">
-        <div class="table-wrap"><table><thead><th>Date</th><th>Category</th><th>Need?</th><th>Priority</th><th>Note</th><th>Type</th><th>Amount</th></thead><tbody id="txTableBody"></tbody></table></div>
+    <!-- AI Financial Summary -->
+    <div id="financialSummaryBlock" style="display:none" class="card">
+      <div class="card-header"><span class="card-title">AI Assessment</span><span class="ai-badge">Gemini</span></div>
+      <div class="financial-summary-text" id="financialSummaryText"></div>
+
+      <!-- Savings Plan -->
+      <div class="card-title" style="margin-bottom:12px;">Savings Target</div>
+      <div class="savings-cards">
+        <div class="savings-card"><div class="savings-period">Daily</div><div class="savings-amount" id="saveDaily">—</div></div>
+        <div class="savings-card"><div class="savings-period">Weekly</div><div class="savings-amount" id="saveWeekly">—</div></div>
+        <div class="savings-card"><div class="savings-period">Monthly</div><div class="savings-amount" id="saveMonthly">—</div></div>
+      </div>
+      <div id="savingsTip" style="font-size:0.8rem;color:var(--muted2);margin-top:12px;font-style:italic;"></div>
     </div>
 
-    <!-- AUTH OVERLAY -->
-    <div id="authOverlay" class="auth-overlay"><div class="auth-card"><h2 id="authTitle">Welcome back</h2><input type="text" id="regName" placeholder="Full Name" style="display:none"><input type="email" id="authEmail" placeholder="Email"><input type="password" id="authPass" placeholder="Password"><input type="password" id="authConfirm" placeholder="Confirm Password" style="display:none"><div id="termsRow" style="display:none;"><label><input type="checkbox" id="termsCheck"> Accept Terms</label></div><div id="authMsg" style="color:#ff4d6d;"></div><button id="authBtn">Sign In</button><div id="toggleAuthLink">Don't have an account? Register</div></div></div>
+    <!-- Budget Allocation -->
+    <div id="allocationBlock" style="display:none" class="card">
+      <div class="card-header"><span class="card-title">AI Budget Allocation</span><span class="ai-badge">100% Autonomous</span></div>
+      <div class="alloc-grid" id="allocGrid"></div>
+    </div>
 
-    <!-- CHATBOT (draggable, resizable, no close button) -->
-    <div id="chatContainer" class="chat-container">
-        <div class="chat-window">
-            <div class="chat-header" id="chatHeader">
-                <span>🤖 SmartSpend AI <span class="ml-badge">Gemini</span></span>
-                <!-- No close button - undeletable -->
-            </div>
-            <div class="chat-messages" id="chatMessages">
-                <div class="message bot-message">💬 I'm SmartSpend AI. Ask me about your spending, savings, future expenses, or how to improve your finances.</div>
-            </div>
-            <div class="chat-input">
-                <input id="chatInput" placeholder="Ask...">
-                <button id="sendChatBtn">Send</button>
-            </div>
+    <!-- AI Advice -->
+    <div id="adviceBlock" style="display:none" class="card">
+      <div class="card-header"><span class="card-title">AI Insights</span></div>
+      <div class="advice-list" id="adviceList"></div>
+    </div>
+
+    <!-- Trend Chart -->
+    <div class="card" id="chartBlock" style="display:none">
+      <div class="card-header"><span class="card-title">Income vs Expense Trend</span></div>
+      <div class="chart-wrapper"><canvas id="trendChart"></canvas></div>
+    </div>
+
+  </div>
+
+  <!-- ── ADD TRANSACTION ── -->
+  <div class="screen" id="screen-add">
+    <div class="card">
+      <div class="card-header"><span class="card-title">New Transaction</span><span class="ai-badge">AI Auto-Classify</span></div>
+      <div class="tx-form">
+        <div class="form-group">
+          <label class="form-label">Amount (₱)</label>
+          <input class="form-input" id="txAmount" type="number" placeholder="0.00" step="0.01" min="0">
         </div>
+        <div class="form-group">
+          <label class="form-label">Category</label>
+          <select class="form-select" id="txCategory">
+            <option>Food & Dining</option><option>Transport</option><option>Groceries</option>
+            <option>Entertainment</option><option>Health</option><option>Debt repayment</option>
+            <option>Mortgage</option><option>Subscription</option><option>Hobbies</option>
+            <option>Salary</option><option>Savings</option><option>Other</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Type</label>
+          <select class="form-select" id="txType">
+            <option value="expense">Expense</option>
+            <option value="income">Income</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Note (optional)</label>
+          <input class="form-input" id="txNote" placeholder="Short description">
+        </div>
+        <div class="form-group" style="justify-content:flex-end;">
+          <button class="btn-add" id="addTxBtn">Add →</button>
+        </div>
+      </div>
+      <!-- AI classification result -->
+      <div id="classifyResult" style="display:none;margin-top:4px;"></div>
     </div>
+
+    <!-- Recent transactions in this screen -->
+    <div class="card">
+      <div class="card-header"><span class="card-title">Recent (Last 10)</span></div>
+      <div class="tx-list" id="recentTxList"><div class="empty-state"><div class="empty-state-icon">📋</div><div class="empty-state-text">No transactions yet.</div></div></div>
+    </div>
+  </div>
+
+  <!-- ── INSIGHTS ── -->
+  <div class="screen" id="screen-insights">
+    <!-- Longevity -->
+    <div class="card">
+      <div class="card-header"><span class="card-title">Budget Longevity</span></div>
+      <div class="longevity-display" id="longevityDisplay">
+        <div><div class="longevity-days" id="longevityDays">—</div><div class="longevity-label">days remaining</div></div>
+        <div class="longevity-sep"></div>
+        <div class="longevity-stat"><div class="longevity-stat-val" id="longevityBalance">—</div><div class="longevity-stat-label">Balance</div></div>
+        <div class="longevity-stat"><div class="longevity-stat-val" id="longevityDaily">—</div><div class="longevity-stat-label">Avg Daily Spend</div></div>
+      </div>
+    </div>
+    <!-- Weekly Forecast -->
+    <div class="card">
+      <div class="card-header"><span class="card-title">4-Week Spending Forecast <span class="ai-badge" style="margin-left:8px;">ML</span></span></div>
+      <div id="forecastBars"></div>
+    </div>
+    <!-- Category Chart -->
+    <div class="card">
+      <div class="card-header"><span class="card-title">Category Breakdown (This Month)</span></div>
+      <div class="chart-wrapper"><canvas id="catChart"></canvas></div>
+    </div>
+  </div>
+
+  <!-- ── FUTURE EXPENSES ── -->
+  <div class="screen" id="screen-future">
+    <div class="card">
+      <div class="card-header"><span class="card-title">Pin Future Expense</span></div>
+      <div class="tx-form">
+        <div class="form-group" style="flex:2;min-width:200px;">
+          <label class="form-label">Description</label>
+          <input class="form-input" id="futureDesc" placeholder="e.g. Rent, School fee">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Amount (₱)</label>
+          <input class="form-input" id="futureAmt" type="number" min="0" step="0.01">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Category</label>
+          <select class="form-select" id="futureCat">
+            <option>Food & Dining</option><option>Transport</option><option>Groceries</option>
+            <option>Health</option><option>Entertainment</option><option>Mortgage</option>
+            <option>Debt repayment</option><option>Other</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Cycle</label>
+          <select class="form-select" id="futureCycle">
+            <option>One-time</option><option>Weekly</option><option>Monthly</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Due Date</label>
+          <input class="form-input" id="futureDate" type="date">
+        </div>
+        <div class="form-group" style="justify-content:flex-end;">
+          <button class="btn-add" id="pinFutureBtn">Pin →</button>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Pinned Expenses</span>
+        <button class="btn btn-primary" id="applyFutureBtn" style="font-size:0.8rem;padding:8px 14px;">⚡ Process Pending</button>
+      </div>
+      <div id="futureList"></div>
+    </div>
+  </div>
+
+  <!-- ── HISTORY ── -->
+  <div class="screen" id="screen-history">
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Transaction History</span>
+        <div style="display:flex;gap:8px;">
+          <input class="form-input" id="historySearch" placeholder="Search…" style="width:180px;padding:8px 12px;font-size:0.82rem;">
+        </div>
+      </div>
+      <div class="tx-list" id="historyList"></div>
+    </div>
+  </div>
 </main>
 
+<!-- TOAST -->
+<div id="toast"></div>
+
+<!-- AUTH OVERLAY -->
+<div id="authOverlay" class="auth-overlay">
+  <div class="auth-card">
+    <div class="auth-logo">💚</div>
+    <div class="auth-title" id="authTitle">Welcome back</div>
+    <div class="auth-sub" id="authSub">Sign in to your SmartSpend account</div>
+    <input class="auth-input" id="regName" placeholder="Full Name" style="display:none">
+    <input class="auth-input" id="authEmail" placeholder="Email address" type="email">
+    <input class="auth-input" id="authPass" placeholder="Password" type="password">
+    <input class="auth-input" id="authConfirm" placeholder="Confirm Password" type="password" style="display:none">
+    <label class="auth-checkbox" id="termsRow" style="display:none"><input type="checkbox" id="termsCheck"> I accept the Terms of Service</label>
+    <div class="auth-error" id="authMsg"></div>
+    <button class="btn-auth" id="authBtn">Sign In</button>
+    <div class="auth-toggle" id="toggleAuth">No account? <span>Register here</span></div>
+  </div>
+</div>
+
+<!-- CHATBOT -->
+<div class="chatbot" id="chatbot">
+  <div class="chat-window">
+    <div class="chat-header" id="chatHeader">
+      <div class="ai-pulse"></div>
+      <div class="chat-header-title">SmartSpend AI <span class="ai-badge">Gemini</span></div>
+    </div>
+    <div class="chat-msgs" id="chatMsgs">
+      <div class="msg bot">👋 I'm your AI finance assistant. Ask me anything about your money, budget, or how to save more.</div>
+    </div>
+    <div class="chat-input-row">
+      <input class="chat-inp" id="chatInp" placeholder="Ask anything…">
+      <button class="chat-send" id="chatSend">→</button>
+    </div>
+  </div>
+</div>
+
 <script>
-let currentUser = null, allTransactions = [], currentSummary = { balance:0, expense:0, income:0 }, currentPrediction = { has_data:false, score:null, predictions:{ weekly:{}, categories:{} }, advice:[] };
-let monthlyChart, forecastChart, catBarChart, isLogin = true;
-const PRIO_MAP = {0:'Low',1:'Medium',2:'High',3:'Critical'};
-function fmt(amt) { return '₱' + Number(amt).toLocaleString('en-PH', { minimumFractionDigits:2 }); }
-function toast(msg) { let t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2500); }
-async function apiFetch(url, opts={}) { let res = await fetch(url, {...opts, credentials:'include', headers:{'Content-Type':'application/json'}}); if(!res.ok) throw new Error((await res.json()).error); return res.json(); }
+// ── STATE ──
+let currentUser = null;
+let allTransactions = [];
+let currentMindset = 'Neutral';
+let aiPlan = null;
+let trendChart = null, catChartInst = null;
+let isLogin = true;
 
-// Category config
-let categoryConfig = [
-    { name: "Food & dining", defaultPct: 0, type: "need" },
-    { name: "Debt repayment", defaultPct: 0, type: "need" },
-    { name: "Mortgage", defaultPct: 0, type: "need" },
-    { name: "Entertainment", defaultPct: 0, type: "want" },
-    { name: "Transport", defaultPct: 0, type: "need" },
-    { name: "Subscription", defaultPct: 0, type: "want" },
-    { name: "Hobbies", defaultPct: 0, type: "want" }
-];
+const CAT_ICONS = {
+  'Food & Dining':'🍜','Transport':'🚗','Groceries':'🛒','Entertainment':'🎬',
+  'Health':'💊','Debt repayment':'💳','Mortgage':'🏠','Subscription':'📱',
+  'Hobbies':'🎮','Salary':'💰','Savings':'🏦','Other':'📦'
+};
 
-function renderCategoryAllocation() {
-    let container = document.getElementById('categoryAllocationList');
-    let html = '';
-    categoryConfig.forEach((cat, idx) => {
-        html += `<div class="cat-row">
-            <select class="need-want" data-idx="${idx}">
-                <option value="need" ${cat.type === 'need' ? 'selected' : ''}>Need</option>
-                <option value="want" ${cat.type === 'want' ? 'selected' : ''}>Want</option>
-            </select>
-            <label><input type="checkbox" class="cat-enabled" data-idx="${idx}" ${cat.pct > 0 ? 'checked' : ''}> ${cat.name}</label>
-            <input type="number" class="cat-pct" data-idx="${idx}" value="${cat.pct || 0}" step="1" min="0" max="100" style="width:80px;"> %
-        </div>`;
-    });
-    container.innerHTML = html;
-    document.querySelectorAll('.need-want').forEach(sel => sel.addEventListener('change', updateAllocationFromCategories));
-    document.querySelectorAll('.cat-enabled').forEach(chk => chk.addEventListener('change', () => { updateAllocationFromCategories(); validateAllocation(); }));
-    document.querySelectorAll('.cat-pct').forEach(inp => inp.addEventListener('input', () => { updateAllocationFromCategories(); validateAllocation(); }));
+// ── UTILS ──
+function fmt(n){ return '₱'+Number(n||0).toLocaleString('en-PH',{minimumFractionDigits:2,maximumFractionDigits:2}); }
+function fmtDate(iso){ return new Date(iso).toLocaleDateString('en-PH',{month:'short',day:'numeric',year:'2-digit'}); }
+function esc(s){ return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+function toast(msg, color=''){
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.borderColor = color || 'var(--border)';
+  t.classList.add('show');
+  setTimeout(()=>t.classList.remove('show'), 2800);
 }
 
-function updateAllocationFromCategories() {
-    let selected = [];
-    for (let i = 0; i < categoryConfig.length; i++) {
-        let enabled = document.querySelector(`.cat-enabled[data-idx="${i}"]`)?.checked;
-        let type = document.querySelector(`.need-want[data-idx="${i}"]`)?.value;
-        let pct = parseFloat(document.querySelector(`.cat-pct[data-idx="${i}"]`)?.value || 0);
-        if (enabled && pct > 0) selected.push({ name: categoryConfig[i].name, type, pct });
-    }
-    let totalNeedPct = selected.filter(c => c.type === 'need').reduce((s,c)=>s+c.pct,0);
-    let totalWantPct = selected.filter(c => c.type === 'want').reduce((s,c)=>s+c.pct,0);
-    let auto = document.getElementById('autoRemainingToWants').checked;
-    if (auto && (totalNeedPct + totalWantPct) < 100) totalWantPct = 100 - totalNeedPct;
-    totalNeedPct = Math.min(100, totalNeedPct);
-    totalWantPct = Math.min(100 - totalNeedPct, totalWantPct);
-    let budget = parseFloat(document.getElementById('monthlyBudgetCap').value) || 10000;
-    let needAmount = budget * totalNeedPct / 100;
-    let wantAmount = budget * totalWantPct / 100;
-    let savings = budget - needAmount - wantAmount;
-    document.getElementById('allocationDisplay').innerHTML = `Needs (${totalNeedPct}%): ${fmt(needAmount)} 🔒 | Wants (${totalWantPct}%): ${fmt(wantAmount)} ⚡ | Savings (${(savings/budget*100).toFixed(0)}%): ${fmt(savings)} 🏦`;
+async function api(url, opts={}){
+  const res = await fetch(url, {
+    ...opts,
+    credentials:'include',
+    headers:{'Content-Type':'application/json',...(opts.headers||{})}
+  });
+  if(!res.ok){
+    const err = await res.json().catch(()=>({error:'Request failed'}));
+    throw new Error(err.error || 'Request failed');
+  }
+  return res.json();
 }
 
-function validateAllocation() {
-    let total = 0;
-    for (let i = 0; i < categoryConfig.length; i++) {
-        if (document.querySelector(`.cat-enabled[data-idx="${i}"]`)?.checked) {
-            total += parseFloat(document.querySelector(`.cat-pct[data-idx="${i}"]`)?.value || 0);
-        }
-    }
-    let warn = document.getElementById('allocationWarning');
-    if (Math.abs(total - 100) > 0.01) { warn.style.display = 'block'; warn.innerText = `⚠️ Total is ${total}% – must be 100%.`; }
-    else { warn.style.display = 'none'; }
+// ── AI FEED ──
+function addFeedEvent(icon, text, time=null){
+  const feed = document.getElementById('aiFeed');
+  const existingEmpty = feed.querySelector('.empty-state');
+  if(existingEmpty) feed.innerHTML = '';
+  const timeStr = time || new Date().toLocaleTimeString('en-PH',{hour:'2-digit',minute:'2-digit'});
+  const el = document.createElement('div');
+  el.className = 'ai-event';
+  el.innerHTML = `<span class="ai-event-icon">${icon}</span><span class="ai-event-text">${esc(text)}</span><span class="ai-event-time">${timeStr}</span>`;
+  feed.insertBefore(el, feed.firstChild);
+  // keep max 8 events
+  while(feed.children.length > 8) feed.removeChild(feed.lastChild);
 }
 
-async function aiAutoAllocate() {
-    if (!currentUser) return;
-    let selected = [];
-    for (let i = 0; i < categoryConfig.length; i++) {
-        if (document.querySelector(`.cat-enabled[data-idx="${i}"]`)?.checked) selected.push(categoryConfig[i].name);
-    }
-    if (selected.length === 0) { toast("Check at least one category"); return; }
-    toast("🤖 AI allocating...");
-    let budget = parseFloat(document.getElementById('monthlyBudgetCap').value) || 10000;
-    try {
-        let res = await apiFetch('/api/ai_allocate', { method: 'POST', body: JSON.stringify({ categories: selected, monthly_budget: budget }) });
-        let alloc = res.allocation;
-        for (let i = 0; i < categoryConfig.length; i++) {
-            let cat = categoryConfig[i].name;
-            if (alloc[cat] !== undefined) {
-                let inp = document.querySelector(`.cat-pct[data-idx="${i}"]`);
-                if (inp) inp.value = alloc[cat].toFixed(1);
-                let chk = document.querySelector(`.cat-enabled[data-idx="${i}"]`);
-                if (chk && !chk.checked) chk.checked = true;
-            }
-        }
-        updateAllocationFromCategories();
-        validateAllocation();
-        toast("✅ AI allocation complete! Total 100%");
-    } catch(e) { toast("AI failed, using fallback"); console.error(e); }
-}
-
-let futureExpenses = [];
-function renderFutureExpenses() {
-    let container = document.getElementById('futureExpensesList');
-    if (!container) return;
-    if (futureExpenses.length === 0) { container.innerHTML = '<div class="future-expense-item">No pinned future expenses.</div>'; return; }
-    let html = '';
-    futureExpenses.forEach((exp, idx) => {
-        html += `<div class="future-expense-item"><div><strong>${exp.description}</strong><br>${fmt(exp.amount)} | ${exp.category} | ${exp.cycle} | ${exp.date}</div><button class="btn" data-future-idx="${idx}" style="background:var(--red-dim);">Delete</button></div>`;
-    });
-    container.innerHTML = html;
-    document.querySelectorAll('[data-future-idx]').forEach(btn => {
-        btn.addEventListener('click', async (e) => {
-            let idx = parseInt(btn.dataset.futureIdx);
-            let id = futureExpenses[idx].id;
-            try { await apiFetch(`/api/future_expenses/${id}`, { method: 'DELETE' }); toast('Future expense removed'); await loadFutureExpenses(); } catch(e) { toast('Delete failed'); }
-        });
-    });
-}
-document.getElementById('pinFutureExpenseBtn')?.addEventListener('click', async () => {
-    let desc = document.getElementById('futureDesc').value.trim();
-    let amount = parseFloat(document.getElementById('futureAmount').value);
-    let category = document.getElementById('futureCategory').value;
-    let cycle = document.getElementById('futureCycle').value;
-    let date = document.getElementById('futureDate').value;
-    if (!desc || isNaN(amount) || amount<=0 || !date) { toast("Fill all fields"); return; }
-    try {
-        let res = await apiFetch('/api/future_expenses', { method: 'POST', body: JSON.stringify({ description: desc, amount, category, cycle, date }) });
-        toast('Future expense pinned');
-        await loadFutureExpenses();
-        document.getElementById('futureDesc').value = '';
-        document.getElementById('futureAmount').value = '';
-        document.getElementById('futureDate').value = '';
-    } catch(e) { toast('Error pinning'); }
+// ── MINDSET SELECTOR ──
+document.querySelectorAll('.mindset-btn').forEach(btn=>{
+  btn.addEventListener('click',()=>{
+    document.querySelectorAll('.mindset-btn').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    currentMindset = btn.dataset.mindset;
+  });
 });
-document.getElementById('applyFutureBtn')?.addEventListener('click', async () => {
-    toast("Processing pending future expenses...");
-    try { let res = await apiFetch('/api/apply_future_expenses', { method: 'POST' }); toast(`Applied ${res.count} expenses.`); await loadDashboard(); loadFutureExpenses(); } catch(e) { toast("Error applying"); }
-});
-async function loadFutureExpenses() { try { futureExpenses = await apiFetch('/api/future_expenses'); renderFutureExpenses(); } catch(e) {} }
 
-async function updateLastExpenses() {
-    let expenses = allTransactions.filter(t=>t.tx_type==='expense').sort((a,b)=>new Date(b.tx_date)-new Date(a.tx_date)).slice(0,3);
-    let container = document.getElementById('lastExpenseList');
-    if (!container) return;
-    if (expenses.length === 0) { container.innerHTML = '<div>No expenses yet.</div>'; return; }
-    let html = '';
-    expenses.forEach((exp, idx) => {
-        html += `<div class="last-expense-item"><strong>${exp.category}</strong>: ${fmt(exp.amount)} (${exp.is_need ? 'Need' : 'Want'})<br><small>${new Date(exp.tx_date).toLocaleDateString()}</small>${idx===0 ? `<button class="btn small" id="toggleLastBtn">Mark as ${exp.is_need ? 'Want' : 'Need'}</button>` : ''}</div>`;
+// ── AI PLAN BUTTON ──
+document.getElementById('analyzeBtn').addEventListener('click', runAIPlan);
+
+async function runAIPlan(){
+  const income = parseFloat(document.getElementById('incomeInput').value);
+  if(!income || income <= 0){ toast('Enter a valid monthly income first'); return; }
+  const btn = document.getElementById('analyzeBtn');
+  const btnContent = document.getElementById('analyzeBtnContent');
+  btn.disabled = true;
+  btnContent.innerHTML = '<div class="spinner"></div> Analyzing…';
+  addFeedEvent('🤖','AI is analyzing your financial profile…');
+  try {
+    const result = await api('/api/ai/full_setup', {
+      method:'POST',
+      body: JSON.stringify({ monthly_income: income, mindset: currentMindset })
     });
-    container.innerHTML = html;
-    let toggleBtn = document.getElementById('toggleLastBtn');
-    if (toggleBtn && expenses[0]) {
-        toggleBtn.addEventListener('click', async () => {
-            let last = expenses[0];
-            await apiFetch(`/api/transactions/${last.id}`, { method:'PATCH', body:JSON.stringify({ is_need: !last.is_need }) });
-            toast("Updated! Reloading...");
-            await loadDashboard();
-            updateLastExpenses();
+    aiPlan = result;
+    addFeedEvent('✅',`Budget allocated across ${Object.keys(result.allocation).length} categories`);
+    addFeedEvent('💰',`Savings target set: ${fmt(result.savings_plan.monthly)}/month`);
+    addFeedEvent('🧠',`Financial summary generated: "${result.financial_summary.substring(0,60)}…"`);
+    addFeedEvent('📋',`${result.advice.length} personalized insights ready`);
+    renderAIPlan(result);
+    toast('AI plan complete! 🎉', 'var(--green)');
+  } catch(e){
+    toast('AI error: '+e.message);
+    addFeedEvent('❌','AI encountered an error. Please try again.');
+  }
+  btn.disabled = false;
+  btnContent.innerHTML = '🔄 Re-Analyze';
+}
+
+function renderAIPlan(plan){
+  // Summary
+  document.getElementById('financialSummaryText').textContent = plan.financial_summary;
+  document.getElementById('saveDaily').textContent = fmt(plan.savings_plan.daily);
+  document.getElementById('saveWeekly').textContent = fmt(plan.savings_plan.weekly);
+  document.getElementById('saveMonthly').textContent = fmt(plan.savings_plan.monthly);
+  document.getElementById('savingsTip').textContent = '💡 ' + (plan.savings_plan.tip || '');
+  document.getElementById('financialSummaryBlock').style.display = 'block';
+
+  // Allocation
+  const grid = document.getElementById('allocGrid');
+  const needs = new Set(['Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage']);
+  const savings = new Set(['Savings']);
+  grid.innerHTML = Object.entries(plan.allocation).map(([cat, pct])=>{
+    const type = savings.has(cat) ? 'savings' : (needs.has(cat) ? 'need' : 'want');
+    const amt = plan.allocation_amounts?.[cat] || (plan.monthly_income * pct / 100);
+    return `<div class="alloc-item">
+      <div class="alloc-cat">${esc(cat)}</div>
+      <div class="alloc-pct">${pct.toFixed(0)}<span style="font-size:1rem;color:var(--muted)">%</span></div>
+      <div class="alloc-amount">${fmt(amt)}</div>
+      <div class="alloc-type ${type}">${type.toUpperCase()}</div>
+      <div class="alloc-item-bar ${type}" style="width:${Math.min(pct,100)}%"></div>
+    </div>`;
+  }).join('');
+  document.getElementById('allocationBlock').style.display = 'block';
+
+  // Advice
+  const adviceIcons = { info:'ℹ️', warning:'⚠️', success:'✅' };
+  document.getElementById('adviceList').innerHTML = plan.advice.map(a=>`
+    <div class="advice-card ${esc(a.type)}">
+      <span class="advice-icon">${adviceIcons[a.type]||'💡'}</span>
+      <div><div class="advice-title">${esc(a.title)}</div><div class="advice-body">${esc(a.body)}</div></div>
+    </div>`).join('');
+  document.getElementById('adviceBlock').style.display = 'block';
+}
+
+// ── LOAD ALL DATA ──
+async function loadAll(){
+  if(!currentUser) return;
+  try {
+    const [summary, pred, txs] = await Promise.all([
+      api(`/api/summary/${currentUser.id}`),
+      api(`/api/predict/${currentUser.id}`),
+      api('/api/transactions')
+    ]);
+    allTransactions = txs;
+
+    // Stats
+    document.getElementById('sBalance').textContent = fmt(summary.balance);
+    document.getElementById('sExpense').textContent = fmt(summary.expense);
+    document.getElementById('sIncome').textContent = fmt(summary.income);
+
+    if(pred.has_data){
+      const score = pred.score;
+      document.getElementById('sScore').textContent = score + '/100';
+      document.getElementById('topScore').textContent = score;
+      document.getElementById('scoreLabel').textContent = score >= 80 ? 'Excellent' : score >= 60 ? 'Good' : score >= 40 ? 'Fair' : 'Needs Work';
+      addFeedEvent('📊',`Health score updated: ${score}/100`);
+
+      // Trend chart
+      const months = Object.keys(summary.monthly).slice(-6);
+      if(months.length){
+        if(trendChart) trendChart.destroy();
+        document.getElementById('chartBlock').style.display = 'block';
+        trendChart = new Chart(document.getElementById('trendChart'),{
+          type:'bar',
+          data:{
+            labels: months.map(m=>{ const [y,mo]=m.split('-'); return new Date(y,mo-1).toLocaleDateString('en-PH',{month:'short'}); }),
+            datasets:[
+              {label:'Income',data:months.map(m=>summary.monthly[m]?.income||0),backgroundColor:'rgba(0,229,160,0.5)',borderRadius:6},
+              {label:'Expense',data:months.map(m=>summary.monthly[m]?.expense||0),backgroundColor:'rgba(255,59,92,0.5)',borderRadius:6}
+            ]
+          },
+          options:{
+            responsive:true,maintainAspectRatio:false,
+            plugins:{legend:{labels:{color:'#6B88A8',font:{family:'IBM Plex Mono',size:11}}}},
+            scales:{x:{grid:{color:'rgba(255,255,255,0.04)'},ticks:{color:'#6B88A8',font:{family:'IBM Plex Mono',size:10}}},y:{grid:{color:'rgba(255,255,255,0.04)'},ticks:{color:'#6B88A8',font:{family:'IBM Plex Mono',size:10},callback:v=>'₱'+v.toLocaleString()}}}
+          }
         });
-    }
-}
+      }
 
-async function updateForecastScenarios() {
-    if(!currentUser) return;
-    let monthlyBudget = parseFloat(document.getElementById('monthlyBudgetCap').value) || (currentSummary.income || 10000);
-    let expenses = allTransactions.filter(t=>t.tx_type==='expense');
-    let now = new Date();
-    let cycle = document.getElementById('budgetCycle').value;
-    let startOfCycle, totalDays;
-    if(cycle === 'Daily') { startOfCycle = new Date(now.getFullYear(), now.getMonth(), now.getDate()); totalDays = 1; }
-    else if(cycle === 'Weekly') { let day = now.getDay(); startOfCycle = new Date(now); startOfCycle.setDate(now.getDate() - day); totalDays = 7; }
-    else if(cycle === 'Monthly') { startOfCycle = new Date(now.getFullYear(), now.getMonth(), 1); totalDays = new Date(now.getFullYear(), now.getMonth()+1, 0).getDate(); }
-    else { startOfCycle = new Date(now.getFullYear(), 0, 1); totalDays = 366; }
-    let spentThisCycle = expenses.filter(e=> new Date(e.tx_date) >= startOfCycle).reduce((s,e)=>s+e.amount,0);
-    let daysElapsed = Math.min(totalDays, Math.floor((now - startOfCycle) / (1000*60*60*24)));
-    let remainingDays = Math.max(1, totalDays - daysElapsed);
-    let avgDailySpent = spentThisCycle / Math.max(1, daysElapsed);
-    let realisticRemaining = avgDailySpent * remainingDays;
-    let optimisticRemaining = (avgDailySpent * 0.8) * remainingDays;
-    let pessimisticRemaining = (avgDailySpent * 1.2) * remainingDays;
-    let remainingBudget = monthlyBudget - spentThisCycle;
-    let opt = Math.max(0, remainingBudget - optimisticRemaining);
-    let real = Math.max(0, remainingBudget - realisticRemaining);
-    let pess = Math.max(0, remainingBudget - pessimisticRemaining);
-    document.getElementById('forecastOpt').innerText = fmt(opt);
-    document.getElementById('forecastReal').innerText = fmt(real);
-    document.getElementById('forecastPess').innerText = fmt(pess);
-    let selected = document.getElementById('forecastScenarioSelect').value;
-    document.querySelectorAll('.scenario-card').forEach(card => {
-        let scenario = card.dataset.scenario;
-        if(scenario === selected) card.classList.add('active');
-        else card.classList.remove('active');
-    });
-}
-document.getElementById('forecastScenarioSelect')?.addEventListener('change', updateForecastScenarios);
-document.getElementById('linkToAnalyticsBtn')?.addEventListener('click', () => navigate('analytics'));
-
-async function updateMLDiagram() {
-    if(!currentUser) return;
-    let incomeTotal = allTransactions.filter(t=>t.tx_type==='income').reduce((s,t)=>s+t.amount,0);
-    let budget = parseFloat(document.getElementById('monthlyBudgetCap').value) || incomeTotal || 10000;
-    updateAllocationFromCategories();
-    await updateForecastScenarios();
-    let status = document.getElementById('socialStatusDiagram').value;
-    let mindset = document.getElementById('mindsetDiagram').value;
-    await apiFetch('/api/user/profile', { method:'POST', body:JSON.stringify({ social_status:status, spending_mindset:mindset }) });
-}
-async function autoSaveBudget(cat, val) { if(!currentUser) return; if(val && !isNaN(parseFloat(val)) && parseFloat(val)>0) { await apiFetch(`/api/budgets/${currentUser.id}`, { method:'POST', body:JSON.stringify({ category: cat, limit: parseFloat(val) }) }); toast(`Saved ${cat} limit`); } }
-function attachAutoSave(container, cats) { cats.forEach(cat=>{ let inp = document.getElementById(`${container}_${cat.replace(/\\s/g,'')}`); if(inp && !inp.hasAttribute('data-auto')){ inp.setAttribute('data-auto','true'); inp.addEventListener('change',()=>autoSaveBudget(cat,inp.value)); } }); }
-async function loadBudgetsForAdd() { let budgets = await apiFetch(`/api/budgets/${currentUser.id}`); let limits = Object.fromEntries(budgets.map(b=>[b.category, b.limit])); let cats = ['Food & Dining','Transport','Groceries','Entertainment','Health','Other']; let html = cats.map(c=>`<div><label>${c}</label><input type="number" id="budgetAdd_${c.replace(/\\s/g,'')}" value="${limits[c]||''}" placeholder="₱ limit"></div>`).join(''); document.getElementById('budgetInputsAdd').innerHTML = html; attachAutoSave('budgetAdd', cats); }
-async function loadBudgetsStandalone() { let budgets = await apiFetch(`/api/budgets/${currentUser.id}`); let limits = Object.fromEntries(budgets.map(b=>[b.category, b.limit])); let cats = ['Food & Dining','Transport','Groceries','Entertainment','Health','Other']; let html = cats.map(c=>`<div><label>${c}</label><input type="number" id="budgetStand_${c.replace(/\\s/g,'')}" value="${limits[c]||''}" placeholder="₱ limit"></div>`).join(''); document.getElementById('budgetInputsStandalone').innerHTML = html; attachAutoSave('budgetStand', cats); }
-
-async function loadDashboard() {
-    if(!currentUser) return;
-    try {
-        let summary = await apiFetch(`/api/summary/${currentUser.id}`);
-        let pred = await apiFetch(`/api/predict/${currentUser.id}`);
-        allTransactions = await apiFetch(`/api/transactions`);
-        currentSummary = summary; currentPrediction = pred;
-        document.getElementById('sBalance').innerText = fmt(summary.balance);
-        document.getElementById('sExpense').innerText = fmt(summary.expense);
-        document.getElementById('sIncome').innerText = fmt(summary.income);
-        let score = pred.has_data ? pred.score : null;
-        document.getElementById('sScore').innerText = score ? score+'/100' : '—';
-        document.getElementById('topScore').innerText = score || '—';
-        if(pred.has_data) {
-            let weeks = pred.predictions.weekly;
-            let maxVal = Math.max(...Object.values(weeks),1);
-            document.getElementById('forecastBars').innerHTML = Object.entries(weeks).map(([w,v])=>`<div class="forecast-row"><span class="forecast-week">${w}</span><div class="forecast-bar-track"><div class="forecast-bar-fill" style="width:${(v/maxVal*100)}%"></div></div><span>${fmt(v)}</span></div>`).join('');
-            document.getElementById('adviceList').innerHTML = pred.advice.map(a=>`<div class="advice-item"><strong>${a.cat}:</strong> ${a.msg}</div>`).join('');
-            if(monthlyChart) monthlyChart.destroy();
-            let months = Object.keys(summary.monthly).slice(-6);
-            monthlyChart = new Chart(document.getElementById('monthlyChart'), { type:'bar', data:{ labels:months, datasets:[{ label:'Income', data:months.map(m=>summary.monthly[m]?.income||0), backgroundColor:'rgba(0,210,130,0.6)' },{ label:'Expense', data:months.map(m=>summary.monthly[m]?.expense||0), backgroundColor:'rgba(255,77,109,0.6)' }] } });
+      // Existing allocations
+      const allocs = await api('/api/allocations');
+      if(allocs.length && !aiPlan){
+        const grid = document.getElementById('allocGrid');
+        if(grid){
+          const income = currentUser.monthly_budget_limit || 0;
+          const needs = new Set(['Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage']);
+          const savCats = new Set(['Savings']);
+          grid.innerHTML = allocs.map(a=>{
+            const type = savCats.has(a.category_name)?'savings':(needs.has(a.category_name)?'need':'want');
+            return `<div class="alloc-item">
+              <div class="alloc-cat">${esc(a.category_name)}</div>
+              <div class="alloc-pct">${a.percentage.toFixed(0)}<span style="font-size:1rem;color:var(--muted)">%</span></div>
+              <div class="alloc-amount">${income?fmt(income*a.percentage/100):''}</div>
+              <div class="alloc-type ${type}">${type.toUpperCase()}</div>
+              <div class="alloc-item-bar ${type}" style="width:${Math.min(a.percentage,100)}%"></div>
+            </div>`;
+          }).join('');
+          document.getElementById('allocationBlock').style.display = 'block';
         }
-        renderTransactions();
-        loadAnalytics();
-        updateLastExpenses();
-        updateMLDiagram();
-        await loadBudgetsForAdd();
-        await loadBudgetsStandalone();
-    } catch(e) { toast('Error loading data'); console.error(e); }
-}
-function renderTransactions() { document.getElementById('txTableBody').innerHTML = allTransactions.slice(0,50).map(t=>`<tr><td>${new Date(t.tx_date).toLocaleDateString()}</td><td>${t.category}</td><td>${t.is_need ? 'Need' : 'Want'}</td><td>${PRIO_MAP[t.priority] || ''}</td><td>${t.note||''}</td><td>${t.tx_type}</td><td>${fmt(t.amount)}</td></tr>`).join(''); }
-async function loadAnalytics() {
-    if(!currentUser) return;
-    try {
-        let longevity = await apiFetch(`/api/longevity/${currentUser.id}`);
-        document.getElementById('longevityContainer').innerHTML = `<div>💰 Balance: ${fmt(longevity.balance)}<br>📉 Avg Daily: ${fmt(longevity.avg_daily_spend)}<br>📅 Days left: ${longevity.days}</div>`;
-    } catch(e) {}
-    if(currentPrediction.has_data) {
-        if(forecastChart) forecastChart.destroy();
-        forecastChart = new Chart(document.getElementById('forecastChart'), { type:'line', data:{ labels:Object.keys(currentPrediction.predictions.weekly), datasets:[{ label:'ML Forecast', data:Object.values(currentPrediction.predictions.weekly), borderColor:'#00d282' }] } });
-        if(catBarChart) catBarChart.destroy();
-        catBarChart = new Chart(document.getElementById('catBarChart'), { type:'bar', data:{ labels:Object.keys(currentPrediction.predictions.categories), datasets:[{ label:'Spent', data:Object.values(currentPrediction.predictions.categories), backgroundColor:'#3b82f6' }] }, options:{ indexAxis:'y' } });
+      }
     }
+
+    // Prefill income
+    if(currentUser.monthly_budget_limit > 0){
+      document.getElementById('incomeInput').value = currentUser.monthly_budget_limit;
+    }
+
+    renderRecentTx();
+    renderHistory();
+    loadInsights(pred);
+  } catch(e){ console.error('loadAll error',e); }
 }
 
-function navigate(screenId) {
-    document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
-    document.getElementById(`screen-${screenId}`).classList.add('active');
-    document.getElementById('pageTitle').innerText = screenId.charAt(0).toUpperCase()+screenId.slice(1);
-    if(screenId === 'analytics') loadAnalytics();
-    if(screenId === 'add') { updateMLDiagram(); loadBudgetsForAdd(); renderCategoryAllocation(); updateAllocationFromCategories(); renderFutureExpenses(); validateAllocation(); updateLastExpenses(); }
-    if(screenId === 'budgets') loadBudgetsStandalone();
+// ── ADD TRANSACTION ──
+document.getElementById('addTxBtn').addEventListener('click', addTransaction);
+document.getElementById('txAmount').addEventListener('keydown', e=>{ if(e.key==='Enter') addTransaction(); });
+
+async function addTransaction(){
+  const amount = parseFloat(document.getElementById('txAmount').value);
+  const category = document.getElementById('txCategory').value;
+  const tx_type = document.getElementById('txType').value;
+  const note = document.getElementById('txNote').value.trim();
+
+  if(!amount || amount <= 0){ toast('Enter a valid amount'); return; }
+
+  const btn = document.getElementById('addTxBtn');
+  btn.textContent = '…';
+  btn.disabled = true;
+
+  try {
+    // AI classify first
+    const classifyResult = document.getElementById('classifyResult');
+    classifyResult.style.display = 'none';
+
+    let is_need = true, priority = 1, suggested_note = note;
+    try {
+      const cls = await api('/api/ai/classify_transaction', {
+        method:'POST',
+        body: JSON.stringify({ amount, category, tx_type, note })
+      });
+      is_need = cls.is_need;
+      priority = cls.priority;
+      suggested_note = note || cls.suggested_note;
+      if(tx_type === 'expense'){
+        classifyResult.innerHTML = `<div class="ai-classify-result">🤖 AI classified as <strong>${is_need?'Need':'Want'}</strong> · Priority: ${['Low','Med','High','Critical'][priority]}</div>`;
+        classifyResult.style.display = 'block';
+      }
+    } catch(e){ /* use defaults */ }
+
+    // Save transaction
+    const tx = await api('/api/transactions', {
+      method:'POST',
+      body: JSON.stringify({ amount, category, tx_type, is_need, priority, note: suggested_note })
+    });
+
+    allTransactions.unshift(tx);
+    addFeedEvent(tx_type==='income'?'💚':'🔴', `${tx_type==='income'?'Income':'Expense'}: ${fmt(amount)} in ${category}`);
+    if(tx_type==='income') addFeedEvent('⚡','Salary received — auto-applying pinned future expenses…');
+
+    toast(`${tx_type==='income'?'Income':'Expense'} added! AI classified.`, 'var(--green)');
+    document.getElementById('txAmount').value = '';
+    document.getElementById('txNote').value = '';
+    renderRecentTx();
+    renderHistory();
+
+    // Refresh stats silently
+    loadAll();
+  } catch(e){ toast('Error: '+e.message); }
+  btn.textContent = 'Add →';
+  btn.disabled = false;
 }
-document.querySelectorAll('.nav-item').forEach(btn=>btn.addEventListener('click',()=>{ let scr = btn.dataset.nav; if(scr) navigate(scr); }));
-document.getElementById('exportBtn').addEventListener('click', ()=> window.location.href='/api/export/csv');
+
+// ── RENDER TRANSACTIONS ──
+function renderTxItem(t, showDel=true){
+  const icon = CAT_ICONS[t.category] || '📦';
+  const isInc = t.tx_type === 'income';
+  return `<div class="tx-item">
+    <div class="tx-cat-icon">${icon}</div>
+    <div class="tx-info">
+      <div class="tx-cat">${esc(t.category)}${!isInc?`<span class="tx-badge ${t.is_need?'need':'want'}">${t.is_need?'Need':'Want'}</span>`:''}</div>
+      <div class="tx-meta">${fmtDate(t.tx_date)}${t.note?' · '+esc(t.note):''}</div>
+    </div>
+    <div class="tx-amount ${t.tx_type}">${isInc?'+':'-'}${fmt(t.amount)}</div>
+    ${showDel?`<button class="btn-del" data-id="${t.id}" title="Delete">✕</button>`:''}
+  </div>`;
+}
+
+function renderRecentTx(){
+  const el = document.getElementById('recentTxList');
+  const recent = allTransactions.slice(0,10);
+  el.innerHTML = recent.length
+    ? recent.map(t=>renderTxItem(t)).join('')
+    : '<div class="empty-state"><div class="empty-state-icon">📋</div><div class="empty-state-text">No transactions yet.</div></div>';
+  el.querySelectorAll('.btn-del').forEach(b=>b.addEventListener('click',()=>deleteTx(parseInt(b.dataset.id))));
+}
+
+function renderHistory(filter=''){
+  const el = document.getElementById('historyList');
+  let txs = allTransactions;
+  if(filter) txs = txs.filter(t=>t.category.toLowerCase().includes(filter)||( t.note||'').toLowerCase().includes(filter));
+  el.innerHTML = txs.slice(0,60).map(t=>renderTxItem(t)).join('')
+    || '<div class="empty-state"><div class="empty-state-text">No results.</div></div>';
+  el.querySelectorAll('.btn-del').forEach(b=>b.addEventListener('click',()=>deleteTx(parseInt(b.dataset.id))));
+}
+
+document.getElementById('historySearch').addEventListener('input', e=>renderHistory(e.target.value.toLowerCase()));
+
+async function deleteTx(id){
+  try {
+    await api(`/api/transactions/${id}`,{method:'DELETE'});
+    allTransactions = allTransactions.filter(t=>t.id!==id);
+    renderRecentTx(); renderHistory();
+    addFeedEvent('🗑️','Transaction deleted');
+    loadAll();
+    toast('Deleted');
+  } catch(e){ toast('Delete failed'); }
+}
+
+// ── INSIGHTS ──
+async function loadInsights(pred){
+  // Longevity
+  try {
+    const lon = await api(`/api/longevity/${currentUser.id}`);
+    document.getElementById('longevityDays').textContent = lon.days >= 999 ? '∞' : lon.days;
+    document.getElementById('longevityBalance').textContent = fmt(lon.balance);
+    document.getElementById('longevityDaily').textContent = fmt(lon.avg_daily_spend);
+  } catch(e){}
+
+  if(!pred || !pred.has_data) return;
+
+  // Forecast bars
+  const weeks = pred.predictions.weekly;
+  const maxVal = Math.max(...Object.values(weeks), 1);
+  document.getElementById('forecastBars').innerHTML = Object.entries(weeks).map(([w,v])=>`
+    <div class="forecast-bar-row">
+      <span class="forecast-week-label">${w}</span>
+      <div class="forecast-track"><div class="forecast-fill" style="width:${(v/maxVal*100).toFixed(1)}%"></div></div>
+      <span class="forecast-val">${fmt(v)}</span>
+    </div>`).join('');
+
+  // Category chart
+  const cats = pred.predictions.categories;
+  if(Object.keys(cats).length){
+    if(catChartInst) catChartInst.destroy();
+    catChartInst = new Chart(document.getElementById('catChart'),{
+      type:'doughnut',
+      data:{
+        labels: Object.keys(cats),
+        datasets:[{data: Object.values(cats), backgroundColor:['#00E5A0','#3B8BFF','#9B59F5','#F5A623','#FF3B5C','#1ABC9C','#E74C3C','#8E44AD'], borderWidth:0, hoverOffset:8}]
+      },
+      options:{
+        responsive:true, maintainAspectRatio:false,
+        plugins:{legend:{position:'right',labels:{color:'#6B88A8',font:{family:'IBM Plex Mono',size:11},padding:16}}}
+      }
+    });
+  }
+}
+
+// ── FUTURE EXPENSES ──
+async function loadFuture(){
+  try {
+    const exps = await api('/api/future_expenses');
+    const el = document.getElementById('futureList');
+    el.innerHTML = exps.length
+      ? exps.map(e=>`<div class="future-item">
+          <div class="tx-cat-icon">${CAT_ICONS[e.category]||'📦'}</div>
+          <div class="future-info">
+            <div class="future-desc">${esc(e.description)}</div>
+            <div class="future-meta">${e.category} · ${e.cycle} · due ${e.date}</div>
+          </div>
+          <div class="future-amount">${fmt(e.amount)}</div>
+          <button class="btn-del" data-fid="${e.id}">✕</button>
+        </div>`).join('')
+      : '<div class="empty-state"><div class="empty-state-icon">📌</div><div class="empty-state-text">No pinned future expenses.</div></div>';
+    el.querySelectorAll('.btn-del').forEach(b=>b.addEventListener('click', async()=>{
+      try { await api(`/api/future_expenses/${b.dataset.fid}`,{method:'DELETE'}); loadFuture(); toast('Removed'); }
+      catch(e){ toast('Error'); }
+    }));
+  } catch(e){}
+}
+
+document.getElementById('pinFutureBtn').addEventListener('click', async()=>{
+  const desc = document.getElementById('futureDesc').value.trim();
+  const amt = parseFloat(document.getElementById('futureAmt').value);
+  const cat = document.getElementById('futureCat').value;
+  const cycle = document.getElementById('futureCycle').value;
+  const date = document.getElementById('futureDate').value;
+  if(!desc||!amt||!date){ toast('Fill all fields'); return; }
+  try {
+    await api('/api/future_expenses',{method:'POST',body:JSON.stringify({description:desc,amount:amt,category:cat,cycle,date})});
+    toast('Pinned! ₱'+amt+' on '+date);
+    addFeedEvent('📌',`Pinned future expense: ${desc} — ${fmt(amt)}`);
+    document.getElementById('futureDesc').value='';
+    document.getElementById('futureAmt').value='';
+    document.getElementById('futureDate').value='';
+    loadFuture();
+  } catch(e){ toast('Error: '+e.message); }
+});
+
+document.getElementById('applyFutureBtn').addEventListener('click', async()=>{
+  try {
+    const r = await api('/api/apply_future_expenses',{method:'POST'});
+    toast(`Applied ${r.count} future expense(s)`);
+    addFeedEvent('⚡',`Processed ${r.count} pending future expense(s) automatically`);
+    loadFuture(); loadAll();
+  } catch(e){ toast('Error'); }
+});
+
+// ── NAVIGATION ──
+function navigate(id){
+  document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
+  document.getElementById('screen-'+id).classList.add('active');
+  document.querySelectorAll('.nav-item').forEach(b=>{ b.classList.toggle('active', b.dataset.nav===id); });
+  const titles = {dashboard:'Dashboard',add:'Add Transaction',insights:'Insights',future:'Future Expenses',history:'History'};
+  document.getElementById('pageTitle').textContent = titles[id] || id;
+  if(id==='insights') loadInsights(null).then(()=>api(`/api/predict/${currentUser.id}`).then(p=>loadInsights(p)).catch(()=>{}));
+  if(id==='future') loadFuture();
+  if(id==='history') renderHistory();
+}
+
+document.querySelectorAll('[data-nav]').forEach(btn=>btn.addEventListener('click',()=>navigate(btn.dataset.nav)));
+document.getElementById('exportBtn').addEventListener('click',()=>window.location.href='/api/export/csv');
 document.getElementById('signoutBtn').addEventListener('click', async()=>{ await fetch('/api/logout',{method:'POST',credentials:'include'}); location.reload(); });
-document.getElementById('socialStatusDiagram')?.addEventListener('change', updateMLDiagram);
-document.getElementById('mindsetDiagram')?.addEventListener('change', updateMLDiagram);
-document.getElementById('budgetCycle')?.addEventListener('change', updateMLDiagram);
-document.getElementById('monthlyBudgetCap')?.addEventListener('input', updateMLDiagram);
-document.getElementById('autoRemainingToWants')?.addEventListener('change', updateAllocationFromCategories);
-document.getElementById('aiAutoAllocateBtn')?.addEventListener('click', aiAutoAllocate);
 
-// Handle new transaction submission
-document.getElementById('submitTransactionBtn')?.addEventListener('click', async () => {
-    let amount = parseFloat(document.getElementById('txAmount').value);
-    let category = document.getElementById('txCategory').value;
-    let tx_type = document.getElementById('txType').value;
-    let is_need = document.getElementById('txNeedWant').value === 'need';
-    let priority = parseInt(document.getElementById('txPriority').value);
-    let note = document.getElementById('txNote').value;
-    if (isNaN(amount) || amount <= 0) { toast("Please enter a valid amount"); return; }
-    try {
-        await apiFetch('/api/transactions', {
-            method: 'POST',
-            body: JSON.stringify({ amount, category, tx_type, is_need, priority, note })
-        });
-        toast("Transaction added! Refreshing dashboard...");
-        await loadDashboard();      // refresh all data
-        loadFutureExpenses();       // refresh future expenses
-        navigate('dashboard');      // switch to dashboard to see updated stats
-    } catch(e) { toast("Error adding transaction"); }
-});
-
-// Draggable chatbot (simple)
-const chatContainer = document.getElementById('chatContainer');
+// ── CHATBOT ──
+const chatbot = document.getElementById('chatbot');
 const chatHeader = document.getElementById('chatHeader');
-let isDragging = false;
-let dragOffsetX = 0, dragOffsetY = 0;
+let dragging=false, dx=0, dy=0;
+chatHeader.addEventListener('mousedown', e=>{ dragging=true; dx=e.clientX-chatbot.offsetLeft; dy=e.clientY-chatbot.offsetTop; chatbot.style.transition='none'; });
+document.addEventListener('mousemove', e=>{ if(!dragging) return; let l=e.clientX-dx, t=e.clientY-dy; l=Math.max(0,Math.min(l,window.innerWidth-chatbot.offsetWidth)); t=Math.max(0,Math.min(t,window.innerHeight-chatbot.offsetHeight)); chatbot.style.left=l+'px'; chatbot.style.top=t+'px'; chatbot.style.right='auto'; chatbot.style.bottom='auto'; });
+document.addEventListener('mouseup',()=>{ dragging=false; chatbot.style.transition=''; });
 
-chatHeader.addEventListener('mousedown', (e) => {
-    isDragging = true;
-    dragOffsetX = e.clientX - chatContainer.offsetLeft;
-    dragOffsetY = e.clientY - chatContainer.offsetTop;
-    chatContainer.style.transition = 'none';
+async function sendChat(){
+  const inp = document.getElementById('chatInp');
+  const msg = inp.value.trim();
+  if(!msg) return;
+  const msgs = document.getElementById('chatMsgs');
+  msgs.innerHTML += `<div class="msg user">${esc(msg)}</div>`;
+  inp.value = '';
+  msgs.innerHTML += `<div class="msg bot" id="typing"><div class="spinner"></div></div>`;
+  msgs.scrollTop = msgs.scrollHeight;
+  try {
+    const data = await api('/api/ai/chat',{method:'POST',body:JSON.stringify({message:msg})});
+    document.getElementById('typing').outerHTML = `<div class="msg bot">${esc(data.reply)}</div>`;
+  } catch(e){
+    document.getElementById('typing').outerHTML = `<div class="msg bot">⚠️ Connection error. Try again.</div>`;
+  }
+  msgs.scrollTop = msgs.scrollHeight;
+}
+document.getElementById('chatSend').addEventListener('click', sendChat);
+document.getElementById('chatInp').addEventListener('keydown', e=>{ if(e.key==='Enter') sendChat(); });
+
+// ── AUTH ──
+document.getElementById('toggleAuth').addEventListener('click',()=>{
+  isLogin = !isLogin;
+  document.getElementById('authTitle').textContent = isLogin ? 'Welcome back' : 'Create account';
+  document.getElementById('authSub').textContent = isLogin ? 'Sign in to your SmartSpend account' : 'Start your AI-powered finance journey';
+  document.getElementById('regName').style.display = isLogin ? 'none' : 'block';
+  document.getElementById('authConfirm').style.display = isLogin ? 'none' : 'block';
+  document.getElementById('termsRow').style.display = isLogin ? 'none' : 'flex';
+  document.getElementById('authBtn').textContent = isLogin ? 'Sign In' : 'Create Account';
+  document.getElementById('authMsg').textContent = '';
 });
-window.addEventListener('mousemove', (e) => {
-    if (isDragging) {
-        let newLeft = e.clientX - dragOffsetX;
-        let newTop = e.clientY - dragOffsetY;
-        // Constrain within viewport
-        newLeft = Math.min(Math.max(newLeft, 0), window.innerWidth - chatContainer.offsetWidth);
-        newTop = Math.min(Math.max(newTop, 0), window.innerHeight - chatContainer.offsetHeight);
-        chatContainer.style.left = newLeft + 'px';
-        chatContainer.style.top = newTop + 'px';
-        chatContainer.style.right = 'auto';
-        chatContainer.style.bottom = 'auto';
+
+document.getElementById('authBtn').addEventListener('click', async()=>{
+  const email = document.getElementById('authEmail').value.trim();
+  const pass = document.getElementById('authPass').value;
+  const name = document.getElementById('regName').value.trim();
+  const msg = document.getElementById('authMsg');
+  msg.textContent = '';
+  if(!email || !pass){ msg.textContent = 'Email and password required.'; return; }
+  if(!isLogin){
+    if(!name){ msg.textContent = 'Name is required.'; return; }
+    if(!document.getElementById('termsCheck').checked){ msg.textContent = 'Please accept the terms.'; return; }
+    if(pass !== document.getElementById('authConfirm').value){ msg.textContent = 'Passwords do not match.'; return; }
+  }
+  try {
+    const endpoint = isLogin ? '/api/login' : '/api/register';
+    const body = isLogin ? {email,password:pass} : {name,email,password:pass};
+    const res = await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),credentials:'include'});
+    if(res.ok){ location.reload(); }
+    else { const e = await res.json(); msg.textContent = e.error || 'Authentication failed.'; }
+  } catch(e){ msg.textContent = 'Connection error.'; }
+});
+
+// ── INIT ──
+async function init(){
+  const res = await fetch('/api/me',{credentials:'include'});
+  if(res.ok){
+    currentUser = await res.json();
+    document.getElementById('authOverlay').style.display = 'none';
+    document.getElementById('userAvatar').textContent = currentUser.name.slice(0,2).toUpperCase();
+    if(currentUser.spending_mindset){
+      document.querySelectorAll('.mindset-btn').forEach(b=>{
+        b.classList.toggle('active', b.dataset.mindset === currentUser.spending_mindset);
+      });
+      currentMindset = currentUser.spending_mindset;
     }
-});
-window.addEventListener('mouseup', () => {
-    isDragging = false;
-    chatContainer.style.transition = '';
-});
+    addFeedEvent('👋',`Welcome back, ${currentUser.name}! Loading your financial data…`);
+    await loadAll();
+    addFeedEvent('✅','All data loaded. Enter income and click AI Plan to re-analyze.');
+  } else {
+    document.getElementById('authOverlay').style.display = 'flex';
+  }
+}
 
-let authBtn = document.getElementById('authBtn'), toggleLink = document.getElementById('toggleAuthLink');
-toggleLink?.addEventListener('click', ()=>{ isLogin = !isLogin; document.getElementById('authTitle').innerText = isLogin ? 'Welcome back' : 'Create account'; document.getElementById('regName').style.display = isLogin ? 'none' : 'block'; document.getElementById('authConfirm').style.display = isLogin ? 'none' : 'block'; document.getElementById('termsRow').style.display = isLogin ? 'none' : 'flex'; authBtn.innerText = isLogin ? 'Sign In' : 'Register'; });
-authBtn?.addEventListener('click', async()=>{ let email = document.getElementById('authEmail').value, pass = document.getElementById('authPass').value, name = document.getElementById('regName').value; if(!isLogin && (!name || !document.getElementById('termsCheck').checked)) { document.getElementById('authMsg').innerText = 'Accept terms & name required'; return; } let endpoint = isLogin ? '/api/login' : '/api/register'; let body = isLogin ? { email, password:pass } : { name, email, password:pass }; try { let res = await fetch(endpoint, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body), credentials:'include' }); if(res.ok) { location.reload(); } else { let err = await res.json(); document.getElementById('authMsg').innerText = err.error || 'Auth failed'; } } catch(e){ document.getElementById('authMsg').innerText = 'Error connecting'; } });
-document.getElementById('sendChatBtn')?.addEventListener('click', async()=>{ let input = document.getElementById('chatInput'); let msg = input.value.trim(); if(!msg) return; let chatDiv = document.getElementById('chatMessages'); chatDiv.innerHTML += `<div class="message user-message">${escapeHtml(msg)}</div>`; input.value = ''; chatDiv.scrollTop = chatDiv.scrollHeight; try { let res = await fetch('/api/chat', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ message:msg }), credentials:'include' }); let data = await res.json(); let reply = data.reply || "AI: I'll analyze."; chatDiv.innerHTML += `<div class="message bot-message">${escapeHtml(reply)}</div>`; } catch(e) { chatDiv.innerHTML += `<div class="message bot-message">💬 Error, try again later.</div>`; } chatDiv.scrollTop = chatDiv.scrollHeight; });
-function escapeHtml(str) { return str.replace(/[&<>]/g, function(m){ if(m === '&') return '&amp;'; if(m === '<') return '&lt;'; if(m === '>') return '&gt;'; return m;}); }
-async function init() { let res = await fetch('/api/me', { credentials:'include' }); if(res.ok) { currentUser = await res.json(); document.getElementById('authOverlay').style.display = 'none'; document.getElementById('userAvatar').innerText = currentUser.name.slice(0,2).toUpperCase(); renderCategoryAllocation(); await loadDashboard(); loadFutureExpenses(); } else { document.getElementById('authOverlay').style.display = 'flex'; } }
 init();
 </script>
 </body>
-</html>
-"""
+</html>"""
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
