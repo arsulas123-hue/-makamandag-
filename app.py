@@ -2,6 +2,7 @@ import json
 import csv
 import io
 import os
+import requests                     # NEW for OpenRouter fallback
 import google.generativeai as genai
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
@@ -23,14 +24,78 @@ app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get(
 )
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
+# Gemini key (hardcoded as per your request)
 GEMINI_API_KEY = "AIzaSyDADCUZKxOPf6NKQ7uhCcTZWqnd50HoPVY"
 genai.configure(api_key=GEMINI_API_KEY)
+
+# ----------------------------------------------------------------------
+# Multi-AI Router (OpenRouter fallback)
+# ----------------------------------------------------------------------
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+FREE_MODELS = [
+    "google/gemini-2.0-flash-001",
+    "meta-llama/llama-3.2-3b-instruct:free",
+    "mistralai/mistral-7b-instruct:free",
+    "microsoft/phi-3-mini-128k-instruct:free",
+    "google/gemma-2-2b-it:free",
+    "qwen/qwen-2.5-7b-instruct:free",
+    "deepseek/deepseek-chat:free"
+]
+
+def route_ai_request(prompt, max_tokens=400):
+    """ Try Gemini first, then fall back to OpenRouter free models. """
+    # 1. Gemini
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = model.generate_content(prompt)
+        if response and response.text:
+            print("✅ Used Gemini")
+            return response.text.strip()
+    except Exception as e:
+        print(f"Gemini failed: {e}")
+
+    # 2. OpenRouter fallback
+    if not OPENROUTER_API_KEY:
+        print("⚠️ No OpenRouter API key – cannot fallback")
+        return "Sorry, all AI services are currently busy. Please try again later."
+
+    for model in FREE_MODELS:
+        try:
+            resp = requests.post(
+                OPENROUTER_URL,
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": max_tokens,
+                    "temperature": 0.7
+                },
+                timeout=15
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                reply = data["choices"][0]["message"]["content"].strip()
+                print(f"✅ Used OpenRouter model: {model}")
+                return reply
+            else:
+                print(f"Model {model} failed: {resp.status_code}")
+        except Exception as e:
+            print(f"Error with model {model}: {e}")
+            continue
+
+    return "⚠️ All AI services are currently unavailable. Please try again later."
+
 
 db = SQLAlchemy(app)
 bcrypt = Bcrypt(app)
 
 # ----------------------------------------------------------------------
-# Models
+# Models (unchanged)
 # ----------------------------------------------------------------------
 class User(db.Model):
     __tablename__ = 'users'
@@ -489,24 +554,18 @@ def export_csv():
 @app.route('/api/ai/full_setup', methods=['POST'])
 @login_required
 def ai_full_setup():
-    """
-    MASTER autonomous endpoint.
-    Called whenever income changes or user updates profile.
-    Returns: allocation, savings_plan, advice, budget_limits — all from Gemini in one shot.
-    """
+    """ Master autonomous endpoint – uses Gemini only (low volume). """
     user = get_current_user()
     data = request.json or {}
     monthly_income = data.get('monthly_income', user.monthly_budget_limit or 0)
     mindset = data.get('mindset', user.spending_mindset)
     social_status = data.get('social_status', user.social_status)
 
-    # Update profile
     user.monthly_budget_limit = monthly_income
     user.spending_mindset = mindset
     user.social_status = social_status
     db.session.commit()
 
-    # Gather spending context
     recent_spending = defaultdict(float)
     for t in Transaction.query.filter_by(user_id=user.id, tx_type='expense').order_by(Transaction.tx_date.desc()).limit(30).all():
         recent_spending[t.category] += t.amount
@@ -567,14 +626,12 @@ Return ONLY valid JSON (no markdown, no explanation):
         model = genai.GenerativeModel('gemini-1.5-flash')
         response = model.generate_content(prompt)
         raw = response.text.strip()
-        # Strip markdown code fences if present
         if raw.startswith('```'):
             raw = raw.split('```')[1]
             if raw.startswith('json'):
                 raw = raw[4:]
         result = json.loads(raw.strip())
 
-        # Normalize allocation to 100%
         alloc = result.get('allocation', {})
         total = sum(alloc.values())
         if total > 0 and abs(total - 100) > 0.5:
@@ -582,7 +639,6 @@ Return ONLY valid JSON (no markdown, no explanation):
             alloc = {k: round(v * factor, 1) for k, v in alloc.items()}
             result['allocation'] = alloc
 
-        # Persist allocation to DB
         UserAllocation.query.filter_by(user_id=user.id).delete()
         needs = {'Food & Dining', 'Transport', 'Groceries', 'Health', 'Debt repayment'}
         savings_cats = {'Savings'}
@@ -590,21 +646,19 @@ Return ONLY valid JSON (no markdown, no explanation):
             t = 'need' if cat in needs else ('savings' if cat in savings_cats else 'want')
             db.session.add(UserAllocation(user_id=user.id, category_name=cat, type=t, percentage=pct))
 
-        # Persist budget limits
         Budget.query.filter_by(user_id=user.id).delete()
         for cat, pct in alloc.items():
             db.session.add(Budget(user_id=user.id, category=cat, limit_amount=round(monthly_income * pct / 100, 2)))
 
         db.session.commit()
 
-        # Add peso amounts to allocation
         result['allocation_amounts'] = {cat: round(monthly_income * pct / 100, 2) for cat, pct in alloc.items()}
         result['monthly_income'] = monthly_income
         return jsonify(result), 200
 
     except Exception as e:
         print(f"AI full_setup error: {e}")
-        # Intelligent fallback based on mindset
+        # Fallback logic (same as before)
         mindset_lower = mindset.lower()
         if mindset_lower == 'saver':
             alloc = {'Food & Dining': 20, 'Transport': 10, 'Groceries': 15, 'Health': 5,
@@ -633,10 +687,7 @@ Return ONLY valid JSON (no markdown, no explanation):
 @app.route('/api/ai/classify_transaction', methods=['POST'])
 @login_required
 def ai_classify_transaction():
-    """
-    Gemini classifies a transaction: is_need, priority, suggested_note.
-    Called automatically when user adds a transaction.
-    """
+    """ Uses Gemini only. """
     user = get_current_user()
     data = request.json
     category = data.get('category', '')
@@ -678,7 +729,10 @@ Return ONLY valid JSON:
 @app.route('/api/ai/chat', methods=['POST'])
 @login_required
 def ai_chat():
-    """Full Gemini-powered chat with complete financial context."""
+    """
+    Full Gemini-powered chat with complete financial context.
+    Uses the multi-AI router (Gemini first, then OpenRouter fallback).
+    """
     user = get_current_user()
     data = request.json
     user_message = data.get('message', '')
@@ -708,12 +762,9 @@ User asks: "{user_message}"
 
 Reply in 3-5 sentences max. Be specific, warm, and actionable. Use peso signs. Reference their actual data. Do not mention being an AI unless directly asked."""
 
-    try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        response = model.generate_content(prompt)
-        return jsonify({'reply': response.text.strip()}), 200
-    except Exception as e:
-        return jsonify({'reply': "I'm having connectivity issues. Please try again in a moment."}), 200
+    # Use the multi-AI router
+    reply = route_ai_request(prompt, max_tokens=400)
+    return jsonify({'reply': reply}), 200
 
 
 # ----------------------------------------------------------------------
@@ -731,6 +782,13 @@ with app.app_context():
 def index():
     return HTML_PAGE
 
+
+# ----------------------------------------------------------------------
+# HTML_PAGE (the same beautiful UI you already have – too long to repeat)
+# I will truncate it here for brevity. You must copy the exact HTML from
+# your previous code. I've kept the variable name; just paste your HTML_PAGE
+# string below.
+# ----------------------------------------------------------------------
 
 HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="en">
@@ -1904,6 +1962,8 @@ init();
 </body>
 </html>"""
 
+
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app.run(host='0.0.0.0', port=port, debug=False) 
