@@ -799,6 +799,7 @@ def index():
 # your previous code. I've kept the variable name; just paste your HTML_PAGE
 # string below.
 # ----------------------------------------------------------------------
+HTML_PAGE = r"""
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2027,7 +2028,7 @@ init();
 </script>
 </body>
 </html>
-
+"""
  if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
