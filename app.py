@@ -799,8 +799,7 @@ def index():
 # your previous code. I've kept the variable name; just paste your HTML_PAGE
 # string below.
 # ----------------------------------------------------------------------
-HTML_PAGE = r"""
-<!DOCTYPE html>
+HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -1211,6 +1210,7 @@ body::before{
   <button class="nav-item" data-nav="insights"><span class="nav-icon">📈</span><span class="nav-label">Insights</span></button>
   <button class="nav-item" data-nav="future"><span class="nav-icon">📌</span><span class="nav-label">Future Expenses</span></button>
   <button class="nav-item" data-nav="history"><span class="nav-icon">📋</span><span class="nav-label">History</span></button>
+  <!-- Admin button (hidden by default, shown only if currentUser.role == 'admin') -->
   <button class="nav-item" id="adminNavBtn" data-nav="admin" style="display:none;"><span class="nav-icon">👑</span><span class="nav-label">Admin Panel</span></button>
   <div class="sidebar-sep"></div>
   <button class="nav-item" id="exportBtn"><span class="nav-icon">⬇</span><span class="nav-label">Export CSV</span></button>
@@ -1334,6 +1334,7 @@ body::before{
           <button class="btn-add" id="addTxBtn">Add →</button>
         </div>
       </div>
+      <!-- AI classification result -->
       <div id="classifyResult" style="display:none;margin-top:4px;"></div>
     </div>
 
@@ -1346,6 +1347,7 @@ body::before{
 
   <!-- ── INSIGHTS ── -->
   <div class="screen" id="screen-insights">
+    <!-- Longevity -->
     <div class="card">
       <div class="card-header"><span class="card-title">Budget Longevity</span></div>
       <div class="longevity-display" id="longevityDisplay">
@@ -1355,10 +1357,12 @@ body::before{
         <div class="longevity-stat"><div class="longevity-stat-val" id="longevityDaily">—</div><div class="longevity-stat-label">Avg Daily Spend</div></div>
       </div>
     </div>
+    <!-- Weekly Forecast -->
     <div class="card">
       <div class="card-header"><span class="card-title">4-Week Spending Forecast <span class="ai-badge" style="margin-left:8px;">ML</span></span></div>
       <div id="forecastBars"></div>
     </div>
+    <!-- Category Chart -->
     <div class="card">
       <div class="card-header"><span class="card-title">Category Breakdown (This Month)</span></div>
       <div class="chart-wrapper"><canvas id="catChart"></canvas></div>
@@ -1423,7 +1427,7 @@ body::before{
     </div>
   </div>
 
-  <!-- ── ADMIN PANEL ── -->
+  <!-- ── ADMIN PANEL (only visible to admin users) ── -->
   <div class="screen" id="screen-admin">
     <div class="card">
       <div class="card-header">👑 Admin Dashboard</div>
@@ -1438,7 +1442,7 @@ body::before{
           <table style="width:100%; border-collapse:collapse;">
             <thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Role</th><th>Created</th><th>Actions</th></tr></thead>
             <tbody id="adminUserTable"></tbody>
-          </table>
+           </table>
         </div>
       </div>
       <div id="adminTransactionsPanel" style="display:none;">
@@ -1447,7 +1451,7 @@ body::before{
           <table style="width:100%; border-collapse:collapse;">
             <thead><tr><th>Date</th><th>User</th><th>Category</th><th>Type</th><th>Amount</th><th>Need/Want</th></tr></thead>
             <tbody id="adminTxTable"></tbody>
-          </table>
+           </table>
         </div>
       </div>
     </div>
@@ -1542,6 +1546,7 @@ function addFeedEvent(icon, text, time=null){
   el.className = 'ai-event';
   el.innerHTML = `<span class="ai-event-icon">${icon}</span><span class="ai-event-text">${esc(text)}</span><span class="ai-event-time">${timeStr}</span>`;
   feed.insertBefore(el, feed.firstChild);
+  // keep max 8 events
   while(feed.children.length > 8) feed.removeChild(feed.lastChild);
 }
 
@@ -1556,6 +1561,7 @@ document.querySelectorAll('.mindset-btn').forEach(btn=>{
 
 // ── AI PLAN BUTTON ──
 document.getElementById('analyzeBtn').addEventListener('click', runAIPlan);
+
 async function runAIPlan(){
   const income = parseFloat(document.getElementById('incomeInput').value);
   if(!income || income <= 0){ toast('Enter a valid monthly income first'); return; }
@@ -1585,6 +1591,7 @@ async function runAIPlan(){
 }
 
 function renderAIPlan(plan){
+  // Summary
   document.getElementById('financialSummaryText').textContent = plan.financial_summary;
   document.getElementById('saveDaily').textContent = fmt(plan.savings_plan.daily);
   document.getElementById('saveWeekly').textContent = fmt(plan.savings_plan.weekly);
@@ -1592,6 +1599,7 @@ function renderAIPlan(plan){
   document.getElementById('savingsTip').textContent = '💡 ' + (plan.savings_plan.tip || '');
   document.getElementById('financialSummaryBlock').style.display = 'block';
 
+  // Allocation
   const grid = document.getElementById('allocGrid');
   const needs = new Set(['Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage']);
   const savings = new Set(['Savings']);
@@ -1608,6 +1616,7 @@ function renderAIPlan(plan){
   }).join('');
   document.getElementById('allocationBlock').style.display = 'block';
 
+  // Advice
   const adviceIcons = { info:'ℹ️', warning:'⚠️', success:'✅' };
   document.getElementById('adviceList').innerHTML = plan.advice.map(a=>`
     <div class="advice-card ${esc(a.type)}">
@@ -1628,6 +1637,7 @@ async function loadAll(){
     ]);
     allTransactions = txs;
 
+    // Stats
     document.getElementById('sBalance').textContent = fmt(summary.balance);
     document.getElementById('sExpense').textContent = fmt(summary.expense);
     document.getElementById('sIncome').textContent = fmt(summary.income);
@@ -1639,6 +1649,7 @@ async function loadAll(){
       document.getElementById('scoreLabel').textContent = score >= 80 ? 'Excellent' : score >= 60 ? 'Good' : score >= 40 ? 'Fair' : 'Needs Work';
       addFeedEvent('📊',`Health score updated: ${score}/100`);
 
+      // Trend chart
       const months = Object.keys(summary.monthly).slice(-6);
       if(months.length){
         if(trendChart) trendChart.destroy();
@@ -1652,10 +1663,15 @@ async function loadAll(){
               {label:'Expense',data:months.map(m=>summary.monthly[m]?.expense||0),backgroundColor:'rgba(255,59,92,0.5)',borderRadius:6}
             ]
           },
-          options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:'#6B88A8',fontSize:11}}},scales:{x:{grid:{color:'rgba(255,255,255,0.04)'},ticks:{color:'#6B88A8',fontSize:10}},y:{grid:{color:'rgba(255,255,255,0.04)'},ticks:{color:'#6B88A8',fontSize:10, callback:v=>'₱'+v.toLocaleString()}}}
+          options:{
+            responsive:true,maintainAspectRatio:false,
+            plugins:{legend:{labels:{color:'#6B88A8',font:{family:'IBM Plex Mono',size:11}}}},
+            scales:{x:{grid:{color:'rgba(255,255,255,0.04)'},ticks:{color:'#6B88A8',font:{family:'IBM Plex Mono',size:10}}},y:{grid:{color:'rgba(255,255,255,0.04)'},ticks:{color:'#6B88A8',font:{family:'IBM Plex Mono',size:10},callback:v=>'₱'+v.toLocaleString()}}}
+          }
         });
       }
 
+      // Existing allocations
       const allocs = await api('/api/allocations');
       if(allocs.length && !aiPlan){
         const grid = document.getElementById('allocGrid');
@@ -1678,6 +1694,7 @@ async function loadAll(){
       }
     }
 
+    // Prefill income
     if(currentUser.monthly_budget_limit > 0){
       document.getElementById('incomeInput').value = currentUser.monthly_budget_limit;
     }
@@ -1691,18 +1708,24 @@ async function loadAll(){
 // ── ADD TRANSACTION ──
 document.getElementById('addTxBtn').addEventListener('click', addTransaction);
 document.getElementById('txAmount').addEventListener('keydown', e=>{ if(e.key==='Enter') addTransaction(); });
+
 async function addTransaction(){
   const amount = parseFloat(document.getElementById('txAmount').value);
   const category = document.getElementById('txCategory').value;
   const tx_type = document.getElementById('txType').value;
   const note = document.getElementById('txNote').value.trim();
+
   if(!amount || amount <= 0){ toast('Enter a valid amount'); return; }
+
   const btn = document.getElementById('addTxBtn');
   btn.textContent = '…';
   btn.disabled = true;
+
   try {
+    // AI classify first
     const classifyResult = document.getElementById('classifyResult');
     classifyResult.style.display = 'none';
+
     let is_need = true, priority = 1, suggested_note = note;
     try {
       const cls = await api('/api/ai/classify_transaction', {
@@ -1716,19 +1739,25 @@ async function addTransaction(){
         classifyResult.innerHTML = `<div class="ai-classify-result">🤖 AI classified as <strong>${is_need?'Need':'Want'}</strong> · Priority: ${['Low','Med','High','Critical'][priority]}</div>`;
         classifyResult.style.display = 'block';
       }
-    } catch(e){}
+    } catch(e){ /* use defaults */ }
+
+    // Save transaction
     const tx = await api('/api/transactions', {
       method:'POST',
       body: JSON.stringify({ amount, category, tx_type, is_need, priority, note: suggested_note })
     });
+
     allTransactions.unshift(tx);
     addFeedEvent(tx_type==='income'?'💚':'🔴', `${tx_type==='income'?'Income':'Expense'}: ${fmt(amount)} in ${category}`);
     if(tx_type==='income') addFeedEvent('⚡','Salary received — auto-applying pinned future expenses…');
+
     toast(`${tx_type==='income'?'Income':'Expense'} added! AI classified.`, 'var(--green)');
     document.getElementById('txAmount').value = '';
     document.getElementById('txNote').value = '';
     renderRecentTx();
     renderHistory();
+
+    // Refresh stats silently
     loadAll();
   } catch(e){ toast('Error: '+e.message); }
   btn.textContent = 'Add →';
@@ -1749,20 +1778,27 @@ function renderTxItem(t, showDel=true){
     ${showDel?`<button class="btn-del" data-id="${t.id}" title="Delete">✕</button>`:''}
   </div>`;
 }
+
 function renderRecentTx(){
   const el = document.getElementById('recentTxList');
   const recent = allTransactions.slice(0,10);
-  el.innerHTML = recent.length ? recent.map(t=>renderTxItem(t)).join('') : '<div class="empty-state"><div class="empty-state-icon">📋</div><div class="empty-state-text">No transactions yet.</div></div>';
+  el.innerHTML = recent.length
+    ? recent.map(t=>renderTxItem(t)).join('')
+    : '<div class="empty-state"><div class="empty-state-icon">📋</div><div class="empty-state-text">No transactions yet.</div></div>';
   el.querySelectorAll('.btn-del').forEach(b=>b.addEventListener('click',()=>deleteTx(parseInt(b.dataset.id))));
 }
+
 function renderHistory(filter=''){
   const el = document.getElementById('historyList');
   let txs = allTransactions;
   if(filter) txs = txs.filter(t=>t.category.toLowerCase().includes(filter)||( t.note||'').toLowerCase().includes(filter));
-  el.innerHTML = txs.slice(0,60).map(t=>renderTxItem(t)).join('') || '<div class="empty-state"><div class="empty-state-text">No results.</div></div>';
+  el.innerHTML = txs.slice(0,60).map(t=>renderTxItem(t)).join('')
+    || '<div class="empty-state"><div class="empty-state-text">No results.</div></div>';
   el.querySelectorAll('.btn-del').forEach(b=>b.addEventListener('click',()=>deleteTx(parseInt(b.dataset.id))));
 }
+
 document.getElementById('historySearch').addEventListener('input', e=>renderHistory(e.target.value.toLowerCase()));
+
 async function deleteTx(id){
   try {
     await api(`/api/transactions/${id}`,{method:'DELETE'});
@@ -1776,13 +1812,17 @@ async function deleteTx(id){
 
 // ── INSIGHTS ──
 async function loadInsights(pred){
+  // Longevity
   try {
     const lon = await api(`/api/longevity/${currentUser.id}`);
     document.getElementById('longevityDays').textContent = lon.days >= 999 ? '∞' : lon.days;
     document.getElementById('longevityBalance').textContent = fmt(lon.balance);
     document.getElementById('longevityDaily').textContent = fmt(lon.avg_daily_spend);
   } catch(e){}
+
   if(!pred || !pred.has_data) return;
+
+  // Forecast bars
   const weeks = pred.predictions.weekly;
   const maxVal = Math.max(...Object.values(weeks), 1);
   document.getElementById('forecastBars').innerHTML = Object.entries(weeks).map(([w,v])=>`
@@ -1791,13 +1831,21 @@ async function loadInsights(pred){
       <div class="forecast-track"><div class="forecast-fill" style="width:${(v/maxVal*100).toFixed(1)}%"></div></div>
       <span class="forecast-val">${fmt(v)}</span>
     </div>`).join('');
+
+  // Category chart
   const cats = pred.predictions.categories;
   if(Object.keys(cats).length){
     if(catChartInst) catChartInst.destroy();
     catChartInst = new Chart(document.getElementById('catChart'),{
       type:'doughnut',
-      data:{ labels: Object.keys(cats), datasets:[{data: Object.values(cats), backgroundColor:['#00E5A0','#3B8BFF','#9B59F5','#F5A623','#FF3B5C','#1ABC9C','#E74C3C','#8E44AD'], borderWidth:0, hoverOffset:8}] },
-      options:{ responsive:true, maintainAspectRatio:false, plugins:{legend:{position:'right',labels:{color:'#6B88A8',fontSize:11,padding:16}}} }
+      data:{
+        labels: Object.keys(cats),
+        datasets:[{data: Object.values(cats), backgroundColor:['#00E5A0','#3B8BFF','#9B59F5','#F5A623','#FF3B5C','#1ABC9C','#E74C3C','#8E44AD'], borderWidth:0, hoverOffset:8}]
+      },
+      options:{
+        responsive:true, maintainAspectRatio:false,
+        plugins:{legend:{position:'right',labels:{color:'#6B88A8',font:{family:'IBM Plex Mono',size:11},padding:16}}}
+      }
     });
   }
 }
@@ -1807,10 +1855,24 @@ async function loadFuture(){
   try {
     const exps = await api('/api/future_expenses');
     const el = document.getElementById('futureList');
-    el.innerHTML = exps.length ? exps.map(e=>`<div class="future-item"><div class="tx-cat-icon">${CAT_ICONS[e.category]||'📦'}</div><div class="future-info"><div class="future-desc">${esc(e.description)}</div><div class="future-meta">${e.category} · ${e.cycle} · due ${e.date}</div></div><div class="future-amount">${fmt(e.amount)}</div><button class="btn-del" data-fid="${e.id}">✕</button></div>`).join('') : '<div class="empty-state"><div class="empty-state-icon">📌</div><div class="empty-state-text">No pinned future expenses.</div></div>';
-    el.querySelectorAll('.btn-del').forEach(b=>b.addEventListener('click', async()=>{ try { await api(`/api/future_expenses/${b.dataset.fid}`,{method:'DELETE'}); loadFuture(); toast('Removed'); } catch(e){ toast('Error'); } }));
+    el.innerHTML = exps.length
+      ? exps.map(e=>`<div class="future-item">
+          <div class="tx-cat-icon">${CAT_ICONS[e.category]||'📦'}</div>
+          <div class="future-info">
+            <div class="future-desc">${esc(e.description)}</div>
+            <div class="future-meta">${e.category} · ${e.cycle} · due ${e.date}</div>
+          </div>
+          <div class="future-amount">${fmt(e.amount)}</div>
+          <button class="btn-del" data-fid="${e.id}">✕</button>
+        </div>`).join('')
+      : '<div class="empty-state"><div class="empty-state-icon">📌</div><div class="empty-state-text">No pinned future expenses.</div></div>';
+    el.querySelectorAll('.btn-del').forEach(b=>b.addEventListener('click', async()=>{
+      try { await api(`/api/future_expenses/${b.dataset.fid}`,{method:'DELETE'}); loadFuture(); toast('Removed'); }
+      catch(e){ toast('Error'); }
+    }));
   } catch(e){}
 }
+
 document.getElementById('pinFutureBtn').addEventListener('click', async()=>{
   const desc = document.getElementById('futureDesc').value.trim();
   const amt = parseFloat(document.getElementById('futureAmt').value);
@@ -1828,6 +1890,7 @@ document.getElementById('pinFutureBtn').addEventListener('click', async()=>{
     loadFuture();
   } catch(e){ toast('Error: '+e.message); }
 });
+
 document.getElementById('applyFutureBtn').addEventListener('click', async()=>{
   try {
     const r = await api('/api/apply_future_expenses',{method:'POST'});
@@ -1849,7 +1912,8 @@ function navigate(id){
   if(id==='history') renderHistory();
   if(id==='admin' && currentUser && currentUser.role === 'admin') loadAdminPanel();
 }
-// Admin Panel Functions
+
+// ── ADMIN PANEL FUNCTIONS ──
 async function loadAdminPanel(){
   if(!currentUser || currentUser.role !== 'admin') return;
   const stats = await api('/api/admin/stats');
@@ -1865,6 +1929,7 @@ async function loadAdminPanel(){
   userSelect.innerHTML = '<option value="">All Users</option>' + users.map(u=>`<option value="${u.id}">${u.name} (${u.email})</option>`).join('');
   await loadAdminTransactions('');
 }
+
 async function loadAdminUsers(filter=''){
   let users = await api('/api/admin/users');
   if(filter) users = users.filter(u=>u.name.toLowerCase().includes(filter)||u.email.toLowerCase().includes(filter));
@@ -1903,6 +1968,7 @@ async function loadAdminUsers(filter=''){
     });
   });
 }
+
 async function loadAdminTransactions(userId=''){
   let url = '/api/admin/transactions';
   if(userId) url += `?user_id=${userId}`;
@@ -1922,7 +1988,9 @@ async function loadAdminTransactions(userId=''){
     </tr>
   `).join('');
 }
+
 function fmtNum(n){ return Number(n).toLocaleString('en-PH',{minimumFractionDigits:2}); }
+
 // Admin tabs and filters
 document.querySelectorAll('.tab[data-tab]').forEach(tab=>{
   tab.addEventListener('click',()=>{
@@ -1948,6 +2016,7 @@ let dragging=false, dx=0, dy=0;
 chatHeader.addEventListener('mousedown', e=>{ dragging=true; dx=e.clientX-chatbot.offsetLeft; dy=e.clientY-chatbot.offsetTop; chatbot.style.transition='none'; });
 document.addEventListener('mousemove', e=>{ if(!dragging) return; let l=e.clientX-dx, t=e.clientY-dy; l=Math.max(0,Math.min(l,window.innerWidth-chatbot.offsetWidth)); t=Math.max(0,Math.min(t,window.innerHeight-chatbot.offsetHeight)); chatbot.style.left=l+'px'; chatbot.style.top=t+'px'; chatbot.style.right='auto'; chatbot.style.bottom='auto'; });
 document.addEventListener('mouseup',()=>{ dragging=false; chatbot.style.transition=''; });
+
 async function sendChat(){
   const inp = document.getElementById('chatInp');
   const msg = inp.value.trim();
@@ -1979,6 +2048,7 @@ document.getElementById('toggleAuth').addEventListener('click',()=>{
   document.getElementById('authBtn').textContent = isLogin ? 'Sign In' : 'Create Account';
   document.getElementById('authMsg').textContent = '';
 });
+
 document.getElementById('authBtn').addEventListener('click', async()=>{
   const email = document.getElementById('authEmail').value.trim();
   const pass = document.getElementById('authPass').value;
@@ -2008,13 +2078,15 @@ async function init(){
     document.getElementById('authOverlay').style.display = 'none';
     document.getElementById('userAvatar').textContent = currentUser.name.slice(0,2).toUpperCase();
     if(currentUser.spending_mindset){
-      document.querySelectorAll('.mindset-btn').forEach(b=>{ b.classList.toggle('active', b.dataset.mindset === currentUser.spending_mindset); });
+      document.querySelectorAll('.mindset-btn').forEach(b=>{
+        b.classList.toggle('active', b.dataset.mindset === currentUser.spending_mindset);
+      });
       currentMindset = currentUser.spending_mindset;
     }
     addFeedEvent('👋',`Welcome back, ${currentUser.name}! Loading your financial data…`);
     await loadAll();
     addFeedEvent('✅','All data loaded. Enter income and click AI Plan to re-analyze.');
-    // Show/hide admin button based on role
+    // Show/hide admin button
     const adminBtn = document.getElementById('adminNavBtn');
     if(adminBtn){
       if(currentUser.role === 'admin') adminBtn.style.display = 'flex';
@@ -2024,12 +2096,13 @@ async function init(){
     document.getElementById('authOverlay').style.display = 'flex';
   }
 }
+
 init();
 </script>
 </body>
 </html>
 """
- if __name__ == '__main__':
+if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
  
