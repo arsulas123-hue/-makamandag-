@@ -204,6 +204,8 @@ class UserAllocation(db.Model):
 # ----------------------------------------------------------------------
 def ensure_schema():
     inspector = inspect(db.engine)
+
+    # --- Users table migrations ---
     if inspector.has_table('users'):
         existing_columns = [col['name'] for col in inspector.get_columns('users')]
         if 'password' in existing_columns:
@@ -220,8 +222,23 @@ def ensure_schema():
                 with db.engine.connect() as conn:
                     conn.execute(text(f'ALTER TABLE users ADD COLUMN {col} {defn}'))
                     conn.commit()
-    if not inspector.has_table('future_expenses'):
-        db.create_all()
+
+    # --- Transactions table migrations (add missing columns) ---
+    if inspector.has_table('transactions'):
+        tx_columns = [col['name'] for col in inspector.get_columns('transactions')]
+        if 'is_need' not in tx_columns:
+            with db.engine.connect() as conn:
+                conn.execute(text('ALTER TABLE transactions ADD COLUMN is_need BOOLEAN DEFAULT TRUE'))
+                conn.commit()
+            print("✅ Added is_need column to transactions table.")
+        if 'priority' not in tx_columns:
+            with db.engine.connect() as conn:
+                conn.execute(text('ALTER TABLE transactions ADD COLUMN priority INTEGER DEFAULT 1'))
+                conn.commit()
+            print("✅ Added priority column to transactions table.")
+
+    # Create any missing tables (future_expenses, user_allocations, etc.)
+    db.create_all()
 
 
 # ----------------------------------------------------------------------
