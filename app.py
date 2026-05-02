@@ -1838,14 +1838,16 @@ function updateChecklistPercentages(allocations = null) {
 async function loadDashboard() {
   if(!currentUser) return;
   try {
+    // Automatically process pending future expenses before fetching stats
+    await api('/api/apply_future_expenses', { method:'POST' });
+
     const summary = await api(`/api/summary/${currentUser.id}`);
     const predict = await api(`/api/predict/${currentUser.id}`);
     const longevity = await api(`/api/longevity/${currentUser.id}`);
     renderStats(summary, predict.score, longevity);
     renderForecast(predict.predictions?.weekly);
     renderTrendChart(summary.monthly);
-    document.getElementById('chartBlock').style.display = Object.keys(summary.monthly).length ? 'block' : 'none';
-    document.getElementById('forecastBlock').style.display = Object.keys(predict.predictions?.weekly||{}).length ? 'block' : 'none';
+    // ... rest of the function
   } catch(e) { toast(e.message); }
 }
 
