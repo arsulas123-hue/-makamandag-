@@ -2102,14 +2102,7 @@ init();
 </body>
 </html>
 """
-@app.route('/make_admin/<email>')
-def make_admin(email):
-    user = User.query.filter_by(email=email).first()
-    if not user:
-        return f'User with email {email} not found. Please register first.'
-    user.role = 'admin'
-    db.session.commit()
-    return f'✅ User {user.name} ({email}) is now an admin. You can now remove this temporary endpoint.'
+
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
