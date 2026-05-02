@@ -1387,6 +1387,20 @@ body::before{
 .tab{flex:1;padding:8px;border:none;background:transparent;color:var(--muted2);border-radius:8px;cursor:pointer;font-family:var(--font-display);font-size:0.82rem;font-weight:500;transition:all 0.2s;}
 .tab.active{background:var(--bg2);color:var(--text);box-shadow:0 2px 8px rgba(0,0,0,0.3);}
 
+/* CHATBOT MINIMIZE BUTTON */
+.chat-toggle-btn{
+  background:none; border:none; color:var(--muted2); cursor:pointer;
+  font-size:1.2rem; padding:0 4px; line-height:1;
+  transition: color 0.2s; margin-left:auto;
+}
+.chat-toggle-btn:hover{ color:var(--green); }
+
+/* Minimized state */
+.chatbot.minimized .chat-msgs,
+.chatbot.minimized .chat-input-row{ display:none; }
+.chatbot.minimized .chat-window{ height:auto !important; border-radius:20px; }
+
+
 /* SCROLLBAR */
 ::-webkit-scrollbar{width:6px;}
 ::-webkit-scrollbar-track{background:transparent;}
@@ -1630,7 +1644,13 @@ body::before{
 
 <div class="chatbot" id="chatbot">
   <div class="chat-window">
-    <div class="chat-header" id="chatHeader"><div class="ai-pulse"></div><div class="chat-header-title">SmartSpend AI <span class="ai-badge">Gemini</span></div></div>
+    <!-- NEW header with minimize button -->
+<div class="chat-header" id="chatHeader">
+  <div class="ai-pulse"></div>
+  <div class="chat-header-title">SmartSpend AI <span class="ai-badge">Gemini</span></div>
+  <button class="chat-toggle-btn" id="chatToggleBtn" title="Minimize">–</button>
+</div>
+
     <div class="chat-msgs" id="chatMsgs"><div class="msg bot">👋 I'm your AI finance assistant. Ask me anything about your money, budget, or how to save more.</div></div>
     <div class="chat-input-row"><input class="chat-inp" id="chatInp" placeholder="Ask anything…"><button class="chat-send" id="chatSend">→</button></div>
   </div>
@@ -2294,6 +2314,52 @@ async function sendChat() {
   }
   msgs.scrollTop = msgs.scrollHeight;
 }
+
+// ── DRAGGABLE CHATBOT ──
+(function(){
+  const chatbot = document.getElementById('chatbot');
+  const header = document.getElementById('chatHeader');
+  let offsetX, offsetY, isDragging = false;
+
+  header.addEventListener('mousedown', (e) => {
+    // Don't drag if clicking the minimize button
+    if(e.target.id === 'chatToggleBtn') return;
+    isDragging = true;
+    offsetX = e.clientX - chatbot.getBoundingClientRect().left;
+    offsetY = e.clientY - chatbot.getBoundingClientRect().top;
+    chatbot.style.cursor = 'grabbing';
+    e.preventDefault();
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if(!isDragging) return;
+    const left = e.clientX - offsetX;
+    const top = e.clientY - offsetY;
+    // Keep inside viewport
+    const w = window.innerWidth, h = window.innerHeight;
+    const bw = chatbot.offsetWidth, bh = chatbot.offsetHeight;
+    chatbot.style.left = Math.max(0, Math.min(left, w - bw)) + 'px';
+    chatbot.style.top = Math.max(0, Math.min(top, h - bh)) + 'px';
+    chatbot.style.right = 'auto';
+    chatbot.style.bottom = 'auto';
+  });
+
+  document.addEventListener('mouseup', () => {
+    if(isDragging){
+      isDragging = false;
+      chatbot.style.cursor = '';
+    }
+  });
+})();
+
+// ── MINIMIZE TOGGLE ──
+const toggleBtn = document.getElementById('chatToggleBtn');
+toggleBtn.addEventListener('click', () => {
+  const chatbot = document.getElementById('chatbot');
+  chatbot.classList.toggle('minimized');
+  toggleBtn.textContent = chatbot.classList.contains('minimized') ? '□' : '–';
+});
+
 
 // ── INITIAL LOAD ──
 (async ()=>{
