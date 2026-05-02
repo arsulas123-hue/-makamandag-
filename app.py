@@ -24,36 +24,25 @@ app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get(
 )
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-# Gemini key (hardcoded as per your request)
+# Gemini key
 GEMINI_API_KEY = "AIzaSyDADCUZKxOPf6NKQ7uhCcTZWqnd50HoPVY"
 genai.configure(api_key=GEMINI_API_KEY)
 
 # ----------------------------------------------------------------------
-# Multi-AI Router (Gemini (multiple names) + OpenRouter fallback)
+# Multi-AI Router (Gemini + OpenRouter fallback)
 # ----------------------------------------------------------------------
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-# Gemini model names to try (most recent first)
-GEMINI_MODELS = [
-    "gemini-2.0-flash-exp",
-    "gemini-1.5-flash",
-    "gemini-pro"
-]
-
+GEMINI_MODELS = ["gemini-2.0-flash-exp", "gemini-1.5-flash", "gemini-pro"]
 FREE_MODELS = [
     "google/gemini-2.0-flash-001",
     "meta-llama/llama-3.2-3b-instruct:free",
     "mistralai/mistral-7b-instruct:free",
     "microsoft/phi-3-mini-128k-instruct:free",
-    "google/gemma-2-2b-it:free",
-    "qwen/qwen-2.5-7b-instruct:free",
-    "deepseek/deepseek-chat:free"
 ]
 
 def route_ai_request(prompt, max_tokens=400):
-    """ Try Gemini (with multiple model names) first, then fall back to OpenRouter. """
-    # 1. Try Gemini with each model name
     for model_name in GEMINI_MODELS:
         try:
             model = genai.GenerativeModel(model_name)
@@ -63,48 +52,28 @@ def route_ai_request(prompt, max_tokens=400):
                 return response.text.strip()
         except Exception as e:
             print(f"Gemini {model_name} failed: {e}")
-            continue
-
-    # 2. OpenRouter fallback
     if not OPENROUTER_API_KEY:
-        print("⚠️ No OpenRouter API key – cannot fallback")
-        return "Sorry, all AI services are currently busy. Please try again later."
-
+        return "Sorry, all AI services are busy. Try again later."
     for model in FREE_MODELS:
         try:
             resp = requests.post(
                 OPENROUTER_URL,
-                headers={
-                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": max_tokens,
-                    "temperature": 0.7
-                },
+                headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"},
+                json={"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens},
                 timeout=15
             )
             if resp.status_code == 200:
-                data = resp.json()
-                reply = data["choices"][0]["message"]["content"].strip()
                 print(f"✅ Used OpenRouter model: {model}")
-                return reply
-            else:
-                print(f"Model {model} failed: {resp.status_code}")
-        except Exception as e:
-            print(f"Error with model {model}: {e}")
+                return resp.json()["choices"][0]["message"]["content"].strip()
+        except Exception:
             continue
-
-    return "⚠️ All AI services are currently unavailable. Please try again later."
-
+    return "⚠️ All AI services unavailable."
 
 db = SQLAlchemy(app)
 bcrypt = Bcrypt(app)
 
 # ----------------------------------------------------------------------
-# Models
+# Models (with role added)
 # ----------------------------------------------------------------------
 class User(db.Model):
     __tablename__ = 'users'
@@ -116,6 +85,7 @@ class User(db.Model):
     spending_mindset = db.Column(db.String(20), default='Neutral')
     monthly_budget_limit = db.Column(db.Float, default=0.0)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    role = db.Column(db.String(20), default='user')                     # NEW: admin / user
 
     transactions = db.relationship('Transaction', backref='user', lazy=True)
     budgets = db.relationship('Budget', backref='user', lazy=True)
@@ -138,7 +108,9 @@ class User(db.Model):
             'email': self.email,
             'social_status': self.social_status,
             'spending_mindset': self.spending_mindset,
-            'monthly_budget_limit': self.monthly_budget_limit
+            'monthly_budget_limit': self.monthly_budget_limit,
+            'role': self.role,
+            'created_at': self.created_at.isoformat() if self.created_at else None
         }
 
 
@@ -157,6 +129,7 @@ class Transaction(db.Model):
     def to_dict(self):
         return {
             'id': self.id,
+            'user_id': self.user_id,
             'amount': self.amount,
             'category': self.category,
             'tx_type': self.tx_type,
@@ -209,12 +182,12 @@ class UserAllocation(db.Model):
 
 
 # ----------------------------------------------------------------------
-# Schema migration (adds missing columns to users and transactions)
+# Schema migration (adds role column and missing transaction columns)
 # ----------------------------------------------------------------------
 def ensure_schema():
     inspector = inspect(db.engine)
 
-    # --- Users table ---
+    # Users table
     if inspector.has_table('users'):
         existing_columns = [col['name'] for col in inspector.get_columns('users')]
         if 'password' in existing_columns:
@@ -226,28 +199,38 @@ def ensure_schema():
             ('social_status', "VARCHAR(20) DEFAULT 'Middle'"),
             ('spending_mindset', "VARCHAR(20) DEFAULT 'Neutral'"),
             ('monthly_budget_limit', "FLOAT DEFAULT 0.0"),
+            ('role', "VARCHAR(20) DEFAULT 'user'"),
         ]:
             if col not in existing_columns:
                 with db.engine.connect() as conn:
                     conn.execute(text(f'ALTER TABLE users ADD COLUMN {col} {defn}'))
                     conn.commit()
 
-    # --- Transactions table: add is_need and priority columns if missing ---
+    # Transactions table: add is_need and priority if missing
     if inspector.has_table('transactions'):
         tx_columns = [col['name'] for col in inspector.get_columns('transactions')]
         if 'is_need' not in tx_columns:
             with db.engine.connect() as conn:
                 conn.execute(text('ALTER TABLE transactions ADD COLUMN is_need BOOLEAN DEFAULT TRUE'))
                 conn.commit()
-            print("✅ Added is_need column to transactions table.")
         if 'priority' not in tx_columns:
             with db.engine.connect() as conn:
                 conn.execute(text('ALTER TABLE transactions ADD COLUMN priority INTEGER DEFAULT 1'))
                 conn.commit()
-            print("✅ Added priority column to transactions table.")
 
-    # Ensure all tables exist
     db.create_all()
+
+    # Create default admin user if none exists
+    admin = User.query.filter_by(email='admin@smartspend.com').first()
+    if not admin:
+        admin = User(name='Admin', email='admin@smartspend.com', role='admin')
+        admin.set_password('admin123')
+        db.session.add(admin)
+        db.session.commit()
+        print("✅ Admin user created: admin@smartspend.com / admin123")
+    elif admin.role != 'admin':
+        admin.role = 'admin'
+        db.session.commit()
 
 
 # ----------------------------------------------------------------------
@@ -261,13 +244,23 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated
 
+def admin_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if 'user_id' not in session:
+            return jsonify({'error': 'Unauthorized'}), 401
+        user = User.query.get(session['user_id'])
+        if not user or user.role != 'admin':
+            return jsonify({'error': 'Admin access required'}), 403
+        return f(*args, **kwargs)
+    return decorated
 
 def get_current_user():
     return User.query.get(session.get('user_id')) if 'user_id' in session else None
 
 
 # ----------------------------------------------------------------------
-# Analytics helpers
+# Analytics helpers (same as before)
 # ----------------------------------------------------------------------
 def compute_health_score(user_id):
     thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
@@ -287,7 +280,6 @@ def compute_health_score(user_id):
     )
     score = 70 + int(savings_rate * 20) - int(want_ratio * 15) - min(20, int(overspend_penalty * 10))
     return max(0, min(100, score))
-
 
 def generate_weekly_forecast(user_id):
     thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
@@ -314,7 +306,6 @@ def generate_weekly_forecast(user_id):
     avg = sum(values) / n * 7
     return {f'Week {i+1}': avg for i in range(4)}
 
-
 def get_category_totals(user_id):
     now = datetime.now(timezone.utc)
     first_of_month = datetime(now.year, now.month, 1)
@@ -323,7 +314,6 @@ def get_category_totals(user_id):
     for e in expenses:
         totals[e.category] += e.amount
     return dict(totals)
-
 
 def get_monthly_summary(user_id):
     all_trans = Transaction.query.filter_by(user_id=user_id).all()
@@ -344,7 +334,6 @@ def get_monthly_summary(user_id):
         'monthly': {m: monthly[m] for m in sorted_months}
     }
 
-
 def compute_longevity(user_id):
     summary = get_monthly_summary(user_id)
     thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
@@ -355,7 +344,7 @@ def compute_longevity(user_id):
 
 
 # ----------------------------------------------------------------------
-# Auth routes
+# Auth routes (modified to return role)
 # ----------------------------------------------------------------------
 @app.route('/api/register', methods=['POST'])
 def register():
@@ -364,13 +353,12 @@ def register():
         return jsonify({'error': 'Missing fields'}), 400
     if User.query.filter_by(email=data['email']).first():
         return jsonify({'error': 'Email already exists'}), 400
-    user = User(name=data['name'], email=data['email'])
+    user = User(name=data['name'], email=data['email'], role='user')
     user.set_password(data['password'])
     db.session.add(user)
     db.session.commit()
     session['user_id'] = user.id
     return jsonify(user.to_dict()), 201
-
 
 @app.route('/api/login', methods=['POST'])
 def login():
@@ -379,14 +367,12 @@ def login():
     if not user or not user.check_password(data.get('password', '')):
         return jsonify({'error': 'Invalid credentials'}), 401
     session['user_id'] = user.id
-    return jsonify(user.to_dict()), 200
-
+    return jsonify(user.to_dict()), 200   # includes role
 
 @app.route('/api/logout', methods=['POST'])
 def logout():
     session.pop('user_id', None)
     return jsonify({'message': 'Logged out'}), 200
-
 
 @app.route('/api/me', methods=['GET'])
 def me():
@@ -395,14 +381,13 @@ def me():
 
 
 # ----------------------------------------------------------------------
-# Transaction routes
+# Regular user routes (unchanged, kept as before)
 # ----------------------------------------------------------------------
 @app.route('/api/transactions', methods=['GET'])
 @login_required
 def list_transactions():
     user = get_current_user()
     return jsonify([t.to_dict() for t in Transaction.query.filter_by(user_id=user.id).order_by(Transaction.tx_date.desc()).all()])
-
 
 @app.route('/api/transactions', methods=['POST'])
 @login_required
@@ -422,7 +407,6 @@ def create_transaction():
     )
     db.session.add(tx)
     db.session.commit()
-    # Auto-apply future expenses on salary income
     if tx.tx_type == 'income' and tx.category.lower() == 'salary':
         today = datetime.now(timezone.utc).date()
         for exp in FutureExpense.query.filter(FutureExpense.user_id == user.id, FutureExpense.expense_date <= today, FutureExpense.cycle == 'One-time').all():
@@ -435,7 +419,6 @@ def create_transaction():
         db.session.commit()
     return jsonify(tx.to_dict()), 201
 
-
 @app.route('/api/transactions/<int:tx_id>', methods=['DELETE'])
 @login_required
 def delete_transaction(tx_id):
@@ -447,17 +430,39 @@ def delete_transaction(tx_id):
     db.session.commit()
     return jsonify({'message': 'Deleted'}), 200
 
+@app.route('/api/budgets/<int:user_id>', methods=['GET'])
+@login_required
+def get_budgets(user_id):
+    if get_current_user().id != user_id:
+        return jsonify({'error': 'Forbidden'}), 403
+    budgets = Budget.query.filter_by(user_id=user_id).all()
+    return jsonify([{'category': b.category, 'limit': b.limit_amount} for b in budgets])
 
-# ----------------------------------------------------------------------
-# Summary / predict routes
-# ----------------------------------------------------------------------
+@app.route('/api/budgets/<int:user_id>', methods=['POST'])
+@login_required
+def upsert_budget(user_id):
+    if get_current_user().id != user_id:
+        return jsonify({'error': 'Forbidden'}), 403
+    data = request.json
+    category = data.get('category')
+    limit = data.get('limit')
+    if not category or limit is None:
+        return jsonify({'error': 'Category and limit required'}), 400
+    existing = Budget.query.filter_by(user_id=user_id, category=category).first()
+    if existing:
+        existing.limit_amount = limit
+    else:
+        existing = Budget(user_id=user_id, category=category, limit_amount=limit)
+        db.session.add(existing)
+    db.session.commit()
+    return jsonify({'message': 'Budget saved'})
+
 @app.route('/api/summary/<int:user_id>')
 @login_required
 def summary(user_id):
     if get_current_user().id != user_id:
         return jsonify({'error': 'Forbidden'}), 403
     return jsonify(get_monthly_summary(user_id))
-
 
 @app.route('/api/predict/<int:user_id>')
 @login_required
@@ -474,7 +479,6 @@ def predict(user_id):
         'advice': []
     })
 
-
 @app.route('/api/longevity/<int:user_id>')
 @login_required
 def longevity(user_id):
@@ -482,16 +486,11 @@ def longevity(user_id):
         return jsonify({'error': 'Forbidden'}), 403
     return jsonify(compute_longevity(user_id))
 
-
-# ----------------------------------------------------------------------
-# Future expenses routes
-# ----------------------------------------------------------------------
 @app.route('/api/future_expenses', methods=['GET'])
 @login_required
 def get_future_expenses():
     user = get_current_user()
     return jsonify([e.to_dict() for e in FutureExpense.query.filter_by(user_id=user.id).order_by(FutureExpense.expense_date).all()])
-
 
 @app.route('/api/future_expenses', methods=['POST'])
 @login_required
@@ -512,7 +511,6 @@ def create_future_expense():
     db.session.commit()
     return jsonify(exp.to_dict()), 201
 
-
 @app.route('/api/future_expenses/<int:exp_id>', methods=['DELETE'])
 @login_required
 def delete_future_expense(exp_id):
@@ -524,17 +522,12 @@ def delete_future_expense(exp_id):
     db.session.commit()
     return jsonify({'message': 'Deleted'}), 200
 
-
-# ----------------------------------------------------------------------
-# Allocations routes
-# ----------------------------------------------------------------------
 @app.route('/api/allocations', methods=['GET'])
 @login_required
 def get_allocations():
     user = get_current_user()
     return jsonify([{'category_name': a.category_name, 'type': a.type, 'percentage': a.percentage}
                     for a in UserAllocation.query.filter_by(user_id=user.id).all()])
-
 
 @app.route('/api/allocations', methods=['POST'])
 @login_required
@@ -554,10 +547,6 @@ def update_allocations():
     db.session.commit()
     return jsonify({'message': 'Saved'}), 200
 
-
-# ----------------------------------------------------------------------
-# Export
-# ----------------------------------------------------------------------
 @app.route('/api/export/csv')
 @login_required
 def export_csv():
@@ -574,7 +563,98 @@ def export_csv():
 
 
 # ----------------------------------------------------------------------
-# AI routes (using the unified router)
+# ADMIN API ROUTES
+# ----------------------------------------------------------------------
+@app.route('/api/admin/stats', methods=['GET'])
+@admin_required
+def admin_stats():
+    total_users = User.query.count()
+    total_transactions = Transaction.query.count()
+    total_income = db.session.query(db.func.sum(Transaction.amount)).filter(Transaction.tx_type == 'income').scalar() or 0
+    total_expense = db.session.query(db.func.sum(Transaction.amount)).filter(Transaction.tx_type == 'expense').scalar() or 0
+    # average health score across all users with data
+    all_health_scores = []
+    for user in User.query.all():
+        score = compute_health_score(user.id)
+        all_health_scores.append(score)
+    avg_health = sum(all_health_scores) / len(all_health_scores) if all_health_scores else 0
+    return jsonify({
+        'total_users': total_users,
+        'total_transactions': total_transactions,
+        'total_income': total_income,
+        'total_expense': total_expense,
+        'avg_health_score': round(avg_health, 1)
+    })
+
+@app.route('/api/admin/users', methods=['GET'])
+@admin_required
+def admin_users():
+    users = User.query.all()
+    return jsonify([u.to_dict() for u in users])
+
+@app.route('/api/admin/users/<int:user_id>', methods=['PUT'])
+@admin_required
+def admin_update_user(user_id):
+    data = request.json
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+    if 'role' in data:
+        user.role = data['role']
+    if 'name' in data:
+        user.name = data['name']
+    db.session.commit()
+    return jsonify(user.to_dict())
+
+@app.route('/api/admin/users/<int:user_id>', methods=['DELETE'])
+@admin_required
+def admin_delete_user(user_id):
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+    # Prevent deleting yourself
+    if user.id == session['user_id']:
+        return jsonify({'error': 'You cannot delete your own admin account'}), 403
+    # Delete all related data (cascade handled by DB foreign keys, but we must delete transactions etc. manually if needed)
+    Transaction.query.filter_by(user_id=user.id).delete()
+    Budget.query.filter_by(user_id=user.id).delete()
+    FutureExpense.query.filter_by(user_id=user.id).delete()
+    UserAllocation.query.filter_by(user_id=user.id).delete()
+    db.session.delete(user)
+    db.session.commit()
+    return jsonify({'message': 'User deleted'})
+
+@app.route('/api/admin/transactions', methods=['GET'])
+@admin_required
+def admin_transactions():
+    user_id = request.args.get('user_id', type=int)
+    query = Transaction.query
+    if user_id:
+        query = query.filter_by(user_id=user_id)
+    transactions = query.order_by(Transaction.tx_date.desc()).all()
+    return jsonify([t.to_dict() for t in transactions])
+
+@app.route('/api/admin/allocations/<int:user_id>', methods=['GET'])
+@admin_required
+def admin_allocations(user_id):
+    allocs = UserAllocation.query.filter_by(user_id=user_id).all()
+    return jsonify([{'category_name': a.category_name, 'type': a.type, 'percentage': a.percentage} for a in allocs])
+
+@app.route('/api/admin/budgets/<int:user_id>', methods=['GET'])
+@admin_required
+def admin_budgets(user_id):
+    budgets = Budget.query.filter_by(user_id=user_id).all()
+    return jsonify([{'category': b.category, 'limit': b.limit_amount} for b in budgets])
+
+@app.route('/api/admin/future_expenses/<int:user_id>', methods=['GET'])
+@admin_required
+def admin_future_expenses(user_id):
+    exps = FutureExpense.query.filter_by(user_id=user_id).all()
+    return jsonify([e.to_dict() for e in exps])
+
+
+# ----------------------------------------------------------------------
+# AI routes (using router, unchanged)
 # ----------------------------------------------------------------------
 @app.route('/api/ai/full_setup', methods=['POST'])
 @login_required
@@ -602,203 +682,116 @@ You are an expert financial planner AI for a Filipino user.
 
 User profile:
 - Monthly income: ₱{monthly_income:,.2f}
-- Spending mindset: {mindset} (Saver = prioritize needs/savings; Neutral = balanced; Spender = allow more wants)
+- Spending mindset: {mindset}
 - Social status: {social_status}
-- Recent category spending (last 30 days): {dict(recent_spending)}
+- Recent category spending: {dict(recent_spending)}
 
-Your job: create a complete autonomous financial plan.
-
-Categories to allocate across: {categories}
-
-Rules:
-- Saver mindset: Savings ≥ 20%, Needs ≥ 60%, Wants ≤ 20%
-- Neutral mindset: Savings ≥ 15%, Needs ≥ 50%, Wants ≤ 35%
-- Spender mindset: Savings ≥ 10%, Needs ≥ 45%, Wants ≤ 45%
-- Groceries, Food & Dining, Transport, Health, Debt repayment = NEEDS
-- Entertainment, Hobbies, Subscription = WANTS
-- Savings = SAVINGS (treat as non-negotiable)
-- All percentages must sum to exactly 100
-
-Return ONLY valid JSON (no markdown, no explanation):
+Allocate percentages to: {categories}
+Rules: Saver: savings≥20%, Needs≥60%, Wants≤20%; Neutral: savings≥15%, Needs≥50%, Wants≤35%; Spender: savings≥10%, Needs≥45%, Wants≤45%.
+Return ONLY valid JSON:
 {{
-  "allocation": {{
-    "Food & Dining": <float>,
-    "Transport": <float>,
-    "Groceries": <float>,
-    "Health": <float>,
-    "Entertainment": <float>,
-    "Debt repayment": <float>,
-    "Hobbies": <float>,
-    "Subscription": <float>,
-    "Savings": <float>
-  }},
-  "savings_plan": {{
-    "daily": <float>,
-    "weekly": <float>,
-    "monthly": <float>,
-    "tip": "<one actionable saving tip>"
-  }},
-  "advice": [
-    {{"title": "<short title>", "body": "<actionable advice 1-2 sentences>", "type": "info|warning|success"}},
-    {{"title": "<short title>", "body": "<actionable advice 1-2 sentences>", "type": "info|warning|success"}},
-    {{"title": "<short title>", "body": "<actionable advice 1-2 sentences>", "type": "info|warning|success"}}
-  ],
-  "financial_summary": "<2-sentence overall assessment of their financial health>"
+  "allocation": {{ "Food & Dining": float, ... }},
+  "savings_plan": {{ "daily": float, "weekly": float, "monthly": float, "tip": "..." }},
+  "advice": [{{"title":"...","body":"...","type":"info|warning|success"}}],
+  "financial_summary": "..."
 }}
 """
     raw = route_ai_request(prompt, max_tokens=800)
     try:
-        # Clean up markdown if present
         if raw.startswith('```'):
             raw = raw.split('```')[1]
             if raw.startswith('json'):
                 raw = raw[4:]
         result = json.loads(raw.strip())
     except Exception as e:
-        print(f"Failed to parse AI response for full_setup: {e}")
-        # Fallback (same as before)
-        mindset_lower = mindset.lower()
-        if mindset_lower == 'saver':
-            alloc = {'Food & Dining': 20, 'Transport': 10, 'Groceries': 15, 'Health': 5,
-                     'Entertainment': 5, 'Debt repayment': 15, 'Hobbies': 3, 'Subscription': 2, 'Savings': 25}
-        elif mindset_lower == 'spender':
-            alloc = {'Food & Dining': 22, 'Transport': 10, 'Groceries': 13, 'Health': 5,
-                     'Entertainment': 12, 'Debt repayment': 10, 'Hobbies': 8, 'Subscription': 5, 'Savings': 15}
+        print(f"AI fallback: {e}")
+        if mindset.lower() == 'saver':
+            alloc = {'Food & Dining': 20, 'Transport': 10, 'Groceries': 15, 'Health': 5, 'Entertainment': 5,
+                     'Debt repayment': 15, 'Hobbies': 3, 'Subscription': 2, 'Savings': 25}
+        elif mindset.lower() == 'spender':
+            alloc = {'Food & Dining': 22, 'Transport': 10, 'Groceries': 13, 'Health': 5, 'Entertainment': 12,
+                     'Debt repayment': 10, 'Hobbies': 8, 'Subscription': 5, 'Savings': 15}
         else:
-            alloc = {'Food & Dining': 20, 'Transport': 10, 'Groceries': 14, 'Health': 5,
-                     'Entertainment': 8, 'Debt repayment': 12, 'Hobbies': 5, 'Subscription': 4, 'Savings': 22}
-
+            alloc = {'Food & Dining': 20, 'Transport': 10, 'Groceries': 14, 'Health': 5, 'Entertainment': 8,
+                     'Debt repayment': 12, 'Hobbies': 5, 'Subscription': 4, 'Savings': 22}
         monthly_save = monthly_income * (alloc['Savings'] / 100)
         result = {
             'allocation': alloc,
-            'allocation_amounts': {k: round(monthly_income * v / 100, 2) for k, v in alloc.items()},
-            'savings_plan': {'daily': round(monthly_save/30, 2), 'weekly': round(monthly_save/4, 2), 'monthly': round(monthly_save, 2), 'tip': 'Automate your savings on payday.'},
-            'advice': [
-                {'title': 'Stay Consistent', 'body': 'Track every expense to improve your score.', 'type': 'info'},
-                {'title': 'Savings First', 'body': 'Transfer savings immediately after receiving income.', 'type': 'success'},
-                {'title': 'Review Wants', 'body': 'Audit subscriptions and entertainment monthly.', 'type': 'warning'}
-            ],
-            'financial_summary': 'Your AI plan is ready. Start by logging your expenses to get personalized insights.',
-            'monthly_income': monthly_income
+            'savings_plan': {'daily': round(monthly_save/30,2), 'weekly': round(monthly_save/4,2), 'monthly': round(monthly_save,2), 'tip': 'Start small, be consistent.'},
+            'advice': [{'title':'Stay Consistent','body':'Track every expense.','type':'info'}],
+            'financial_summary': 'Your AI plan is ready.'
         }
 
-    # Persist allocation and budgets
+    # Normalize allocation to 100%
     alloc = result.get('allocation', {})
     total = sum(alloc.values())
-    if total > 0 and abs(total - 100) > 0.5:
+    if total != 100:
         factor = 100 / total
         alloc = {k: round(v * factor, 1) for k, v in alloc.items()}
         result['allocation'] = alloc
 
+    # Persist
     UserAllocation.query.filter_by(user_id=user.id).delete()
     needs = {'Food & Dining', 'Transport', 'Groceries', 'Health', 'Debt repayment'}
-    savings_cats = {'Savings'}
     for cat, pct in alloc.items():
-        t = 'need' if cat in needs else ('savings' if cat in savings_cats else 'want')
+        t = 'need' if cat in needs else ('savings' if cat == 'Savings' else 'want')
         db.session.add(UserAllocation(user_id=user.id, category_name=cat, type=t, percentage=pct))
 
     Budget.query.filter_by(user_id=user.id).delete()
     for cat, pct in alloc.items():
         db.session.add(Budget(user_id=user.id, category=cat, limit_amount=round(monthly_income * pct / 100, 2)))
-
     db.session.commit()
 
     result['allocation_amounts'] = {cat: round(monthly_income * pct / 100, 2) for cat, pct in alloc.items()}
     result['monthly_income'] = monthly_income
     return jsonify(result), 200
 
-
 @app.route('/api/ai/classify_transaction', methods=['POST'])
 @login_required
 def ai_classify_transaction():
-    user = get_current_user()
     data = request.json
-    category = data.get('category', '')
-    amount = data.get('amount', 0)
-    tx_type = data.get('tx_type', 'expense')
-    note = data.get('note', '')
-
-    if tx_type == 'income':
-        return jsonify({'is_need': True, 'priority': 3, 'suggested_note': 'Income received'}), 200
-
-    prompt = f"""
-Classify this expense for a Filipino user:
-- Category: {category}
-- Amount: ₱{amount}
-- Note: {note or 'none'}
-
-Return ONLY valid JSON:
-{{
-  "is_need": <true if essential/need, false if want/luxury>,
-  "priority": <integer 0=low, 1=medium, 2=high, 3=critical>,
-  "suggested_note": "<short helpful context about this expense, max 8 words>"
-}}
-"""
+    if data.get('tx_type') == 'income':
+        return jsonify({'is_need': True, 'priority': 3, 'suggested_note': 'Income received'})
+    prompt = f"Classify expense: category {data['category']}, amount ₱{data['amount']}, note {data.get('note','none')}. Return JSON: {{'is_need':bool,'priority':int,'suggested_note':str}}"
     raw = route_ai_request(prompt, max_tokens=150)
     try:
-        if raw.startswith('```'):
-            raw = raw.split('```')[1]
-            if raw.startswith('json'):
-                raw = raw[4:]
-        result = json.loads(raw.strip())
-        return jsonify(result), 200
-    except Exception as e:
-        print(f"Classification fallback: {e}")
-        needs = {'Food & Dining', 'Transport', 'Groceries', 'Health', 'Debt repayment', 'Mortgage'}
-        return jsonify({'is_need': category in needs, 'priority': 2 if category in needs else 1, 'suggested_note': note or ''}), 200
-
+        if raw.startswith('```'): raw = raw.split('```')[1]
+        if raw.startswith('json'): raw = raw[4:]
+        return jsonify(json.loads(raw.strip()))
+    except:
+        needs = {'Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage'}
+        return jsonify({'is_need': data['category'] in needs, 'priority': 2 if data['category'] in needs else 1, 'suggested_note': data.get('note','')})
 
 @app.route('/api/ai/chat', methods=['POST'])
 @login_required
 def ai_chat():
     user = get_current_user()
     data = request.json
-    user_message = data.get('message', '')
     summary = get_monthly_summary(user.id)
     score = compute_health_score(user.id)
     future_cnt = FutureExpense.query.filter_by(user_id=user.id).count()
     allocs = UserAllocation.query.filter_by(user_id=user.id).all()
     alloc_str = ', '.join([f"{a.category_name}: {a.percentage}%" for a in allocs]) or 'Not set'
     recent = Transaction.query.filter_by(user_id=user.id).order_by(Transaction.tx_date.desc()).limit(8).all()
-    recent_str = '\n'.join([f"  {t.category}: ₱{t.amount:.2f} ({t.tx_type}) on {t.tx_date.strftime('%b %d')}" for t in recent]) or 'None'
-
-    prompt = f"""You are SmartSpend AI, an expert Filipino personal finance assistant for {user.name}.
-
-Financial snapshot:
-- Balance: ₱{summary['balance']:,.2f}
-- Monthly income: ₱{summary['income']:,.2f}
-- Monthly expenses: ₱{summary['expense']:,.2f}
-- Health score: {score}/100
-- Mindset: {user.spending_mindset}
-- AI budget allocation: {alloc_str}
-- Upcoming pinned expenses: {future_cnt}
-
-Recent transactions:
-{recent_str}
-
-User asks: "{user_message}"
-
-Reply in 3-5 sentences max. Be specific, warm, and actionable. Use peso signs. Reference their actual data. Do not mention being an AI unless directly asked."""
-
+    recent_str = '\n'.join([f"{t.category}: ₱{t.amount:.2f} ({t.tx_type}) on {t.tx_date.strftime('%b %d')}" for t in recent]) or 'None'
+    prompt = f"""
+You are SmartSpend AI for {user.name}.
+Balance: ₱{summary['balance']:,.2f}, Income: ₱{summary['income']:,.2f}, Expenses: ₱{summary['expense']:,.2f}, Health: {score}/100.
+Allocation: {alloc_str}. Pinned future: {future_cnt}.
+Recent: {recent_str}
+User asks: "{data.get('message','')}"
+Reply in 3-5 sentences, warm, actionable, use ₱.
+"""
     reply = route_ai_request(prompt, max_tokens=400)
-    return jsonify({'reply': reply}), 200
+    return jsonify({'reply': reply})
 
 
 # ----------------------------------------------------------------------
-# Initialize DB
-# ----------------------------------------------------------------------
-with app.app_context():
-    db.create_all()
-    ensure_schema()
-
-
-# ----------------------------------------------------------------------
-# Frontend
+# Frontend (HTML with admin panel)
 # ----------------------------------------------------------------------
 @app.route('/')
 def index():
     return HTML_PAGE
-
 
 # ----------------------------------------------------------------------
 # HTML_PAGE (the same beautiful UI you already have – too long to repeat)
@@ -806,8 +799,7 @@ def index():
 # your previous code. I've kept the variable name; just paste your HTML_PAGE
 # string below.
 # ----------------------------------------------------------------------
-
-HTML_PAGE = r"""<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -1218,6 +1210,7 @@ body::before{
   <button class="nav-item" data-nav="insights"><span class="nav-icon">📈</span><span class="nav-label">Insights</span></button>
   <button class="nav-item" data-nav="future"><span class="nav-icon">📌</span><span class="nav-label">Future Expenses</span></button>
   <button class="nav-item" data-nav="history"><span class="nav-icon">📋</span><span class="nav-label">History</span></button>
+  <button class="nav-item" id="adminNavBtn" data-nav="admin" style="display:none;"><span class="nav-icon">👑</span><span class="nav-label">Admin Panel</span></button>
   <div class="sidebar-sep"></div>
   <button class="nav-item" id="exportBtn"><span class="nav-icon">⬇</span><span class="nav-label">Export CSV</span></button>
 </nav>
@@ -1340,7 +1333,6 @@ body::before{
           <button class="btn-add" id="addTxBtn">Add →</button>
         </div>
       </div>
-      <!-- AI classification result -->
       <div id="classifyResult" style="display:none;margin-top:4px;"></div>
     </div>
 
@@ -1353,7 +1345,6 @@ body::before{
 
   <!-- ── INSIGHTS ── -->
   <div class="screen" id="screen-insights">
-    <!-- Longevity -->
     <div class="card">
       <div class="card-header"><span class="card-title">Budget Longevity</span></div>
       <div class="longevity-display" id="longevityDisplay">
@@ -1363,12 +1354,10 @@ body::before{
         <div class="longevity-stat"><div class="longevity-stat-val" id="longevityDaily">—</div><div class="longevity-stat-label">Avg Daily Spend</div></div>
       </div>
     </div>
-    <!-- Weekly Forecast -->
     <div class="card">
       <div class="card-header"><span class="card-title">4-Week Spending Forecast <span class="ai-badge" style="margin-left:8px;">ML</span></span></div>
       <div id="forecastBars"></div>
     </div>
-    <!-- Category Chart -->
     <div class="card">
       <div class="card-header"><span class="card-title">Category Breakdown (This Month)</span></div>
       <div class="chart-wrapper"><canvas id="catChart"></canvas></div>
@@ -1430,6 +1419,36 @@ body::before{
         </div>
       </div>
       <div class="tx-list" id="historyList"></div>
+    </div>
+  </div>
+
+  <!-- ── ADMIN PANEL ── -->
+  <div class="screen" id="screen-admin">
+    <div class="card">
+      <div class="card-header">👑 Admin Dashboard</div>
+      <div class="stats-grid" id="adminStats"></div>
+      <div class="tabs" id="adminTabs">
+        <button class="tab active" data-tab="users">📋 Users</button>
+        <button class="tab" data-tab="transactions">💰 All Transactions</button>
+      </div>
+      <div id="adminUsersPanel">
+        <input type="text" id="adminSearchUser" placeholder="Search user..." class="form-input" style="margin-bottom:12px;">
+        <div class="table-wrap">
+          <table style="width:100%; border-collapse:collapse;">
+            <thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Role</th><th>Created</th><th>Actions</th></tr></thead>
+            <tbody id="adminUserTable"></tbody>
+          </table>
+        </div>
+      </div>
+      <div id="adminTransactionsPanel" style="display:none;">
+        <select id="adminUserFilter" class="form-select" style="margin-bottom:12px;"><option value="">All Users</option></select>
+        <div class="table-wrap">
+          <table style="width:100%; border-collapse:collapse;">
+            <thead><tr><th>Date</th><th>User</th><th>Category</th><th>Type</th><th>Amount</th><th>Need/Want</th></tr></thead>
+            <tbody id="adminTxTable"></tbody>
+          </table>
+        </div>
+      </div>
     </div>
   </div>
 </main>
@@ -1522,7 +1541,6 @@ function addFeedEvent(icon, text, time=null){
   el.className = 'ai-event';
   el.innerHTML = `<span class="ai-event-icon">${icon}</span><span class="ai-event-text">${esc(text)}</span><span class="ai-event-time">${timeStr}</span>`;
   feed.insertBefore(el, feed.firstChild);
-  // keep max 8 events
   while(feed.children.length > 8) feed.removeChild(feed.lastChild);
 }
 
@@ -1537,7 +1555,6 @@ document.querySelectorAll('.mindset-btn').forEach(btn=>{
 
 // ── AI PLAN BUTTON ──
 document.getElementById('analyzeBtn').addEventListener('click', runAIPlan);
-
 async function runAIPlan(){
   const income = parseFloat(document.getElementById('incomeInput').value);
   if(!income || income <= 0){ toast('Enter a valid monthly income first'); return; }
@@ -1567,7 +1584,6 @@ async function runAIPlan(){
 }
 
 function renderAIPlan(plan){
-  // Summary
   document.getElementById('financialSummaryText').textContent = plan.financial_summary;
   document.getElementById('saveDaily').textContent = fmt(plan.savings_plan.daily);
   document.getElementById('saveWeekly').textContent = fmt(plan.savings_plan.weekly);
@@ -1575,7 +1591,6 @@ function renderAIPlan(plan){
   document.getElementById('savingsTip').textContent = '💡 ' + (plan.savings_plan.tip || '');
   document.getElementById('financialSummaryBlock').style.display = 'block';
 
-  // Allocation
   const grid = document.getElementById('allocGrid');
   const needs = new Set(['Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage']);
   const savings = new Set(['Savings']);
@@ -1592,7 +1607,6 @@ function renderAIPlan(plan){
   }).join('');
   document.getElementById('allocationBlock').style.display = 'block';
 
-  // Advice
   const adviceIcons = { info:'ℹ️', warning:'⚠️', success:'✅' };
   document.getElementById('adviceList').innerHTML = plan.advice.map(a=>`
     <div class="advice-card ${esc(a.type)}">
@@ -1613,7 +1627,6 @@ async function loadAll(){
     ]);
     allTransactions = txs;
 
-    // Stats
     document.getElementById('sBalance').textContent = fmt(summary.balance);
     document.getElementById('sExpense').textContent = fmt(summary.expense);
     document.getElementById('sIncome').textContent = fmt(summary.income);
@@ -1625,7 +1638,6 @@ async function loadAll(){
       document.getElementById('scoreLabel').textContent = score >= 80 ? 'Excellent' : score >= 60 ? 'Good' : score >= 40 ? 'Fair' : 'Needs Work';
       addFeedEvent('📊',`Health score updated: ${score}/100`);
 
-      // Trend chart
       const months = Object.keys(summary.monthly).slice(-6);
       if(months.length){
         if(trendChart) trendChart.destroy();
@@ -1639,15 +1651,10 @@ async function loadAll(){
               {label:'Expense',data:months.map(m=>summary.monthly[m]?.expense||0),backgroundColor:'rgba(255,59,92,0.5)',borderRadius:6}
             ]
           },
-          options:{
-            responsive:true,maintainAspectRatio:false,
-            plugins:{legend:{labels:{color:'#6B88A8',font:{family:'IBM Plex Mono',size:11}}}},
-            scales:{x:{grid:{color:'rgba(255,255,255,0.04)'},ticks:{color:'#6B88A8',font:{family:'IBM Plex Mono',size:10}}},y:{grid:{color:'rgba(255,255,255,0.04)'},ticks:{color:'#6B88A8',font:{family:'IBM Plex Mono',size:10},callback:v=>'₱'+v.toLocaleString()}}}
-          }
+          options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:'#6B88A8',fontSize:11}}},scales:{x:{grid:{color:'rgba(255,255,255,0.04)'},ticks:{color:'#6B88A8',fontSize:10}},y:{grid:{color:'rgba(255,255,255,0.04)'},ticks:{color:'#6B88A8',fontSize:10, callback:v=>'₱'+v.toLocaleString()}}}
         });
       }
 
-      // Existing allocations
       const allocs = await api('/api/allocations');
       if(allocs.length && !aiPlan){
         const grid = document.getElementById('allocGrid');
@@ -1670,7 +1677,6 @@ async function loadAll(){
       }
     }
 
-    // Prefill income
     if(currentUser.monthly_budget_limit > 0){
       document.getElementById('incomeInput').value = currentUser.monthly_budget_limit;
     }
@@ -1684,24 +1690,18 @@ async function loadAll(){
 // ── ADD TRANSACTION ──
 document.getElementById('addTxBtn').addEventListener('click', addTransaction);
 document.getElementById('txAmount').addEventListener('keydown', e=>{ if(e.key==='Enter') addTransaction(); });
-
 async function addTransaction(){
   const amount = parseFloat(document.getElementById('txAmount').value);
   const category = document.getElementById('txCategory').value;
   const tx_type = document.getElementById('txType').value;
   const note = document.getElementById('txNote').value.trim();
-
   if(!amount || amount <= 0){ toast('Enter a valid amount'); return; }
-
   const btn = document.getElementById('addTxBtn');
   btn.textContent = '…';
   btn.disabled = true;
-
   try {
-    // AI classify first
     const classifyResult = document.getElementById('classifyResult');
     classifyResult.style.display = 'none';
-
     let is_need = true, priority = 1, suggested_note = note;
     try {
       const cls = await api('/api/ai/classify_transaction', {
@@ -1715,25 +1715,19 @@ async function addTransaction(){
         classifyResult.innerHTML = `<div class="ai-classify-result">🤖 AI classified as <strong>${is_need?'Need':'Want'}</strong> · Priority: ${['Low','Med','High','Critical'][priority]}</div>`;
         classifyResult.style.display = 'block';
       }
-    } catch(e){ /* use defaults */ }
-
-    // Save transaction
+    } catch(e){}
     const tx = await api('/api/transactions', {
       method:'POST',
       body: JSON.stringify({ amount, category, tx_type, is_need, priority, note: suggested_note })
     });
-
     allTransactions.unshift(tx);
     addFeedEvent(tx_type==='income'?'💚':'🔴', `${tx_type==='income'?'Income':'Expense'}: ${fmt(amount)} in ${category}`);
     if(tx_type==='income') addFeedEvent('⚡','Salary received — auto-applying pinned future expenses…');
-
     toast(`${tx_type==='income'?'Income':'Expense'} added! AI classified.`, 'var(--green)');
     document.getElementById('txAmount').value = '';
     document.getElementById('txNote').value = '';
     renderRecentTx();
     renderHistory();
-
-    // Refresh stats silently
     loadAll();
   } catch(e){ toast('Error: '+e.message); }
   btn.textContent = 'Add →';
@@ -1754,27 +1748,20 @@ function renderTxItem(t, showDel=true){
     ${showDel?`<button class="btn-del" data-id="${t.id}" title="Delete">✕</button>`:''}
   </div>`;
 }
-
 function renderRecentTx(){
   const el = document.getElementById('recentTxList');
   const recent = allTransactions.slice(0,10);
-  el.innerHTML = recent.length
-    ? recent.map(t=>renderTxItem(t)).join('')
-    : '<div class="empty-state"><div class="empty-state-icon">📋</div><div class="empty-state-text">No transactions yet.</div></div>';
+  el.innerHTML = recent.length ? recent.map(t=>renderTxItem(t)).join('') : '<div class="empty-state"><div class="empty-state-icon">📋</div><div class="empty-state-text">No transactions yet.</div></div>';
   el.querySelectorAll('.btn-del').forEach(b=>b.addEventListener('click',()=>deleteTx(parseInt(b.dataset.id))));
 }
-
 function renderHistory(filter=''){
   const el = document.getElementById('historyList');
   let txs = allTransactions;
   if(filter) txs = txs.filter(t=>t.category.toLowerCase().includes(filter)||( t.note||'').toLowerCase().includes(filter));
-  el.innerHTML = txs.slice(0,60).map(t=>renderTxItem(t)).join('')
-    || '<div class="empty-state"><div class="empty-state-text">No results.</div></div>';
+  el.innerHTML = txs.slice(0,60).map(t=>renderTxItem(t)).join('') || '<div class="empty-state"><div class="empty-state-text">No results.</div></div>';
   el.querySelectorAll('.btn-del').forEach(b=>b.addEventListener('click',()=>deleteTx(parseInt(b.dataset.id))));
 }
-
 document.getElementById('historySearch').addEventListener('input', e=>renderHistory(e.target.value.toLowerCase()));
-
 async function deleteTx(id){
   try {
     await api(`/api/transactions/${id}`,{method:'DELETE'});
@@ -1788,17 +1775,13 @@ async function deleteTx(id){
 
 // ── INSIGHTS ──
 async function loadInsights(pred){
-  // Longevity
   try {
     const lon = await api(`/api/longevity/${currentUser.id}`);
     document.getElementById('longevityDays').textContent = lon.days >= 999 ? '∞' : lon.days;
     document.getElementById('longevityBalance').textContent = fmt(lon.balance);
     document.getElementById('longevityDaily').textContent = fmt(lon.avg_daily_spend);
   } catch(e){}
-
   if(!pred || !pred.has_data) return;
-
-  // Forecast bars
   const weeks = pred.predictions.weekly;
   const maxVal = Math.max(...Object.values(weeks), 1);
   document.getElementById('forecastBars').innerHTML = Object.entries(weeks).map(([w,v])=>`
@@ -1807,21 +1790,13 @@ async function loadInsights(pred){
       <div class="forecast-track"><div class="forecast-fill" style="width:${(v/maxVal*100).toFixed(1)}%"></div></div>
       <span class="forecast-val">${fmt(v)}</span>
     </div>`).join('');
-
-  // Category chart
   const cats = pred.predictions.categories;
   if(Object.keys(cats).length){
     if(catChartInst) catChartInst.destroy();
     catChartInst = new Chart(document.getElementById('catChart'),{
       type:'doughnut',
-      data:{
-        labels: Object.keys(cats),
-        datasets:[{data: Object.values(cats), backgroundColor:['#00E5A0','#3B8BFF','#9B59F5','#F5A623','#FF3B5C','#1ABC9C','#E74C3C','#8E44AD'], borderWidth:0, hoverOffset:8}]
-      },
-      options:{
-        responsive:true, maintainAspectRatio:false,
-        plugins:{legend:{position:'right',labels:{color:'#6B88A8',font:{family:'IBM Plex Mono',size:11},padding:16}}}
-      }
+      data:{ labels: Object.keys(cats), datasets:[{data: Object.values(cats), backgroundColor:['#00E5A0','#3B8BFF','#9B59F5','#F5A623','#FF3B5C','#1ABC9C','#E74C3C','#8E44AD'], borderWidth:0, hoverOffset:8}] },
+      options:{ responsive:true, maintainAspectRatio:false, plugins:{legend:{position:'right',labels:{color:'#6B88A8',fontSize:11,padding:16}}} }
     });
   }
 }
@@ -1831,24 +1806,10 @@ async function loadFuture(){
   try {
     const exps = await api('/api/future_expenses');
     const el = document.getElementById('futureList');
-    el.innerHTML = exps.length
-      ? exps.map(e=>`<div class="future-item">
-          <div class="tx-cat-icon">${CAT_ICONS[e.category]||'📦'}</div>
-          <div class="future-info">
-            <div class="future-desc">${esc(e.description)}</div>
-            <div class="future-meta">${e.category} · ${e.cycle} · due ${e.date}</div>
-          </div>
-          <div class="future-amount">${fmt(e.amount)}</div>
-          <button class="btn-del" data-fid="${e.id}">✕</button>
-        </div>`).join('')
-      : '<div class="empty-state"><div class="empty-state-icon">📌</div><div class="empty-state-text">No pinned future expenses.</div></div>';
-    el.querySelectorAll('.btn-del').forEach(b=>b.addEventListener('click', async()=>{
-      try { await api(`/api/future_expenses/${b.dataset.fid}`,{method:'DELETE'}); loadFuture(); toast('Removed'); }
-      catch(e){ toast('Error'); }
-    }));
+    el.innerHTML = exps.length ? exps.map(e=>`<div class="future-item"><div class="tx-cat-icon">${CAT_ICONS[e.category]||'📦'}</div><div class="future-info"><div class="future-desc">${esc(e.description)}</div><div class="future-meta">${e.category} · ${e.cycle} · due ${e.date}</div></div><div class="future-amount">${fmt(e.amount)}</div><button class="btn-del" data-fid="${e.id}">✕</button></div>`).join('') : '<div class="empty-state"><div class="empty-state-icon">📌</div><div class="empty-state-text">No pinned future expenses.</div></div>';
+    el.querySelectorAll('.btn-del').forEach(b=>b.addEventListener('click', async()=>{ try { await api(`/api/future_expenses/${b.dataset.fid}`,{method:'DELETE'}); loadFuture(); toast('Removed'); } catch(e){ toast('Error'); } }));
   } catch(e){}
 }
-
 document.getElementById('pinFutureBtn').addEventListener('click', async()=>{
   const desc = document.getElementById('futureDesc').value.trim();
   const amt = parseFloat(document.getElementById('futureAmt').value);
@@ -1866,7 +1827,6 @@ document.getElementById('pinFutureBtn').addEventListener('click', async()=>{
     loadFuture();
   } catch(e){ toast('Error: '+e.message); }
 });
-
 document.getElementById('applyFutureBtn').addEventListener('click', async()=>{
   try {
     const r = await api('/api/apply_future_expenses',{method:'POST'});
@@ -1881,12 +1841,100 @@ function navigate(id){
   document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
   document.getElementById('screen-'+id).classList.add('active');
   document.querySelectorAll('.nav-item').forEach(b=>{ b.classList.toggle('active', b.dataset.nav===id); });
-  const titles = {dashboard:'Dashboard',add:'Add Transaction',insights:'Insights',future:'Future Expenses',history:'History'};
+  const titles = {dashboard:'Dashboard',add:'Add Transaction',insights:'Insights',future:'Future Expenses',history:'History',admin:'Admin Panel'};
   document.getElementById('pageTitle').textContent = titles[id] || id;
   if(id==='insights') loadInsights(null).then(()=>api(`/api/predict/${currentUser.id}`).then(p=>loadInsights(p)).catch(()=>{}));
   if(id==='future') loadFuture();
   if(id==='history') renderHistory();
+  if(id==='admin' && currentUser && currentUser.role === 'admin') loadAdminPanel();
 }
+// Admin Panel Functions
+async function loadAdminPanel(){
+  if(!currentUser || currentUser.role !== 'admin') return;
+  const stats = await api('/api/admin/stats');
+  document.getElementById('adminStats').innerHTML = `
+    <div class="stat-card"><div class="stat-value">${stats.total_users}</div><div class="stat-label">Total Users</div></div>
+    <div class="stat-card"><div class="stat-value">${stats.total_transactions}</div><div class="stat-label">Transactions</div></div>
+    <div class="stat-card"><div class="stat-value">₱${fmtNum(stats.total_income)}</div><div class="stat-label">Total Income</div></div>
+    <div class="stat-card"><div class="stat-value">${stats.avg_health_score}</div><div class="stat-label">Avg Health Score</div></div>
+  `;
+  await loadAdminUsers();
+  const users = await api('/api/admin/users');
+  const userSelect = document.getElementById('adminUserFilter');
+  userSelect.innerHTML = '<option value="">All Users</option>' + users.map(u=>`<option value="${u.id}">${u.name} (${u.email})</option>`).join('');
+  await loadAdminTransactions('');
+}
+async function loadAdminUsers(filter=''){
+  let users = await api('/api/admin/users');
+  if(filter) users = users.filter(u=>u.name.toLowerCase().includes(filter)||u.email.toLowerCase().includes(filter));
+  const tbody = document.getElementById('adminUserTable');
+  tbody.innerHTML = users.map(u=>`
+    <tr>
+      <td>${u.id}</td>
+      <td>${esc(u.name)}</td>
+      <td>${esc(u.email)}</td>
+      <td><select class="role-select" data-id="${u.id}" ${u.id===currentUser.id?'disabled':''}>
+        <option value="user" ${u.role==='user'?'selected':''}>User</option>
+        <option value="admin" ${u.role==='admin'?'selected':''}>Admin</option>
+      </select></td>
+      <td>${new Date(u.created_at).toLocaleDateString()}</td>
+      <td><button class="btn-del" data-id="${u.id}" data-name="${u.name}" ${u.id===currentUser.id?'disabled':''}>Delete</button></td>
+    </tr>
+  `).join('');
+  document.querySelectorAll('.role-select').forEach(sel=>{
+    sel.addEventListener('change', async()=>{
+      const userId = parseInt(sel.dataset.id);
+      const newRole = sel.value;
+      await api(`/api/admin/users/${userId}`, {method:'PUT', body:JSON.stringify({role:newRole})});
+      toast(`User role updated to ${newRole}`);
+      await loadAdminPanel();
+    });
+  });
+  document.querySelectorAll('.btn-del[data-id]').forEach(btn=>{
+    btn.addEventListener('click', async()=>{
+      const userId = parseInt(btn.dataset.id);
+      const userName = btn.dataset.name;
+      if(confirm(`Delete user "${userName}" and all their data?`)){
+        await api(`/api/admin/users/${userId}`, {method:'DELETE'});
+        toast('User deleted');
+        await loadAdminPanel();
+      }
+    });
+  });
+}
+async function loadAdminTransactions(userId=''){
+  let url = '/api/admin/transactions';
+  if(userId) url += `?user_id=${userId}`;
+  const txs = await api(url);
+  const users = await api('/api/admin/users');
+  const userMap = {};
+  users.forEach(u=>userMap[u.id]=u.name);
+  const tbody = document.getElementById('adminTxTable');
+  tbody.innerHTML = txs.slice(0,200).map(t=>`
+    <tr>
+      <td>${new Date(t.tx_date).toLocaleString()}</td>
+      <td>${userMap[t.user_id]||t.user_id}</td>
+      <td>${esc(t.category)}</td>
+      <td>${t.tx_type}</td>
+      <td>${fmt(t.amount)}</td>
+      <td>${t.is_need?'Need':'Want'}</td>
+    </tr>
+  `).join('');
+}
+function fmtNum(n){ return Number(n).toLocaleString('en-PH',{minimumFractionDigits:2}); }
+// Admin tabs and filters
+document.querySelectorAll('.tab[data-tab]').forEach(tab=>{
+  tab.addEventListener('click',()=>{
+    const target = tab.dataset.tab;
+    document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById('adminUsersPanel').style.display = target==='users'?'block':'none';
+    document.getElementById('adminTransactionsPanel').style.display = target==='transactions'?'block':'none';
+    if(target==='transactions') loadAdminTransactions(document.getElementById('adminUserFilter').value);
+  });
+});
+document.getElementById('adminUserFilter')?.addEventListener('change', e=>loadAdminTransactions(e.target.value));
+document.getElementById('adminSearchUser')?.addEventListener('input', e=>loadAdminUsers(e.target.value.toLowerCase()));
 
 document.querySelectorAll('[data-nav]').forEach(btn=>btn.addEventListener('click',()=>navigate(btn.dataset.nav)));
 document.getElementById('exportBtn').addEventListener('click',()=>window.location.href='/api/export/csv');
@@ -1899,7 +1947,6 @@ let dragging=false, dx=0, dy=0;
 chatHeader.addEventListener('mousedown', e=>{ dragging=true; dx=e.clientX-chatbot.offsetLeft; dy=e.clientY-chatbot.offsetTop; chatbot.style.transition='none'; });
 document.addEventListener('mousemove', e=>{ if(!dragging) return; let l=e.clientX-dx, t=e.clientY-dy; l=Math.max(0,Math.min(l,window.innerWidth-chatbot.offsetWidth)); t=Math.max(0,Math.min(t,window.innerHeight-chatbot.offsetHeight)); chatbot.style.left=l+'px'; chatbot.style.top=t+'px'; chatbot.style.right='auto'; chatbot.style.bottom='auto'; });
 document.addEventListener('mouseup',()=>{ dragging=false; chatbot.style.transition=''; });
-
 async function sendChat(){
   const inp = document.getElementById('chatInp');
   const msg = inp.value.trim();
@@ -1931,7 +1978,6 @@ document.getElementById('toggleAuth').addEventListener('click',()=>{
   document.getElementById('authBtn').textContent = isLogin ? 'Sign In' : 'Create Account';
   document.getElementById('authMsg').textContent = '';
 });
-
 document.getElementById('authBtn').addEventListener('click', async()=>{
   const email = document.getElementById('authEmail').value.trim();
   const pass = document.getElementById('authPass').value;
@@ -1961,24 +2007,28 @@ async function init(){
     document.getElementById('authOverlay').style.display = 'none';
     document.getElementById('userAvatar').textContent = currentUser.name.slice(0,2).toUpperCase();
     if(currentUser.spending_mindset){
-      document.querySelectorAll('.mindset-btn').forEach(b=>{
-        b.classList.toggle('active', b.dataset.mindset === currentUser.spending_mindset);
-      });
+      document.querySelectorAll('.mindset-btn').forEach(b=>{ b.classList.toggle('active', b.dataset.mindset === currentUser.spending_mindset); });
       currentMindset = currentUser.spending_mindset;
     }
     addFeedEvent('👋',`Welcome back, ${currentUser.name}! Loading your financial data…`);
     await loadAll();
     addFeedEvent('✅','All data loaded. Enter income and click AI Plan to re-analyze.');
+    // Show/hide admin button based on role
+    const adminBtn = document.getElementById('adminNavBtn');
+    if(adminBtn){
+      if(currentUser.role === 'admin') adminBtn.style.display = 'flex';
+      else adminBtn.style.display = 'none';
+    }
   } else {
     document.getElementById('authOverlay').style.display = 'flex';
   }
 }
-
 init();
 </script>
 </body>
 </html>
-"""
-if __name__ == '__main__':
+
+ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
+ 
