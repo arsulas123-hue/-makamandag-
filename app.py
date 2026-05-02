@@ -2,7 +2,7 @@ import json
 import csv
 import io
 import os
-import requests                     # NEW for OpenRouter fallback
+import requests
 import google.generativeai as genai
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
@@ -29,10 +29,17 @@ GEMINI_API_KEY = "AIzaSyDADCUZKxOPf6NKQ7uhCcTZWqnd50HoPVY"
 genai.configure(api_key=GEMINI_API_KEY)
 
 # ----------------------------------------------------------------------
-# Multi-AI Router (OpenRouter fallback)
+# Multi-AI Router (Gemini (multiple names) + OpenRouter fallback)
 # ----------------------------------------------------------------------
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+# Gemini model names to try (most recent first)
+GEMINI_MODELS = [
+    "gemini-2.0-flash-exp",
+    "gemini-1.5-flash",
+    "gemini-pro"
+]
 
 FREE_MODELS = [
     "google/gemini-2.0-flash-001",
@@ -45,16 +52,18 @@ FREE_MODELS = [
 ]
 
 def route_ai_request(prompt, max_tokens=400):
-    """ Try Gemini first, then fall back to OpenRouter free models. """
-    # 1. Gemini
-    try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        response = model.generate_content(prompt)
-        if response and response.text:
-            print("✅ Used Gemini")
-            return response.text.strip()
-    except Exception as e:
-        print(f"Gemini failed: {e}")
+    """ Try Gemini (with multiple model names) first, then fall back to OpenRouter. """
+    # 1. Try Gemini with each model name
+    for model_name in GEMINI_MODELS:
+        try:
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(prompt)
+            if response and response.text:
+                print(f"✅ Used Gemini model: {model_name}")
+                return response.text.strip()
+        except Exception as e:
+            print(f"Gemini {model_name} failed: {e}")
+            continue
 
     # 2. OpenRouter fallback
     if not OPENROUTER_API_KEY:
@@ -95,7 +104,7 @@ db = SQLAlchemy(app)
 bcrypt = Bcrypt(app)
 
 # ----------------------------------------------------------------------
-# Models (unchanged)
+# Models
 # ----------------------------------------------------------------------
 class User(db.Model):
     __tablename__ = 'users'
@@ -200,12 +209,12 @@ class UserAllocation(db.Model):
 
 
 # ----------------------------------------------------------------------
-# Schema migration
+# Schema migration (adds missing columns to users and transactions)
 # ----------------------------------------------------------------------
 def ensure_schema():
     inspector = inspect(db.engine)
 
-    # --- Users table migrations ---
+    # --- Users table ---
     if inspector.has_table('users'):
         existing_columns = [col['name'] for col in inspector.get_columns('users')]
         if 'password' in existing_columns:
@@ -223,7 +232,7 @@ def ensure_schema():
                     conn.execute(text(f'ALTER TABLE users ADD COLUMN {col} {defn}'))
                     conn.commit()
 
-    # --- Transactions table migrations (add missing columns) ---
+    # --- Transactions table: add is_need and priority columns if missing ---
     if inspector.has_table('transactions'):
         tx_columns = [col['name'] for col in inspector.get_columns('transactions')]
         if 'is_need' not in tx_columns:
@@ -237,7 +246,7 @@ def ensure_schema():
                 conn.commit()
             print("✅ Added priority column to transactions table.")
 
-    # Create any missing tables (future_expenses, user_allocations, etc.)
+    # Ensure all tables exist
     db.create_all()
 
 
@@ -565,13 +574,11 @@ def export_csv():
 
 
 # ----------------------------------------------------------------------
-# ★ AUTONOMOUS AI ENDPOINTS
+# AI routes (using the unified router)
 # ----------------------------------------------------------------------
-
 @app.route('/api/ai/full_setup', methods=['POST'])
 @login_required
 def ai_full_setup():
-    """ Master autonomous endpoint – uses Gemini only (low volume). """
     user = get_current_user()
     data = request.json or {}
     monthly_income = data.get('monthly_income', user.monthly_budget_limit or 0)
@@ -639,43 +646,17 @@ Return ONLY valid JSON (no markdown, no explanation):
   "financial_summary": "<2-sentence overall assessment of their financial health>"
 }}
 """
+    raw = route_ai_request(prompt, max_tokens=800)
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        response = model.generate_content(prompt)
-        raw = response.text.strip()
+        # Clean up markdown if present
         if raw.startswith('```'):
             raw = raw.split('```')[1]
             if raw.startswith('json'):
                 raw = raw[4:]
         result = json.loads(raw.strip())
-
-        alloc = result.get('allocation', {})
-        total = sum(alloc.values())
-        if total > 0 and abs(total - 100) > 0.5:
-            factor = 100 / total
-            alloc = {k: round(v * factor, 1) for k, v in alloc.items()}
-            result['allocation'] = alloc
-
-        UserAllocation.query.filter_by(user_id=user.id).delete()
-        needs = {'Food & Dining', 'Transport', 'Groceries', 'Health', 'Debt repayment'}
-        savings_cats = {'Savings'}
-        for cat, pct in alloc.items():
-            t = 'need' if cat in needs else ('savings' if cat in savings_cats else 'want')
-            db.session.add(UserAllocation(user_id=user.id, category_name=cat, type=t, percentage=pct))
-
-        Budget.query.filter_by(user_id=user.id).delete()
-        for cat, pct in alloc.items():
-            db.session.add(Budget(user_id=user.id, category=cat, limit_amount=round(monthly_income * pct / 100, 2)))
-
-        db.session.commit()
-
-        result['allocation_amounts'] = {cat: round(monthly_income * pct / 100, 2) for cat, pct in alloc.items()}
-        result['monthly_income'] = monthly_income
-        return jsonify(result), 200
-
     except Exception as e:
-        print(f"AI full_setup error: {e}")
-        # Fallback logic (same as before)
+        print(f"Failed to parse AI response for full_setup: {e}")
+        # Fallback (same as before)
         mindset_lower = mindset.lower()
         if mindset_lower == 'saver':
             alloc = {'Food & Dining': 20, 'Transport': 10, 'Groceries': 15, 'Health': 5,
@@ -686,8 +667,9 @@ Return ONLY valid JSON (no markdown, no explanation):
         else:
             alloc = {'Food & Dining': 20, 'Transport': 10, 'Groceries': 14, 'Health': 5,
                      'Entertainment': 8, 'Debt repayment': 12, 'Hobbies': 5, 'Subscription': 4, 'Savings': 22}
+
         monthly_save = monthly_income * (alloc['Savings'] / 100)
-        return jsonify({
+        result = {
             'allocation': alloc,
             'allocation_amounts': {k: round(monthly_income * v / 100, 2) for k, v in alloc.items()},
             'savings_plan': {'daily': round(monthly_save/30, 2), 'weekly': round(monthly_save/4, 2), 'monthly': round(monthly_save, 2), 'tip': 'Automate your savings on payday.'},
@@ -698,13 +680,37 @@ Return ONLY valid JSON (no markdown, no explanation):
             ],
             'financial_summary': 'Your AI plan is ready. Start by logging your expenses to get personalized insights.',
             'monthly_income': monthly_income
-        }), 200
+        }
+
+    # Persist allocation and budgets
+    alloc = result.get('allocation', {})
+    total = sum(alloc.values())
+    if total > 0 and abs(total - 100) > 0.5:
+        factor = 100 / total
+        alloc = {k: round(v * factor, 1) for k, v in alloc.items()}
+        result['allocation'] = alloc
+
+    UserAllocation.query.filter_by(user_id=user.id).delete()
+    needs = {'Food & Dining', 'Transport', 'Groceries', 'Health', 'Debt repayment'}
+    savings_cats = {'Savings'}
+    for cat, pct in alloc.items():
+        t = 'need' if cat in needs else ('savings' if cat in savings_cats else 'want')
+        db.session.add(UserAllocation(user_id=user.id, category_name=cat, type=t, percentage=pct))
+
+    Budget.query.filter_by(user_id=user.id).delete()
+    for cat, pct in alloc.items():
+        db.session.add(Budget(user_id=user.id, category=cat, limit_amount=round(monthly_income * pct / 100, 2)))
+
+    db.session.commit()
+
+    result['allocation_amounts'] = {cat: round(monthly_income * pct / 100, 2) for cat, pct in alloc.items()}
+    result['monthly_income'] = monthly_income
+    return jsonify(result), 200
 
 
 @app.route('/api/ai/classify_transaction', methods=['POST'])
 @login_required
 def ai_classify_transaction():
-    """ Uses Gemini only. """
     user = get_current_user()
     data = request.json
     category = data.get('category', '')
@@ -728,10 +734,8 @@ Return ONLY valid JSON:
   "suggested_note": "<short helpful context about this expense, max 8 words>"
 }}
 """
+    raw = route_ai_request(prompt, max_tokens=150)
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        response = model.generate_content(prompt)
-        raw = response.text.strip()
         if raw.startswith('```'):
             raw = raw.split('```')[1]
             if raw.startswith('json'):
@@ -739,6 +743,7 @@ Return ONLY valid JSON:
         result = json.loads(raw.strip())
         return jsonify(result), 200
     except Exception as e:
+        print(f"Classification fallback: {e}")
         needs = {'Food & Dining', 'Transport', 'Groceries', 'Health', 'Debt repayment', 'Mortgage'}
         return jsonify({'is_need': category in needs, 'priority': 2 if category in needs else 1, 'suggested_note': note or ''}), 200
 
@@ -746,10 +751,6 @@ Return ONLY valid JSON:
 @app.route('/api/ai/chat', methods=['POST'])
 @login_required
 def ai_chat():
-    """
-    Full Gemini-powered chat with complete financial context.
-    Uses the multi-AI router (Gemini first, then OpenRouter fallback).
-    """
     user = get_current_user()
     data = request.json
     user_message = data.get('message', '')
@@ -779,7 +780,6 @@ User asks: "{user_message}"
 
 Reply in 3-5 sentences max. Be specific, warm, and actionable. Use peso signs. Reference their actual data. Do not mention being an AI unless directly asked."""
 
-    # Use the multi-AI router
     reply = route_ai_request(prompt, max_tokens=400)
     return jsonify({'reply': reply}), 200
 
@@ -1977,10 +1977,8 @@ async function init(){
 init();
 </script>
 </body>
-</html>"""
-
-
-
+</html>
+"""
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False) 
+    app.run(host='0.0.0.0', port=port, debug=False)
