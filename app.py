@@ -37,14 +37,17 @@ genai.configure(api_key=GEMINI_API_KEY)
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-GEMINI_MODELS = ["gemini-2.0-flash-exp", "gemini-1.5-flash", "gemini-pro"]
+GEMINI_MODELS = [
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+    "gemini-1.5-pro",
+]
 FREE_MODELS = [
     "google/gemini-2.0-flash-001",
     "meta-llama/llama-3.2-3b-instruct:free",
     "mistralai/mistral-7b-instruct:free",
     "microsoft/phi-3-mini-128k-instruct:free",
 ]
-
 def route_ai_request(prompt, max_tokens=400):
     for model_name in GEMINI_MODELS:
         try:
@@ -55,15 +58,23 @@ def route_ai_request(prompt, max_tokens=400):
                 return response.text.strip()
         except Exception as e:
             print(f"Gemini {model_name} failed: {e}")
+    # Fallback to OpenRouter (unchanged)
     if not OPENROUTER_API_KEY:
         return "Sorry, all AI services are busy. Try again later."
     for model in FREE_MODELS:
         try:
             resp = requests.post(
                 OPENROUTER_URL,
-                headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"},
-                json={"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens},
-                timeout=15
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": max_tokens,
+                },
+                timeout=15,
             )
             if resp.status_code == 200:
                 print(f"✅ Used OpenRouter model: {model}")
