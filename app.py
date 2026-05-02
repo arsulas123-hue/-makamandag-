@@ -1408,10 +1408,8 @@ body::before{
     </div>
   </div>
 
-  <!-- ── DASHBOARD SCREEN (UPDATED) ── -->
+  <!-- ── DASHBOARD SCREEN ── -->
   <div class="screen active" id="screen-dashboard">
-
-    <!-- Income Hero with Tool Picker and Checklist -->
     <div class="income-hero">
       <div class="income-label">Monthly Income — Tell AI, it handles the rest</div>
       <div class="income-tool-row">
@@ -1435,8 +1433,6 @@ body::before{
         <button class="mindset-btn active" data-mindset="Neutral">⚖️ Balanced</button>
         <button class="mindset-btn" data-mindset="Spender">🛍️ Spender</button>
       </div>
-
-      <!-- AI Autonomous Allocation Checklist -->
       <div class="ai-checklist">
         <div style="font-weight:600;margin-bottom:12px;">🧠 AI Autonomous Allocation (100% Sum Rule)</div>
         <div class="checklist-section">
@@ -1456,16 +1452,12 @@ body::before{
         <div id="needsWantsSummary" style="margin-top:12px;font-size:0.8rem;color:var(--text2);"></div>
       </div>
     </div>
-
-    <!-- Stats (unchanged) -->
     <div class="stats-grid">
       <div class="stat-card"><div class="stat-value" id="sBalance">—</div><div class="stat-label">Balance</div></div>
       <div class="stat-card neg"><div class="stat-value" id="sExpense" style="color:var(--red)">—</div><div class="stat-label">Month Expenses</div></div>
       <div class="stat-card"><div class="stat-value" id="sIncome" style="color:var(--green)">—</div><div class="stat-label">Month Income</div></div>
       <div class="stat-card blue-glow"><div class="stat-value" id="sScore" style="color:var(--blue)">—</div><div class="stat-label">AI Health Score</div><div class="stat-sub" id="scoreLabel">awaiting data</div></div>
     </div>
-
-    <!-- AI Activity Feed (unchanged) -->
     <div class="card ai-feed">
       <div class="ai-feed-header">
         <div class="ai-pulse"></div>
@@ -1474,8 +1466,6 @@ body::before{
       </div>
       <div id="aiFeed"><div class="empty-state"><div class="empty-state-icon">🤖</div><div class="empty-state-text">Enter your income above and click<br><strong style="color:var(--green)">Let AI Plan</strong> — Gemini will build your entire financial plan automatically.</div></div></div>
     </div>
-
-    <!-- AI Financial Summary & Savings Plan (unchanged) -->
     <div id="financialSummaryBlock" style="display:none" class="card">
       <div class="card-header"><span class="card-title">AI Assessment</span><span class="ai-badge">Gemini</span></div>
       <div class="financial-summary-text" id="financialSummaryText"></div>
@@ -1487,33 +1477,24 @@ body::before{
       </div>
       <div id="savingsTip" style="font-size:0.8rem;color:var(--muted2);margin-top:12px;font-style:italic;"></div>
     </div>
-
-    <!-- Budget Allocation (dynamic grid, same as before) -->
     <div id="allocationBlock" style="display:none" class="card">
       <div class="card-header"><span class="card-title">AI Budget Allocation</span><span class="ai-badge">100% Autonomous</span></div>
       <div class="alloc-grid" id="allocGrid"></div>
     </div>
-
-    <!-- AI Advice (unchanged) -->
     <div id="adviceBlock" style="display:none" class="card">
       <div class="card-header"><span class="card-title">AI Insights</span></div>
       <div class="advice-list" id="adviceList"></div>
     </div>
-
-    <!-- Trend Chart (unchanged) -->
     <div class="card" id="chartBlock" style="display:none">
       <div class="card-header"><span class="card-title">Income vs Expense Trend</span></div>
       <div class="chart-wrapper"><canvas id="trendChart"></canvas></div>
     </div>
-
-    <!-- ML Forecast (unchanged) -->
     <div class="card" id="forecastBlock" style="display:none">
       <div class="card-header"><span class="card-title">ML Spending Forecast (4 weeks)</span></div>
       <div id="forecastBars"></div>
     </div>
   </div>
 
-  <!-- other screens (add, insights, future, history, admin) are unchanged -->
   <div class="screen" id="screen-add">
     <div class="card">
       <div class="card-header"><span class="card-title">New Transaction</span><span class="ai-badge">AI Auto-Classify</span></div>
@@ -1619,7 +1600,6 @@ body::before{
   </div>
 </main>
 
-<!-- TOAST, AUTH, CHATBOT (unchanged) -->
 <div id="toast"></div>
 <div id="authOverlay" class="auth-overlay">
   <div class="auth-card">
@@ -1646,7 +1626,7 @@ body::before{
 </div>
 
 <script>
-// ── STATE ──
+// ── FULL JS (NO PLACEHOLDERS) ──
 let currentUser = null;
 let allTransactions = [];
 let currentMindset = 'Neutral';
@@ -1660,18 +1640,20 @@ const CAT_ICONS = {
   'Hobbies':'🎮','Salary':'💰','Savings':'🏦','Other':'📦'
 };
 
-// Category configuration for checklist
+// Category configuration for checklist (must match backend names exactly)
 const categoryConfig = [
-  { name: "Food & dining", type: "need", defaultPct: 0 },
-  { name: "Debt repayment", type: "need", defaultPct: 0 },
-  { name: "Mortgage", type: "need", defaultPct: 0 },
-  { name: "Transport", type: "need", defaultPct: 0 },
-  { name: "Entertainment", type: "want", defaultPct: 0 },
-  { name: "Subscription", type: "want", defaultPct: 0 },
-  { name: "Hobbies", type: "want", defaultPct: 0 }
+  { name: 'Food & Dining', type: 'need', defaultPct: 0 },
+  { name: 'Debt repayment', type: 'need', defaultPct: 0 },
+  { name: 'Mortgage', type: 'need', defaultPct: 0 },
+  { name: 'Transport', type: 'need', defaultPct: 0 },
+  { name: 'Groceries', type: 'need', defaultPct: 0 },
+  { name: 'Health', type: 'need', defaultPct: 0 },
+  { name: 'Savings', type: 'savings', defaultPct: 0 },
+  { name: 'Entertainment', type: 'want', defaultPct: 0 },
+  { name: 'Subscription', type: 'want', defaultPct: 0 },
+  { name: 'Hobbies', type: 'want', defaultPct: 0 }
 ];
 
-// Helper functions
 function fmt(n){ return '₱'+Number(n||0).toLocaleString('en-PH',{minimumFractionDigits:2,maximumFractionDigits:2}); }
 function fmtDate(iso){ return new Date(iso).toLocaleDateString('en-PH',{month:'short',day:'numeric',year:'2-digit'}); }
 function esc(s){ return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
@@ -1697,54 +1679,143 @@ async function api(url, opts={}){
   return res.json();
 }
 
-// Utility to render checklist UI
+// ── AUTH ──
+const authOverlay = document.getElementById('authOverlay');
+const authBtn = document.getElementById('authBtn');
+const toggleAuth = document.getElementById('toggleAuth');
+const authMsg = document.getElementById('authMsg');
+const authEmail = document.getElementById('authEmail');
+const authPass = document.getElementById('authPass');
+const authConfirm = document.getElementById('authConfirm');
+const regName = document.getElementById('regName');
+const termsRow = document.getElementById('termsRow');
+const termsCheck = document.getElementById('termsCheck');
+const authTitle = document.getElementById('authTitle');
+const authSub = document.getElementById('authSub');
+
+toggleAuth.addEventListener('click', () => {
+  isLogin = !isLogin;
+  if(isLogin) {
+    authTitle.textContent = 'Welcome back';
+    authSub.textContent = 'Sign in to your SmartSpend account';
+    authBtn.textContent = 'Sign In';
+    regName.style.display='none';
+    authConfirm.style.display='none';
+    termsRow.style.display='none';
+    toggleAuth.innerHTML = 'No account? <span>Register here</span>';
+  } else {
+    authTitle.textContent = 'Create account';
+    authSub.textContent = 'Start your AI-powered financial journey';
+    authBtn.textContent = 'Register';
+    regName.style.display='block';
+    authConfirm.style.display='block';
+    termsRow.style.display='flex';
+    toggleAuth.innerHTML = 'Already registered? <span>Sign in</span>';
+  }
+  authMsg.textContent = '';
+});
+
+authBtn.addEventListener('click', async () => {
+  authMsg.textContent = '';
+  if(!isLogin && authPass.value !== authConfirm.value) {
+    authMsg.textContent = 'Passwords do not match';
+    return;
+  }
+  if(!isLogin && !termsCheck.checked) {
+    authMsg.textContent = 'You must accept the terms';
+    return;
+  }
+  try {
+    const endpoint = isLogin ? '/api/login' : '/api/register';
+    const body = isLogin ? { email: authEmail.value, password: authPass.value } :
+      { name: regName.value, email: authEmail.value, password: authPass.value };
+    const data = await api(endpoint, { method:'POST', body: JSON.stringify(body) });
+    currentUser = data;
+    authOverlay.style.display = 'none';
+    initApp();
+  } catch(e) {
+    authMsg.textContent = e.message;
+  }
+});
+
+document.getElementById('signoutBtn').addEventListener('click', async ()=>{
+  await api('/api/logout', { method:'POST' });
+  currentUser = null;
+  authOverlay.style.display = 'flex';
+  document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
+  document.getElementById('screen-dashboard').classList.add('active');
+  toast('Signed out');
+});
+
+// ── NAVIGATION ──
+document.querySelectorAll('.nav-item[data-nav]').forEach(btn => {
+  btn.addEventListener('click', ()=>{
+    const nav = btn.dataset.nav;
+    document.querySelectorAll('.nav-item').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
+    document.getElementById('screen-'+nav).classList.add('active');
+    document.getElementById('pageTitle').textContent = btn.querySelector('.nav-label').textContent || 'Dashboard';
+    if(nav==='dashboard') loadDashboard();
+    else if(nav==='add') loadAddScreen();
+    else if(nav==='insights') loadInsights();
+    else if(nav==='future') loadFutureExpenses();
+    else if(nav==='history') loadHistory();
+    else if(nav==='admin') loadAdmin();
+  });
+});
+
+// ── INIT ──
+async function initApp() {
+  if(!currentUser) return;
+  document.getElementById('userAvatar').textContent = currentUser.name?.charAt(0)?.toUpperCase() || '?';
+  if(currentUser.role === 'admin') document.getElementById('adminNavBtn').style.display = 'flex';
+  else document.getElementById('adminNavBtn').style.display = 'none';
+  renderChecklist();
+  loadDashboard();
+}
+
 function renderChecklist() {
   const needsDiv = document.getElementById('needsChecklist');
   const wantsDiv = document.getElementById('wantsChecklist');
   let needsHtml = '', wantsHtml = '';
+  const selectedCategories = aiPlan?.allocation || {};
   categoryConfig.forEach((cat, idx) => {
-    const pct = cat.defaultPct || 0;
+    const pct = selectedCategories[cat.name] !== undefined ? selectedCategories[cat.name] : cat.defaultPct;
     const itemHtml = `<div class="checklist-item">
       <label><input type="checkbox" class="cat-checkbox" data-cat="${cat.name}" data-idx="${idx}" ${pct>0?'checked':''}> ${cat.name}</label>
-      <span class="cat-percent" id="pct-${idx}">${pct}%</span>
+      <span class="cat-percent" id="pct-${idx}">${pct.toFixed(0)}%</span>
     </div>`;
-    if (cat.type === 'need') needsHtml += itemHtml;
-    else wantsHtml += itemHtml;
+    if(cat.type === 'need') needsHtml += itemHtml;
+    else if(cat.type === 'want') wantsHtml += itemHtml;
+    // savings categories can be shown under wants for simplicity
   });
   needsDiv.innerHTML = needsHtml;
   wantsDiv.innerHTML = wantsHtml;
-  // attach event listeners
   document.querySelectorAll('.cat-checkbox').forEach(chk => {
-    chk.addEventListener('change', () => {
-      // simply enable/disable – AI will recompute percentages
-      updateChecklistPercentages();
-    });
+    chk.addEventListener('change', () => updateChecklistPercentages());
   });
+  updateChecklistPercentages();
 }
 
 function updateChecklistPercentages(allocations = null) {
-  // if allocations provided, update the displayed percentages
-  if (allocations) {
-    for (let i = 0; i < categoryConfig.length; i++) {
+  if(allocations) {
+    for(let i=0; i<categoryConfig.length; i++) {
       const cat = categoryConfig[i];
       const pct = allocations[cat.name] !== undefined ? allocations[cat.name] : 0;
       const pctSpan = document.getElementById(`pct-${i}`);
-      if (pctSpan) pctSpan.textContent = pct.toFixed(0) + '%';
-      // also store in config for later
+      if(pctSpan) pctSpan.textContent = pct.toFixed(0) + '%';
       categoryConfig[i].defaultPct = pct;
     }
   }
-  // calculate total selected percentage
   let total = 0;
   document.querySelectorAll('.cat-checkbox:checked').forEach(chk => {
     const catName = chk.dataset.cat;
     const idx = categoryConfig.findIndex(c => c.name === catName);
-    if (idx !== -1) {
-      total += categoryConfig[idx].defaultPct;
-    }
+    if(idx !== -1) total += categoryConfig[idx].defaultPct;
   });
   const warning = document.getElementById('totalWarning');
-  if (Math.abs(total - 100) > 0.01) {
+  if(Math.abs(total - 100) > 0.01) {
     warning.style.display = 'block';
     warning.textContent = `⚠️ Selected categories total ${total}% – must be 100%. AI will normalise.`;
   } else {
@@ -1752,57 +1823,76 @@ function updateChecklistPercentages(allocations = null) {
   }
 }
 
-// AI Plan function
-async function runAIPlan(){
+// ── DASHBOARD ──
+async function loadDashboard() {
+  if(!currentUser) return;
+  try {
+    const summary = await api(`/api/summary/${currentUser.id}`);
+    const predict = await api(`/api/predict/${currentUser.id}`);
+    const longevity = await api(`/api/longevity/${currentUser.id}`);
+    renderStats(summary, predict.score, longevity);
+    renderForecast(predict.predictions?.weekly);
+    renderTrendChart(summary.monthly);
+    document.getElementById('chartBlock').style.display = Object.keys(summary.monthly).length ? 'block' : 'none';
+    document.getElementById('forecastBlock').style.display = Object.keys(predict.predictions?.weekly||{}).length ? 'block' : 'none';
+  } catch(e) { toast(e.message); }
+}
+
+function renderStats(summary, score, longevity) {
+  document.getElementById('sBalance').textContent = fmt(summary.balance);
+  document.getElementById('sExpense').textContent = fmt(summary.expense);
+  document.getElementById('sIncome').textContent = fmt(summary.income);
+  document.getElementById('sScore').textContent = score ?? '—';
+  document.getElementById('scoreLabel').textContent = score ? 'AI Health Score' : 'awaiting data';
+  document.getElementById('topScore').textContent = score ?? '—';
+}
+
+function addFeedEvent(icon, text) {
+  const feed = document.getElementById('aiFeed');
+  const time = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+  const div = document.createElement('div');
+  div.className = 'ai-event';
+  div.innerHTML = `<span class="ai-event-icon">${icon}</span><span class="ai-event-text">${esc(text)}</span><span class="ai-event-time">${time}</span>`;
+  feed.insertBefore(div, feed.firstChild);
+  if(feed.querySelector('.empty-state')) feed.innerHTML = '';
+}
+
+// AI Plan button
+document.getElementById('analyzeBtn').addEventListener('click', runAIPlan);
+
+async function runAIPlan() {
   const income = parseFloat(document.getElementById('incomeInput').value);
   if(!income || income <= 0){ toast('Enter a valid monthly income first'); return; }
-  
-  // get selected categories
   const selectedCategories = [];
-  document.querySelectorAll('.cat-checkbox:checked').forEach(chk => {
-    selectedCategories.push(chk.dataset.cat);
-  });
-  if (selectedCategories.length === 0) {
-    toast('Please select at least one category to allocate.');
-    return;
-  }
-  
+  document.querySelectorAll('.cat-checkbox:checked').forEach(chk => selectedCategories.push(chk.dataset.cat));
+  if(!selectedCategories.length){ toast('Please select at least one category'); return; }
   const btn = document.getElementById('analyzeBtn');
   const btnContent = document.getElementById('analyzeBtnContent');
   btn.disabled = true;
   btnContent.innerHTML = '<div class="spinner"></div> Analyzing…';
   addFeedEvent('🤖','AI is analyzing your financial profile…');
   try {
-    // send selected categories to backend (the backend should be updated to accept them)
     const result = await api('/api/ai/full_setup', {
       method:'POST',
-      body: JSON.stringify({ 
-        monthly_income: income, 
-        mindset: currentMindset,
-        selected_categories: selectedCategories   // new field
-      })
+      body: JSON.stringify({ monthly_income: income, mindset: currentMindset, selected_categories: selectedCategories })
     });
     aiPlan = result;
-    // update checklist percentages with returned allocation
-    if (result.allocation) {
-      updateChecklistPercentages(result.allocation);
-    }
+    if(result.allocation) updateChecklistPercentages(result.allocation);
     addFeedEvent('✅',`Budget allocated across ${Object.keys(result.allocation).length} categories`);
     addFeedEvent('💰',`Savings target set: ${fmt(result.savings_plan.monthly)}/month`);
-    addFeedEvent('🧠',`Financial summary generated: "${result.financial_summary.substring(0,60)}…"`);
+    addFeedEvent('🧠',`Financial summary: "${result.financial_summary.substring(0,60)}…"`);
     addFeedEvent('📋',`${result.advice.length} personalized insights ready`);
     renderAIPlan(result);
     toast('AI plan complete! 🎉', 'var(--green)');
   } catch(e){
     toast('AI error: '+e.message);
-    addFeedEvent('❌','AI encountered an error. Please try again.');
+    addFeedEvent('❌','AI error: '+e.message);
   }
   btn.disabled = false;
   btnContent.innerHTML = '🔄 Re-Analyze';
 }
 
-function renderAIPlan(plan){
-  // existing renderAIPlan function from original (works with allocation, savings, advice, etc.)
+function renderAIPlan(plan) {
   document.getElementById('financialSummaryText').textContent = plan.financial_summary;
   document.getElementById('saveDaily').textContent = fmt(plan.savings_plan.daily);
   document.getElementById('saveWeekly').textContent = fmt(plan.savings_plan.weekly);
@@ -1835,17 +1925,374 @@ function renderAIPlan(plan){
   document.getElementById('adviceBlock').style.display = 'block';
 }
 
-// The rest of the original script (loadAll, addTransaction, etc.) remains unchanged.
-// Only the runAIPlan, renderAIPlan, and checklist handling have been updated.
-// All other functions (loadDashboard, loadAnalytics, etc.) are exactly as before.
-// I'll keep them identical to avoid breaking anything.
+function renderForecast(weekly) {
+  const container = document.getElementById('forecastBars');
+  if(!weekly) { container.innerHTML = ''; return; }
+  const maxVal = Math.max(...Object.values(weekly), 1);
+  container.innerHTML = Object.entries(weekly).map(([week, val])=>{
+    const pct = (val / maxVal * 100).toFixed(0);
+    return `<div class="forecast-bar-row">
+              <span class="forecast-week-label">${week}</span>
+              <div class="forecast-track"><div class="forecast-fill" style="width:${pct}%"></div></div>
+              <span class="forecast-val">${fmt(val)}</span>
+            </div>`;
+  }).join('');
+}
 
-// (Note: The original script from the user is extremely long. For brevity, I assume you will keep the rest of the JS exactly the same, only replacing the runAIPlan and adding the checklist functions. To avoid confusion, in the final answer I will provide the full script with the updated parts merged.)
+function renderTrendChart(monthly) {
+  const ctx = document.getElementById('trendChart');
+  if(!ctx) return;
+  if(trendChart) trendChart.destroy();
+  const labels = Object.keys(monthly);
+  const incomeData = labels.map(m=>monthly[m].income);
+  const expenseData = labels.map(m=>monthly[m].expense);
+  trendChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Income', data: incomeData, borderColor: '#00E5A0', backgroundColor: 'rgba(0,229,160,0.1)', tension:0.3 },
+        { label: 'Expense', data: expenseData, borderColor: '#FF3B5C', backgroundColor: 'rgba(255,59,92,0.1)', tension:0.3 }
+      ]
+    },
+    options: { responsive:true, maintainAspectRatio:false, plugins:{legend:{labels:{color:'#B0C8E0'}}} }
+  });
+}
 
-// Since the user only asked to update the HTML_PAGE, I'll provide the full HTML block.
-// But here I'll truncate for the answer and trust that the user will copy the whole thing.
+// Income tool toggle
+document.getElementById('incomeTool').addEventListener('change', function(){
+  document.getElementById('incomeImageUpload').style.display = this.value === 'auto' ? 'block' : 'none';
+});
 
-// (The full script continues with all original functions: loadAll, addTransaction, etc. – they are unchanged.)
+// Mindset buttons
+document.querySelectorAll('.mindset-btn').forEach(btn => {
+  btn.addEventListener('click', ()=>{
+    document.querySelectorAll('.mindset-btn').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    currentMindset = btn.dataset.mindset;
+  });
+});
+
+// Income image OCR
+document.getElementById('incomeImage').addEventListener('change', async function(){
+  const file = this.files[0];
+  if(!file) return;
+  try {
+    const formData = new FormData();
+    formData.append('image', file);
+    const resp = await fetch('/api/ocr_income', { method:'POST', body: formData, credentials:'include' });
+    const data = await resp.json();
+    if(data.amount) document.getElementById('incomeInput').value = data.amount;
+    toast(`OCR detected: ${fmt(data.amount)}`);
+  } catch(e) { toast('OCR failed: '+e.message); }
+});
+
+// ── ADD TRANSACTION SCREEN ──
+async function loadAddScreen() {
+  if(!currentUser) return;
+  try {
+    const txs = await api('/api/transactions');
+    allTransactions = txs;
+    renderRecentTransactions(txs.slice(0,10));
+  } catch(e) { toast(e.message); }
+}
+
+function renderRecentTransactions(txs) {
+  const list = document.getElementById('recentTxList');
+  if(!txs.length) { list.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📋</div><div class="empty-state-text">No transactions yet.</div></div>'; return; }
+  list.innerHTML = txs.map(t=>`
+    <div class="tx-item">
+      <div class="tx-cat-icon">${CAT_ICONS[t.category]||'📦'}</div>
+      <div class="tx-info">
+        <div class="tx-cat">${esc(t.category)} ${t.is_need?'<span class="tx-badge need">Need</span>':'<span class="tx-badge want">Want</span>'}</div>
+        <div class="tx-meta">${t.note?esc(t.note)+' · ':''}${fmtDate(t.tx_date)}</div>
+      </div>
+      <div class="tx-amount ${t.tx_type}">${t.tx_type==='income'?'+':'-'}${fmt(t.amount)}</div>
+      <button class="btn-del" onclick="deleteTransaction(${t.id})">🗑</button>
+    </div>`).join('');
+}
+
+async function deleteTransaction(id) {
+  if(!confirm('Delete this transaction?')) return;
+  try {
+    await api(`/api/transactions/${id}`, { method:'DELETE' });
+    toast('Deleted');
+    loadAddScreen();
+    if(document.getElementById('screen-history').classList.contains('active')) loadHistory();
+  } catch(e) { toast(e.message); }
+}
+
+document.getElementById('addTxBtn').addEventListener('click', async ()=>{
+  const amount = parseFloat(document.getElementById('txAmount').value);
+  if(!amount || amount<=0) { toast('Enter amount'); return; }
+  const category = document.getElementById('txCategory').value;
+  const tx_type = document.getElementById('txType').value;
+  const note = document.getElementById('txNote').value;
+  try {
+    let classify = { is_need: true, priority: 1, suggested_note: note };
+    if(tx_type==='expense') {
+      try {
+        const cl = await api('/api/ai/classify_transaction', { method:'POST', body: JSON.stringify({ amount, category, note }) });
+        classify = cl;
+        document.getElementById('classifyResult').innerHTML = `<div class="ai-classify-result">🤖 AI: ${classify.is_need?'Need':'Want'} · Priority ${classify.priority} · Note: ${esc(classify.suggested_note)}</div>`;
+        document.getElementById('classifyResult').style.display = 'block';
+      } catch(e) {}
+    }
+    await api('/api/transactions', { method:'POST', body: JSON.stringify({ amount, category, tx_type, is_need: classify.is_need, priority: classify.priority, note: classify.suggested_note||note }) });
+    toast('Transaction added');
+    document.getElementById('txAmount').value = '';
+    document.getElementById('txNote').value = '';
+    loadAddScreen();
+  } catch(e) { toast(e.message); }
+});
+
+// ── INSIGHTS ──
+async function loadInsights() {
+  if(!currentUser) return;
+  try {
+    const longevity = await api(`/api/longevity/${currentUser.id}`);
+    document.getElementById('longevityDays').textContent = longevity.days;
+    document.getElementById('longevityBalance').textContent = fmt(longevity.balance);
+    document.getElementById('longevityDaily').textContent = fmt(longevity.avg_daily_spend);
+    const predict = await api(`/api/predict/${currentUser.id}`);
+    renderForecastInsights(predict.predictions?.weekly);
+    renderCategoryChart(predict.predictions?.categories);
+  } catch(e) { toast(e.message); }
+}
+
+function renderForecastInsights(weekly) {
+  const container = document.getElementById('forecastBarsInsights');
+  if(!weekly) { container.innerHTML = ''; return; }
+  const maxVal = Math.max(...Object.values(weekly), 1);
+  container.innerHTML = Object.entries(weekly).map(([week, val])=>{
+    const pct = (val / maxVal * 100).toFixed(0);
+    return `<div class="forecast-bar-row">
+              <span class="forecast-week-label">${week}</span>
+              <div class="forecast-track"><div class="forecast-fill" style="width:${pct}%"></div></div>
+              <span class="forecast-val">${fmt(val)}</span>
+            </div>`;
+  }).join('');
+}
+
+function renderCategoryChart(categories) {
+  const ctx = document.getElementById('catChart');
+  if(!ctx) return;
+  if(catChartInst) catChartInst.destroy();
+  const labels = Object.keys(categories||{});
+  const data = Object.values(categories||{});
+  catChartInst = new Chart(ctx, {
+    type: 'doughnut',
+    data: {
+      labels,
+      datasets: [{ data, backgroundColor: ['#00E5A0','#3B8BFF','#F5A623','#FF3B5C','#9B59F5','#00b87a','#FF8C00'] }]
+    },
+    options: { responsive:true, maintainAspectRatio:false, plugins:{legend:{labels:{color:'#B0C8E0'}}} }
+  });
+}
+
+// ── FUTURE EXPENSES ──
+async function loadFutureExpenses() {
+  if(!currentUser) return;
+  try {
+    const exps = await api('/api/future_expenses');
+    renderFutureList(exps);
+  } catch(e) { toast(e.message); }
+}
+
+function renderFutureList(exps) {
+  const list = document.getElementById('futureList');
+  if(!exps.length) { list.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📌</div><div class="empty-state-text">No pinned expenses yet.</div></div>'; return; }
+  list.innerHTML = exps.map(e=>`
+    <div class="future-item">
+      <div class="future-info">
+        <div class="future-desc">${esc(e.description)}</div>
+        <div class="future-meta">${esc(e.category)} · ${e.cycle} · ${e.date}</div>
+      </div>
+      <div class="future-amount">${fmt(e.amount)}</div>
+      <button class="btn-del" onclick="deleteFuture(${e.id})">🗑</button>
+    </div>`).join('');
+}
+
+document.getElementById('pinFutureBtn').addEventListener('click', async ()=>{
+  const desc = document.getElementById('futureDesc').value;
+  const amount = parseFloat(document.getElementById('futureAmt').value);
+  const category = document.getElementById('futureCat').value;
+  const cycle = document.getElementById('futureCycle').value;
+  const date = document.getElementById('futureDate').value;
+  if(!desc || !amount || !date) { toast('Please fill all fields'); return; }
+  try {
+    await api('/api/future_expenses', { method:'POST', body: JSON.stringify({ description:desc, amount, category, cycle, date }) });
+    toast('Pinned');
+    document.getElementById('futureDesc').value='';
+    document.getElementById('futureAmt').value='';
+    loadFutureExpenses();
+  } catch(e) { toast(e.message); }
+});
+
+async function deleteFuture(id) {
+  if(!confirm('Remove this future expense?')) return;
+  try {
+    await api(`/api/future_expenses/${id}`, { method:'DELETE' });
+    toast('Removed');
+    loadFutureExpenses();
+  } catch(e) { toast(e.message); }
+}
+
+document.getElementById('applyFutureBtn').addEventListener('click', async ()=>{
+  try {
+    const result = await api('/api/apply_future_expenses', { method:'POST' });
+    toast(`Processed ${result.count} pending expenses`);
+    loadFutureExpenses();
+  } catch(e) { toast(e.message); }
+});
+
+// ── HISTORY ──
+async function loadHistory() {
+  if(!currentUser) return;
+  try {
+    const txs = await api('/api/transactions');
+    allTransactions = txs;
+    renderHistory(txs);
+  } catch(e) { toast(e.message); }
+}
+
+function renderHistory(txs) {
+  const list = document.getElementById('historyList');
+  const search = document.getElementById('historySearch').value.toLowerCase();
+  const filtered = txs.filter(t=> t.category.toLowerCase().includes(search) || (t.note||'').toLowerCase().includes(search));
+  if(!filtered.length) { list.innerHTML = '<div class="empty-state"><div class="empty-state-icon">🔍</div><div class="empty-state-text">No matching transactions.</div></div>'; return; }
+  list.innerHTML = filtered.map(t=>`
+    <div class="tx-item">
+      <div class="tx-cat-icon">${CAT_ICONS[t.category]||'📦'}</div>
+      <div class="tx-info">
+        <div class="tx-cat">${esc(t.category)} ${t.is_need?'<span class="tx-badge need">Need</span>':'<span class="tx-badge want">Want</span>'}</div>
+        <div class="tx-meta">${t.note?esc(t.note)+' · ':''}${fmtDate(t.tx_date)}</div>
+      </div>
+      <div class="tx-amount ${t.tx_type}">${t.tx_type==='income'?'+':'-'}${fmt(t.amount)}</div>
+      <button class="btn-del" onclick="deleteTransaction(${t.id})">🗑</button>
+    </div>`).join('');
+}
+document.getElementById('historySearch').addEventListener('input', ()=> renderHistory(allTransactions));
+
+// ── ADMIN ──
+async function loadAdmin() {
+  if(!currentUser || currentUser.role!=='admin') return;
+  try {
+    const stats = await api('/api/admin/stats');
+    document.getElementById('adminStats').innerHTML = `
+      <div class="stat-card"><div class="stat-value">${stats.total_users}</div><div class="stat-label">Users</div></div>
+      <div class="stat-card"><div class="stat-value">${stats.total_transactions}</div><div class="stat-label">Transactions</div></div>
+      <div class="stat-card"><div class="stat-value">${fmt(stats.total_income)}</div><div class="stat-label">Total Income</div></div>
+      <div class="stat-card"><div class="stat-value">${fmt(stats.total_expense)}</div><div class="stat-label">Total Expense</div></div>
+      <div class="stat-card blue-glow"><div class="stat-value">${stats.avg_health_score}</div><div class="stat-label">Avg Health Score</div></div>`;
+    loadAdminUsers();
+    loadAdminTransactions();
+  } catch(e) { toast(e.message); }
+}
+
+document.getElementById('adminSearchUser').addEventListener('input', loadAdminUsers);
+document.getElementById('adminUserFilter').addEventListener('change', loadAdminTransactions);
+document.querySelectorAll('#adminTabs .tab').forEach(tab=>{
+  tab.addEventListener('click', ()=>{
+    document.querySelectorAll('#adminTabs .tab').forEach(t=>t.classList.remove('active'));
+    tab.classList.add('active');
+    if(tab.dataset.tab==='users'){
+      document.getElementById('adminUsersPanel').style.display='block';
+      document.getElementById('adminTransactionsPanel').style.display='none';
+    } else {
+      document.getElementById('adminUsersPanel').style.display='none';
+      document.getElementById('adminTransactionsPanel').style.display='block';
+    }
+  });
+});
+
+async function loadAdminUsers(){
+  try {
+    const users = await api('/api/admin/users');
+    const search = document.getElementById('adminSearchUser').value.toLowerCase();
+    const filtered = users.filter(u=> u.name.toLowerCase().includes(search) || u.email.toLowerCase().includes(search));
+    document.getElementById('adminUserTable').innerHTML = filtered.map(u=>`
+      <tr>
+        <td>${u.id}</td><td>${esc(u.name)}</td><td>${esc(u.email)}</td><td>${esc(u.role)}</td>
+        <td>${fmtDate(u.created_at)}</td>
+        <td>
+          <button onclick="adminUpdateRole(${u.id},'${u.role==='admin'?'user':'admin'}')" class="btn" style="padding:4px 8px;font-size:0.7rem;">Make ${u.role==='admin'?'User':'Admin'}</button>
+          <button onclick="adminDeleteUser(${u.id})" class="btn btn-danger" style="padding:4px 8px;font-size:0.7rem;">Del</button>
+        </td>
+      </tr>`).join('');
+  } catch(e) { toast(e.message); }
+}
+
+async function adminUpdateRole(id, newRole){
+  try {
+    await api(`/api/admin/users/${id}`, { method:'PUT', body: JSON.stringify({ role: newRole }) });
+    toast(`Role updated to ${newRole}`);
+    loadAdminUsers();
+  } catch(e) { toast(e.message); }
+}
+
+async function adminDeleteUser(id){
+  if(!confirm('Delete this user and all their data?')) return;
+  try {
+    await api(`/api/admin/users/${id}`, { method:'DELETE' });
+    toast('User deleted');
+    loadAdminUsers();
+  } catch(e) { toast(e.message); }
+}
+
+async function loadAdminTransactions(){
+  try {
+    const userId = document.getElementById('adminUserFilter').value;
+    const url = userId ? `/api/admin/transactions?user_id=${userId}` : '/api/admin/transactions';
+    const txs = await api(url);
+    document.getElementById('adminTxTable').innerHTML = txs.map(t=>`
+      <tr>
+        <td>${fmtDate(t.tx_date)}</td><td>User ${t.user_id}</td><td>${esc(t.category)}</td><td>${t.tx_type}</td>
+        <td>${fmt(t.amount)}</td><td>${t.is_need?'Need':'Want'}</td>
+      </tr>`).join('');
+    // repopulate user filter
+    const users = await api('/api/admin/users');
+    document.getElementById('adminUserFilter').innerHTML = '<option value="">All Users</option>'+
+      users.map(u=>`<option value="${u.id}">${esc(u.name)} (${u.id})</option>`).join('');
+  } catch(e) { toast(e.message); }
+}
+
+// ── EXPORT ──
+document.getElementById('exportBtn').addEventListener('click', ()=>{
+  window.open('/api/export/csv', '_blank');
+});
+
+// ── CHATBOT ──
+document.getElementById('chatSend').addEventListener('click', sendChat);
+document.getElementById('chatInp').addEventListener('keypress', e=>{ if(e.key==='Enter') sendChat(); });
+
+async function sendChat() {
+  const inp = document.getElementById('chatInp');
+  const msg = inp.value.trim();
+  if(!msg) return;
+  const msgs = document.getElementById('chatMsgs');
+  msgs.innerHTML += `<div class="msg user">${esc(msg)}</div>`;
+  inp.value = '';
+  try {
+    const resp = await api('/api/ai/chat', { method:'POST', body: JSON.stringify({ message: msg }) });
+    msgs.innerHTML += `<div class="msg bot">${esc(resp.reply)}</div>`;
+  } catch(e) {
+    msgs.innerHTML += `<div class="msg bot">Sorry, I'm having trouble right now.</div>`;
+  }
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+// ── INITIAL LOAD ──
+(async ()=>{
+  try {
+    const user = await api('/api/me');
+    currentUser = user;
+    authOverlay.style.display = 'none';
+    initApp();
+  } catch(e) { 
+    authOverlay.style.display = 'flex'; 
+  }
+})();
 </script>
 </body>
 </html>
