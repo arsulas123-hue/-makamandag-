@@ -941,13 +941,8 @@ def apply_future_expenses():
     return jsonify({'applied': applied, 'count': len(applied)}), 200
 
 
-# ----------------------------------------------------------------------
-# Frontend (HTML_PAGE) – you already have the updated HTML
-# ----------------------------------------------------------------------
-
 
 HTML_PAGE = r"""<!DOCTYPE html>
-<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
