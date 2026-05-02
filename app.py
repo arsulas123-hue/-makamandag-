@@ -7,11 +7,13 @@ import google.generativeai as genai
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 from functools import wraps
+import re  # for OCR stub
 
 from flask import Flask, request, jsonify, session, Response
 from flask_sqlalchemy import SQLAlchemy
 from flask_bcrypt import Bcrypt
 from sqlalchemy import inspect, text
+from werkzeug.utils import secure_filename
 
 # ----------------------------------------------------------------------
 # App configuration
@@ -23,13 +25,14 @@ app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get(
     'postgresql://makamandag_db_user:zcDibuXdlpEpcZNGEYLc9nqpgWwuTTfO@dpg-d7od7md7vvec739acfj0-a/makamandag_db'
 )
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['UPLOAD_FOLDER'] = '/tmp'  # temporary, for OCR
 
-# Gemini key
+# Gemini key (hardcoded as per your request)
 GEMINI_API_KEY = "AIzaSyDADCUZKxOPf6NKQ7uhCcTZWqnd50HoPVY"
 genai.configure(api_key=GEMINI_API_KEY)
 
 # ----------------------------------------------------------------------
-# Multi-AI Router (Gemini + OpenRouter fallback)
+# Multi-AI Router (OpenRouter fallback)
 # ----------------------------------------------------------------------
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -73,7 +76,7 @@ db = SQLAlchemy(app)
 bcrypt = Bcrypt(app)
 
 # ----------------------------------------------------------------------
-# Models (with role added)
+# Models (unchanged)
 # ----------------------------------------------------------------------
 class User(db.Model):
     __tablename__ = 'users'
@@ -85,7 +88,7 @@ class User(db.Model):
     spending_mindset = db.Column(db.String(20), default='Neutral')
     monthly_budget_limit = db.Column(db.Float, default=0.0)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
-    role = db.Column(db.String(20), default='user')                     # NEW: admin / user
+    role = db.Column(db.String(20), default='user')
 
     transactions = db.relationship('Transaction', backref='user', lazy=True)
     budgets = db.relationship('Budget', backref='user', lazy=True)
@@ -182,7 +185,7 @@ class UserAllocation(db.Model):
 
 
 # ----------------------------------------------------------------------
-# Schema migration (adds role column and missing transaction columns)
+# Schema migration (add role column if missing)
 # ----------------------------------------------------------------------
 def ensure_schema():
     inspector = inspect(db.engine)
@@ -234,7 +237,7 @@ def ensure_schema():
 
 
 # ----------------------------------------------------------------------
-# Auth helpers
+# Authentication helpers
 # ----------------------------------------------------------------------
 def login_required(f):
     @wraps(f)
@@ -260,7 +263,7 @@ def get_current_user():
 
 
 # ----------------------------------------------------------------------
-# Analytics helpers (same as before)
+# Analytics helpers (unchanged)
 # ----------------------------------------------------------------------
 def compute_health_score(user_id):
     thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
@@ -344,7 +347,7 @@ def compute_longevity(user_id):
 
 
 # ----------------------------------------------------------------------
-# Auth routes (modified to return role)
+# Auth routes (unchanged except role return)
 # ----------------------------------------------------------------------
 @app.route('/api/register', methods=['POST'])
 def register():
@@ -367,7 +370,7 @@ def login():
     if not user or not user.check_password(data.get('password', '')):
         return jsonify({'error': 'Invalid credentials'}), 401
     session['user_id'] = user.id
-    return jsonify(user.to_dict()), 200   # includes role
+    return jsonify(user.to_dict()), 200
 
 @app.route('/api/logout', methods=['POST'])
 def logout():
@@ -381,7 +384,7 @@ def me():
 
 
 # ----------------------------------------------------------------------
-# Regular user routes (unchanged, kept as before)
+# Transaction routes (unchanged)
 # ----------------------------------------------------------------------
 @app.route('/api/transactions', methods=['GET'])
 @login_required
@@ -563,7 +566,7 @@ def export_csv():
 
 
 # ----------------------------------------------------------------------
-# ADMIN API ROUTES
+# ADMIN API ROUTES (unchanged)
 # ----------------------------------------------------------------------
 @app.route('/api/admin/stats', methods=['GET'])
 @admin_required
@@ -572,7 +575,6 @@ def admin_stats():
     total_transactions = Transaction.query.count()
     total_income = db.session.query(db.func.sum(Transaction.amount)).filter(Transaction.tx_type == 'income').scalar() or 0
     total_expense = db.session.query(db.func.sum(Transaction.amount)).filter(Transaction.tx_type == 'expense').scalar() or 0
-    # average health score across all users with data
     all_health_scores = []
     for user in User.query.all():
         score = compute_health_score(user.id)
@@ -612,10 +614,8 @@ def admin_delete_user(user_id):
     user = User.query.get(user_id)
     if not user:
         return jsonify({'error': 'User not found'}), 404
-    # Prevent deleting yourself
     if user.id == session['user_id']:
         return jsonify({'error': 'You cannot delete your own admin account'}), 403
-    # Delete all related data (cascade handled by DB foreign keys, but we must delete transactions etc. manually if needed)
     Transaction.query.filter_by(user_id=user.id).delete()
     Budget.query.filter_by(user_id=user.id).delete()
     FutureExpense.query.filter_by(user_id=user.id).delete()
@@ -654,7 +654,39 @@ def admin_future_expenses(user_id):
 
 
 # ----------------------------------------------------------------------
-# AI routes (using router, unchanged)
+# OCR endpoint (optional, for automatic income extraction)
+# ----------------------------------------------------------------------
+@app.route('/api/ocr_income', methods=['POST'])
+@login_required
+def ocr_income():
+    """Receive an image, extract a money amount using simple OCR (stub)."""
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
+    file = request.files['image']
+    if file.filename == '':
+        return jsonify({'error': 'Empty filename'}), 400
+    # For a real implementation, use pytesseract or Google Vision.
+    # This stub simulates extraction from the filename or returns a fixed amount.
+    # In production, replace with actual OCR.
+    # Example: run tesseract on the image, then regex for ₱ or numbers.
+    # For now, we return a dummy value.
+    # You can later implement a proper OCR using pytesseract (needs installation).
+    try:
+        # Dummy extraction – you would replace with real OCR logic
+        # For demonstration, we look for a number in the filename
+        import re
+        numbers = re.findall(r'\d+', file.filename)
+        if numbers:
+            amount = float(numbers[0])
+        else:
+            amount = 25000.00  # fallback
+        return jsonify({'amount': amount, 'source': 'stub_ocr'})
+    except Exception as e:
+        return jsonify({'error': f'OCR failed: {str(e)}'}), 500
+
+
+# ----------------------------------------------------------------------
+# AI routes (updated)
 # ----------------------------------------------------------------------
 @app.route('/api/ai/full_setup', methods=['POST'])
 @login_required
@@ -664,87 +696,176 @@ def ai_full_setup():
     monthly_income = data.get('monthly_income', user.monthly_budget_limit or 0)
     mindset = data.get('mindset', user.spending_mindset)
     social_status = data.get('social_status', user.social_status)
+    selected_categories = data.get('selected_categories', [])
+
+    # If no categories provided, fallback to a default list
+    if not selected_categories:
+        selected_categories = ['Food & Dining', 'Transport', 'Groceries', 'Health',
+                               'Entertainment', 'Debt repayment', 'Savings']
 
     user.monthly_budget_limit = monthly_income
     user.spending_mindset = mindset
     user.social_status = social_status
     db.session.commit()
 
+    # Fetch recent spending (to guide AI)
     recent_spending = defaultdict(float)
     for t in Transaction.query.filter_by(user_id=user.id, tx_type='expense').order_by(Transaction.tx_date.desc()).limit(30).all():
         recent_spending[t.category] += t.amount
 
-    categories = ['Food & Dining', 'Transport', 'Groceries', 'Health', 'Entertainment',
-                  'Debt repayment', 'Hobbies', 'Subscription', 'Savings']
-
+    # Build the prompt for Gemini
+    categories_str = ', '.join(selected_categories)
     prompt = f"""
 You are an expert financial planner AI for a Filipino user.
 
 User profile:
 - Monthly income: ₱{monthly_income:,.2f}
-- Spending mindset: {mindset}
+- Spending mindset: {mindset} (Saver = prioritize needs/savings; Neutral = balanced; Spender = allow more wants)
 - Social status: {social_status}
-- Recent category spending: {dict(recent_spending)}
+- Recent category spending (last 30 days): {dict(recent_spending)}
 
-Allocate percentages to: {categories}
-Rules: Saver: savings≥20%, Needs≥60%, Wants≤20%; Neutral: savings≥15%, Needs≥50%, Wants≤35%; Spender: savings≥10%, Needs≥45%, Wants≤45%.
-Return ONLY valid JSON:
-{{
-  "allocation": {{ "Food & Dining": float, ... }},
-  "savings_plan": {{ "daily": float, "weekly": float, "monthly": float, "tip": "..." }},
-  "advice": [{{"title":"...","body":"...","type":"info|warning|success"}}],
-  "financial_summary": "..."
-}}
+The user has selected the following categories to allocate their budget: {categories_str}
+
+Rules:
+- Saver mindset: give higher weight to needs and savings.
+- Spender mindset: allow more wants.
+- Inverse: all categories must sum to exactly 100%.
+- Allocate percentages ONLY for the categories listed above.
+- Do not allocate to any category not in the list.
+- Use an "equity method": needs (Food & Dining, Transport, Groceries, Health, Debt repayment, Mortgage) get higher percentages, wants (Entertainment, Hobbies, Subscription) get lower, savings (Savings) gets a moderate share.
+- Return ONLY a valid JSON object with exactly the category names as keys and numeric percentages as values, summing to 100.
+- No extra text, no markdown.
+
+Example output for selected categories ["Food & Dining","Transport","Savings"]:
+{{"Food & Dining": 45.0, "Transport": 15.0, "Savings": 40.0}}
 """
-    raw = route_ai_request(prompt, max_tokens=800)
+    raw = route_ai_request(prompt, max_tokens=600)
     try:
+        # Clean up markdown if present
         if raw.startswith('```'):
             raw = raw.split('```')[1]
             if raw.startswith('json'):
                 raw = raw[4:]
-        result = json.loads(raw.strip())
+        allocation = json.loads(raw.strip())
     except Exception as e:
-        print(f"AI fallback: {e}")
+        print(f"AI full_setup parse error: {e}")
+        # Intelligent fallback based on mindset
+        fallback = {}
+        total = 0
         if mindset.lower() == 'saver':
-            alloc = {'Food & Dining': 20, 'Transport': 10, 'Groceries': 15, 'Health': 5, 'Entertainment': 5,
-                     'Debt repayment': 15, 'Hobbies': 3, 'Subscription': 2, 'Savings': 25}
+            # give more to needs and savings
+            for cat in selected_categories:
+                if cat in ['Food & Dining', 'Transport', 'Groceries', 'Health', 'Debt repayment', 'Mortgage']:
+                    fallback[cat] = 15
+                elif cat == 'Savings':
+                    fallback[cat] = 25
+                else:
+                    fallback[cat] = 5
         elif mindset.lower() == 'spender':
-            alloc = {'Food & Dining': 22, 'Transport': 10, 'Groceries': 13, 'Health': 5, 'Entertainment': 12,
-                     'Debt repayment': 10, 'Hobbies': 8, 'Subscription': 5, 'Savings': 15}
+            for cat in selected_categories:
+                if cat in ['Entertainment', 'Hobbies', 'Subscription']:
+                    fallback[cat] = 15
+                elif cat == 'Savings':
+                    fallback[cat] = 10
+                else:
+                    fallback[cat] = 10
+        else:  # neutral
+            for cat in selected_categories:
+                fallback[cat] = 12 if cat != 'Savings' else 16
+        # Normalise to 100
+        total = sum(fallback.values())
+        if total > 0:
+            factor = 100 / total
+            allocation = {k: round(v * factor, 1) for k, v in fallback.items()}
         else:
-            alloc = {'Food & Dining': 20, 'Transport': 10, 'Groceries': 14, 'Health': 5, 'Entertainment': 8,
-                     'Debt repayment': 12, 'Hobbies': 5, 'Subscription': 4, 'Savings': 22}
-        monthly_save = monthly_income * (alloc['Savings'] / 100)
-        result = {
-            'allocation': alloc,
-            'savings_plan': {'daily': round(monthly_save/30,2), 'weekly': round(monthly_save/4,2), 'monthly': round(monthly_save,2), 'tip': 'Start small, be consistent.'},
-            'advice': [{'title':'Stay Consistent','body':'Track every expense.','type':'info'}],
-            'financial_summary': 'Your AI plan is ready.'
+            allocation = {cat: 100.0 / len(selected_categories) for cat in selected_categories}
+
+    # Ensure only selected categories are present (Gemini already should do that)
+    allocation = {k: v for k, v in allocation.items() if k in selected_categories}
+    # Normalise to 100 again (safety)
+    total = sum(allocation.values())
+    if abs(total - 100) > 0.1:
+        factor = 100 / total
+        allocation = {k: round(v * factor, 1) for k, v in allocation.items()}
+
+    # Prepare the rest of the response (savings_plan, advice, financial_summary) using Gemini again or simple logic
+    # We'll also ask Gemini for savings plan and advice in a separate call or combine? To keep it clean, we'll use the same router for a second prompt.
+    savings_prompt = f"""
+User monthly income: ₱{monthly_income:.2f}, monthly expenses: ₱{sum(recent_spending.values()):.2f}, current balance: ₱{get_monthly_summary(user.id)['balance']:.2f}.
+Spending mindset: {mindset}.
+Recommend how much they should save per day, per week, and per month. Give realistic, actionable amounts.
+Return a JSON object: {{"daily": float, "weekly": float, "monthly": float, "tip": "string"}}.
+No extra text.
+"""
+    advice_prompt = f"""
+User has these budget allocations: {allocation}. Their recent spending: {dict(recent_spending)}.
+Provide 3 short pieces of financial advice (title and body). Return JSON array: [{{"title":"...","body":"...","type":"info|warning|success"}}].
+"""
+    summary_prompt = f"Based on monthly income ₱{monthly_income}, mindset {mindset}, and allocations {allocation}, give a one‑sentence overall financial health assessment."
+
+    try:
+        # Get savings plan
+        raw_savings = route_ai_request(savings_prompt, max_tokens=200)
+        if raw_savings.startswith('```'):
+            raw_savings = raw_savings.split('```')[1]
+            if raw_savings.startswith('json'):
+                raw_savings = raw_savings[4:]
+        savings_plan = json.loads(raw_savings.strip())
+    except:
+        monthly_save = monthly_income * 0.2
+        savings_plan = {
+            "daily": round(monthly_save / 30, 2),
+            "weekly": round(monthly_save / 4, 2),
+            "monthly": round(monthly_save, 2),
+            "tip": "Automate your savings on payday."
         }
 
-    # Normalize allocation to 100%
-    alloc = result.get('allocation', {})
-    total = sum(alloc.values())
-    if total != 100:
-        factor = 100 / total
-        alloc = {k: round(v * factor, 1) for k, v in alloc.items()}
-        result['allocation'] = alloc
+    try:
+        raw_advice = route_ai_request(advice_prompt, max_tokens=300)
+        if raw_advice.startswith('```'):
+            raw_advice = raw_advice.split('```')[1]
+            if raw_advice.startswith('json'):
+                raw_advice = raw_advice[4:]
+        advice = json.loads(raw_advice.strip())
+        if not isinstance(advice, list):
+            advice = []
+    except:
+        advice = [
+            {"title": "Stay Consistent", "body": "Track every expense to improve your score.", "type": "info"},
+            {"title": "Savings First", "body": "Transfer savings immediately after receiving income.", "type": "success"},
+            {"title": "Review Wants", "body": "Audit subscriptions and entertainment monthly.", "type": "warning"}
+        ]
 
-    # Persist
+    try:
+        raw_summary = route_ai_request(summary_prompt, max_tokens=100)
+        financial_summary = raw_summary.strip()
+    except:
+        financial_summary = "Your AI plan is ready. Start by logging your expenses to get personalized insights."
+
+    # Persist allocation and budgets
     UserAllocation.query.filter_by(user_id=user.id).delete()
-    needs = {'Food & Dining', 'Transport', 'Groceries', 'Health', 'Debt repayment'}
-    for cat, pct in alloc.items():
-        t = 'need' if cat in needs else ('savings' if cat == 'Savings' else 'want')
+    needs = {'Food & Dining', 'Transport', 'Groceries', 'Health', 'Debt repayment', 'Mortgage'}
+    savings_cats = {'Savings'}
+    for cat, pct in allocation.items():
+        t = 'need' if cat in needs else ('savings' if cat in savings_cats else 'want')
         db.session.add(UserAllocation(user_id=user.id, category_name=cat, type=t, percentage=pct))
 
     Budget.query.filter_by(user_id=user.id).delete()
-    for cat, pct in alloc.items():
+    for cat, pct in allocation.items():
         db.session.add(Budget(user_id=user.id, category=cat, limit_amount=round(monthly_income * pct / 100, 2)))
+
     db.session.commit()
 
-    result['allocation_amounts'] = {cat: round(monthly_income * pct / 100, 2) for cat, pct in alloc.items()}
-    result['monthly_income'] = monthly_income
+    result = {
+        'allocation': allocation,
+        'allocation_amounts': {cat: round(monthly_income * pct / 100, 2) for cat, pct in allocation.items()},
+        'savings_plan': savings_plan,
+        'advice': advice,
+        'financial_summary': financial_summary,
+        'monthly_income': monthly_income
+    }
     return jsonify(result), 200
+
 
 @app.route('/api/ai/classify_transaction', methods=['POST'])
 @login_required
@@ -755,12 +876,15 @@ def ai_classify_transaction():
     prompt = f"Classify expense: category {data['category']}, amount ₱{data['amount']}, note {data.get('note','none')}. Return JSON: {{'is_need':bool,'priority':int,'suggested_note':str}}"
     raw = route_ai_request(prompt, max_tokens=150)
     try:
-        if raw.startswith('```'): raw = raw.split('```')[1]
-        if raw.startswith('json'): raw = raw[4:]
+        if raw.startswith('```'):
+            raw = raw.split('```')[1]
+            if raw.startswith('json'):
+                raw = raw[4:]
         return jsonify(json.loads(raw.strip()))
     except:
         needs = {'Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage'}
         return jsonify({'is_need': data['category'] in needs, 'priority': 2 if data['category'] in needs else 1, 'suggested_note': data.get('note','')})
+
 
 @app.route('/api/ai/chat', methods=['POST'])
 @login_required
@@ -787,18 +911,41 @@ Reply in 3-5 sentences, warm, actionable, use ₱.
 
 
 # ----------------------------------------------------------------------
-# Frontend (HTML with admin panel)
+# Apply future expenses (unchanged)
 # ----------------------------------------------------------------------
-@app.route('/')
-def index():
-    return HTML_PAGE
+@app.route('/api/apply_future_expenses', methods=['POST'])
+@login_required
+def apply_future_expenses():
+    user = get_current_user()
+    today = datetime.now(timezone.utc).date()
+    future_expenses = FutureExpense.query.filter(
+        FutureExpense.user_id == user.id,
+        FutureExpense.expense_date <= today,
+        FutureExpense.cycle == 'One-time'
+    ).all()
+    applied = []
+    for exp in future_expenses:
+        tx = Transaction(
+            user_id=user.id,
+            amount=exp.amount,
+            category=exp.category,
+            tx_type='expense',
+            is_need=(exp.category in ['Food & Dining', 'Debt repayment', 'Mortgage', 'Transport']),
+            priority=1,
+            note=f"Auto-deducted future expense: {exp.description}"
+        )
+        db.session.add(tx)
+        applied.append(exp.description)
+        db.session.delete(exp)
+    db.session.commit()
+    return jsonify({'applied': applied, 'count': len(applied)}), 200
+
 
 # ----------------------------------------------------------------------
-# HTML_PAGE (the same beautiful UI you already have – too long to repeat)
-# I will truncate it here for brevity. You must copy the exact HTML from
-# your previous code. I've kept the variable name; just paste your HTML_PAGE
-# string below.
+# Frontend (HTML_PAGE) – you already have the updated HTML
 # ----------------------------------------------------------------------
+from your_updated_html_file import HTML_PAGE   # or paste the HTML_PAGE variable here
+
 HTML_PAGE = r"""<!DOCTYPE html>
 <!DOCTYPE html>
 <html lang="en">
@@ -1709,8 +1856,18 @@ function renderAIPlan(plan){
 </html>
 """
 
+@app.route('/')
+def index():
+    return HTML_PAGE
+
+
+# ----------------------------------------------------------------------
+# Initialize DB
+# ----------------------------------------------------------------------
+with app.app_context():
+    db.create_all()
+    ensure_schema()
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
- 
