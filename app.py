@@ -944,7 +944,7 @@ def apply_future_expenses():
 # ----------------------------------------------------------------------
 # Frontend (HTML_PAGE) – you already have the updated HTML
 # ----------------------------------------------------------------------
-from your_updated_html_file import HTML_PAGE   # or paste the HTML_PAGE variable here
+
 
 HTML_PAGE = r"""<!DOCTYPE html>
 <!DOCTYPE html>
