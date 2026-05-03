@@ -205,10 +205,11 @@ def ensure_schema():
     # Users table
     if inspector.has_table('users'):
         existing_columns = [col['name'] for col in inspector.get_columns('users')]
-        if 'password' in existing_columns:
+           if 'password' in existing_columns and 'password_hash' in existing_columns:
             with db.engine.connect() as conn:
                 conn.execute(text('ALTER TABLE users DROP COLUMN password'))
                 conn.commit()
+
         for col, defn in [
             ('password_hash', "VARCHAR(128) NOT NULL DEFAULT ''"),
             ('social_status', "VARCHAR(20) DEFAULT 'Middle'"),
@@ -865,44 +866,47 @@ Example output for selected categories ["Food & Dining","Transport","Savings"]:
             if raw.startswith('json'):
                 raw = raw[4:]
         allocation = json.loads(raw.strip())
-    except Exception as e:
+     except Exception as e:
         print(f"AI full_setup parse error: {e}")
-        # Intelligent fallback based on mindset
-        fallback = {}
-        total = 0
-        if mindset.lower() == 'saver':
-            # give more to needs and savings
-            for cat in selected_categories:
-                if cat in ['Food & Dining', 'Transport', 'Groceries', 'Health', 'Debt repayment', 'Mortgage']:
-                    fallback[cat] = 15
-                elif cat == 'Savings':
-                    fallback[cat] = 25
-                else:
-                    fallback[cat] = 5
-        elif mindset.lower() == 'spender':
-            for cat in selected_categories:
-                if cat in ['Entertainment', 'Hobbies', 'Subscription']:
-                    fallback[cat] = 15
-                elif cat == 'Savings':
-                    fallback[cat] = 10
-                else:
-                    fallback[cat] = 10
-        else:  # neutral
-            for cat in selected_categories:
-                fallback[cat] = 12 if cat != 'Savings' else 16
-        # Normalise to 100
-        total = sum(fallback.values())
-        if total > 0:
-            factor = 100 / total
-            allocation = {k: round(v * factor, 1) for k, v in fallback.items()}
-        else:
-            allocation = {cat: 100.0 / len(selected_categories) for cat in selected_categories}
+        # Intelligent fallback based on mindset and category counts
+        needs_count = sum(1 for c in selected_categories if c in {'Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage'})
+        wants_count = sum(1 for c in selected_categories if c in {'Entertainment','Hobbies','Subscription'})
+        savings_count = sum(1 for c in selected_categories if c == 'Savings')
 
-    # Ensure only selected categories are present (Gemini already should do that)
+        if needs_count == 0 and wants_count == 0 and savings_count == 0:
+            # fallback: equal split
+            allocation = {cat: 100.0 / len(selected_categories) for cat in selected_categories}
+        else:
+            if mindset.lower() == 'saver':
+                need_weight, want_weight, saving_weight = 1.5, 0.5, 1.2
+            elif mindset.lower() == 'spender':
+                need_weight, want_weight, saving_weight = 1.0, 1.5, 0.7
+            else:  # neutral
+                need_weight, want_weight, saving_weight = 1.0, 1.0, 1.0
+
+            total_weight = needs_count * need_weight + wants_count * want_weight + savings_count * saving_weight
+            allocation = {}
+            for cat in selected_categories:
+                if cat in {'Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage'}:
+                    allocation[cat] = round((need_weight / total_weight) * 100, 1)
+                elif cat in {'Entertainment','Hobbies','Subscription'}:
+                    allocation[cat] = round((want_weight / total_weight) * 100, 1)
+                elif cat == 'Savings':
+                    allocation[cat] = round((saving_weight / total_weight) * 100, 1)
+                else:
+                    allocation[cat] = round((1.0 / total_weight) * 100, 1)
+
+            # Ensure sum is exactly 100 (fix rounding drift)
+            diff = 100.0 - sum(allocation.values())
+            if abs(diff) > 0.1:
+                max_cat = max(allocation, key=allocation.get)
+                allocation[max_cat] = round(allocation[max_cat] + diff, 1)
+
+       # Ensure only selected categories are present
     allocation = {k: v for k, v in allocation.items() if k in selected_categories}
-    # Normalise to 100 again (safety)
+    # Normalise to 100 (safety)
     total = sum(allocation.values())
-    if abs(total - 100) > 0.1:
+    if total > 0 and abs(total - 100) > 0.1:
         factor = 100 / total
         allocation = {k: round(v * factor, 1) for k, v in allocation.items()}
 
@@ -1325,6 +1329,7 @@ body::before{
 .longevity-stat{text-align:center;}
 .longevity-stat-val{font-family:var(--font-mono);font-size:1.1rem;font-weight:600;}
 .longevity-stat-label{font-size:0.72rem;color:var(--muted);margin-top:4px;}
+#totalWarning, #needsWantsSummary { display: none; }
 .btn{
   background:var(--bg3);color:var(--text);border:1px solid var(--border2);
   border-radius:10px;padding:10px 16px;cursor:pointer;
@@ -1916,12 +1921,13 @@ function renderStats(summary, score, longevity) {
 
 function addFeedEvent(icon, text) {
   const feed = document.getElementById('aiFeed');
+  const empty = feed.querySelector('.empty-state');
+  if (empty) empty.remove();
   const time = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
   const div = document.createElement('div');
   div.className = 'ai-event';
   div.innerHTML = `<span class="ai-event-icon">${icon}</span><span class="ai-event-text">${esc(text)}</span><span class="ai-event-time">${time}</span>`;
-  feed.insertBefore(div, feed.firstChild);
-  if(feed.querySelector('.empty-state')) feed.innerHTML = '';
+  feed.prepend(div);
 }
 
 // ── AI PLAN ──
@@ -2035,12 +2041,12 @@ document.getElementById('incomeImage').addEventListener('change', async function
     formData.append('image', file);
     const resp = await fetch('/api/ocr_income', { method:'POST', body: formData, credentials:'include' });
     const data = await resp.json();
-    if(data.transactions){
-      toast(`Extracted ${data.count} transactions (Income: ${fmt(data.total_income)}, Expenses: ${fmt(data.total_expense)})`);
-      loadDashboard();
-    } else if(data.amount){
-      document.getElementById('incomeInput').value = data.amount;
-    }
+    
+if(data.transactions){
+  toast(`Extracted ${data.count} transactions`);
+  loadDashboard();
+}
+
   } catch(e) { toast('OCR failed: '+e.message); }
 });
 
