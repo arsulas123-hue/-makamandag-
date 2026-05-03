@@ -1423,6 +1423,26 @@ body::before{
 ::-webkit-scrollbar{width:6px;}
 ::-webkit-scrollbar-track{background:transparent;}
 ::-webkit-scrollbar-thumb{background:var(--bg4);border-radius:99px;}
+
+.scenario-bar-row {
+  display:flex; align-items:center; gap:14px; margin-bottom:14px;
+}
+.scenario-label {
+  font-family:var(--font-mono); font-size:0.75rem; color:var(--green); width:70px; flex-shrink:0;
+}
+.scenario-track {
+  flex:1; height:6px; background:var(--bg3); border-radius:99px; overflow:hidden;
+}
+.scenario-fill {
+  height:100%; border-radius:99px; width:0; transition:width 1.2s ease;
+}
+.saver-fill { background:linear-gradient(90deg, var(--blue), var(--green)); }
+.neutral-fill { background:linear-gradient(90deg, var(--green), #00b87a); }
+.spender-fill { background:linear-gradient(90deg, var(--amber), var(--red)); }
+.scenario-val {
+  font-family:var(--font-mono); font-size:0.75rem; color:var(--text2); width:90px; text-align:right; flex-shrink:0;
+}
+
 </style>
 </head>
 <body>
@@ -1568,11 +1588,14 @@ body::before{
     </div>
   </div>
 
-  <div class="screen" id="screen-insights">
+   <div class="screen" id="screen-insights">
     <div class="card">
-      <div class="card-header"><span class="card-title">Budget Longevity</span></div>
+      <div class="card-header"><span class="card-title">Budget Longevity (3 Scenarios)</span></div>
+      <!-- Scenario bars -->
+      <div id="scenarioBars" style="margin-bottom:20px;"></div>
+      <!-- Summary stats -->
       <div class="longevity-display" id="longevityDisplay">
-        <div><div class="longevity-days" id="longevityDays">—</div><div class="longevity-label">days remaining</div></div>
+        <div><div class="longevity-days" id="longevityDays">—</div><div class="longevity-label">days (current)</div></div>
         <div class="longevity-sep"></div>
         <div class="longevity-stat"><div class="longevity-stat-val" id="longevityBalance">—</div><div class="longevity-stat-label">Balance</div></div>
         <div class="longevity-stat"><div class="longevity-stat-val" id="longevityDaily">—</div><div class="longevity-stat-label">Avg Daily Spend</div></div>
@@ -1587,6 +1610,7 @@ body::before{
       <div class="chart-wrapper"><canvas id="catChart"></canvas></div>
     </div>
   </div>
+
 
   <div class="screen" id="screen-history">
     <div class="card">
@@ -2080,15 +2104,46 @@ document.getElementById('applyFutureBtn').addEventListener('click', async ()=>{
 async function loadInsights() {
   if(!currentUser) return;
   try {
+    // Fetch longevity data
     const longevity = await api(`/api/longevity/${currentUser.id}`);
-    document.getElementById('longevityDays').textContent = longevity.days;
-    document.getElementById('longevityBalance').textContent = fmt(longevity.balance);
-    document.getElementById('longevityDaily').textContent = fmt(longevity.avg_daily_spend);
+    const bal = longevity.balance;
+    const avgDaily = longevity.avg_daily_spend;
+
+    // Compute scenarios
+    const scenarios = [
+      { label: '🏦 Saver',   daily: avgDaily * 0.8,   cssClass: 'saver-fill' },
+      { label: '⚖️ Balanced', daily: avgDaily,         cssClass: 'neutral-fill' },
+      { label: '🛍️ Spender', daily: avgDaily * 1.2,   cssClass: 'spender-fill' }
+    ];
+
+    // Calculate days for each scenario
+    const maxDays = Math.max(...scenarios.map(s => bal / s.daily), 1);
+    let barsHTML = '';
+    scenarios.forEach(s => {
+      const days = Math.floor(bal / s.daily);
+      const pct = Math.min((days / maxDays) * 100, 100);
+      barsHTML += `
+        <div class="scenario-bar-row">
+          <span class="scenario-label">${s.label}</span>
+          <div class="scenario-track"><div class="scenario-fill ${s.cssClass}" style="width:${pct}%"></div></div>
+          <span class="scenario-val">${days} days</span>
+        </div>`;
+    });
+    document.getElementById('scenarioBars').innerHTML = barsHTML;
+
+    // Update summary numbers (current = balanced)
+    document.getElementById('longevityDays').textContent = scenarios[1].daily > 0 ? Math.floor(bal / scenarios[1].daily) : '—';
+    document.getElementById('longevityBalance').textContent = fmt(bal);
+    document.getElementById('longevityDaily').textContent = fmt(avgDaily);
+
+    // Load forecast and category chart
     const predict = await api(`/api/predict/${currentUser.id}`);
     renderForecastInsights(predict.predictions?.weekly);
     renderCategoryChart(predict.predictions?.categories);
   } catch(e) { toast(e.message); }
 }
+
+
 function renderForecastInsights(weekly) {
   const container = document.getElementById('forecastBarsInsights');
   if(!weekly) { container.innerHTML = ''; return; }
@@ -2298,7 +2353,6 @@ async function sendChat() {
 </body>
 </html>
 """
-
 @app.route('/')
 def index():
     return HTML_PAGE
