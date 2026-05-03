@@ -1144,7 +1144,7 @@ Reply in 3-5 sentences, warm, actionable, use ₱.
 @login_required
 def apply_future_expenses():
     user = get_current_user()
-        today = datetime.now(ZoneInfo("Asia/Manila")).date()
+    today = datetime.now(ZoneInfo("Asia/Manila")).date()   # ✅ fixed
     applied = []
 
     # 1. One-time expenses
@@ -1189,10 +1189,9 @@ def apply_future_expenses():
         # Advance to next occurrence
         if exp.cycle == 'Weekly':
             next_date = exp.expense_date + timedelta(weeks=1)
-        else:  # Monthly – approximate, good enough for MVP
+        else:
             next_date = exp.expense_date + timedelta(days=30)
 
-        # If next_date still in past (edge case), push it into future
         while next_date <= today:
             if exp.cycle == 'Weekly':
                 next_date += timedelta(weeks=1)
@@ -1203,7 +1202,6 @@ def apply_future_expenses():
 
     db.session.commit()
     return jsonify({'applied': applied, 'count': len(applied)}), 200
-
 # ----------------------------------------------------------------------
 # Frontend (single HTML page) – ALL references to "Gemini"/"AI" replaced with "ML"
 # ----------------------------------------------------------------------
