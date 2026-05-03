@@ -10,6 +10,19 @@ services:
         fromDatabase:
           name: makamandag-db
           property: connectionString
+      # 🔴 FIX: Add these two required variables
+      - key: SECRET_KEY
+        generateValue:  # auto-generates a secure random secret
+          length: 32
+      - key: GEMINI_API_KEY
+        # 👇 You must manually set this in the Render dashboard (use the new key after regenerating)
+        # Because it can't be auto-generated securely (it's an external API key)
+        # If you set it here, leave the value blank and set it manually in the dashboard.
+        # For now, just add the key so your YAML is correct.
+        value: "SET_ME_IN_DASHBOARD"  # Replace this in dashboard after deployment
+      # Optional: add OpenRouter key
+      - key: OPENROUTER_API_KEY
+        value: "SET_ME_IN_DASHBOARD"
 
 databases:
   - name: makamandag-db
