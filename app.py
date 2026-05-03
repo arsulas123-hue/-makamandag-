@@ -824,8 +824,6 @@ Example:
         'total_expense': total_expense,
         'count': len(created)
     })# ----------------------------------------------------------------------
-# AI routes (updated)
-# ----------------------------------------------------------------------
 @app.route('/api/ai/full_setup', methods=['POST'])
 @login_required
 def ai_full_setup():
@@ -836,7 +834,6 @@ def ai_full_setup():
     social_status = data.get('social_status', user.social_status)
     selected_categories = data.get('selected_categories', [])
 
-    # If no categories provided, fallback to a default list
     if not selected_categories:
         selected_categories = ['Food & Dining', 'Transport', 'Groceries', 'Health',
                                'Entertainment', 'Debt repayment', 'Savings']
@@ -846,38 +843,33 @@ def ai_full_setup():
     user.social_status = social_status
     db.session.commit()
 
-    # Fetch recent spending (to guide AI)
     recent_spending = defaultdict(float)
     for t in Transaction.query.filter_by(user_id=user.id, tx_type='expense').order_by(Transaction.tx_date.desc()).limit(30).all():
         recent_spending[t.category] += t.amount
 
-    # Build the prompt for Gemini
     categories_str = ', '.join(selected_categories)
     prompt = f"""
 You are an expert financial planner AI for a Filipino user.
 
 User profile:
 - Monthly income: ₱{monthly_income:,.2f}
-- Spending mindset: {mindset} (Saver = prioritize needs/savings; Neutral = balanced; Spender = allow more wants)
+- Spending mindset: {mindset}
 - Social status: {social_status}
 - Recent category spending (last 30 days): {dict(recent_spending)}
 
-The user has selected the following categories to allocate their budget: {categories_str}
+Selected categories: {categories_str}
 
 Rules:
 - Saver mindset: give higher weight to needs and savings.
 - Spender mindset: allow more wants.
-- Inverse: all categories must sum to exactly 100%.
-- Allocate percentages ONLY for the categories listed above.
-- Do not allocate to any category not in the list.
-- Use an "equity method": needs (Food & Dining, Transport, Groceries, Health, Debt repayment, Mortgage) get higher percentages, wants (Entertainment, Hobbies, Subscription) get lower, savings (Savings) gets a moderate share.
-- Return ONLY a valid JSON object with exactly the category names as keys and numeric percentages as values, summing to 100.
+- All categories sum to exactly 100%.
+- Return ONLY a valid JSON object with category names as keys and numeric percentages as values, summing to 100.
 - No extra text, no markdown.
 
-Example output for selected categories ["Food & Dining","Transport","Savings"]:
-{{"Food & Dining": 45.0, "Transport": 15.0, "Savings": 40.0}}
+Example output: {{"Food & Dining": 45.0, "Transport": 15.0, "Savings": 40.0}}
 """
     raw = route_ai_request(prompt, max_tokens=600)
+    
     try:
         # Clean up markdown if present
         if raw.startswith('```'):
@@ -885,22 +877,21 @@ Example output for selected categories ["Food & Dining","Transport","Savings"]:
             if raw.startswith('json'):
                 raw = raw[4:]
         allocation = json.loads(raw.strip())
-     except Exception as e:
+    except Exception as e:
         print(f"AI full_setup parse error: {e}")
-        # Intelligent fallback based on mindset and category counts
+        # Intelligent fallback
         needs_count = sum(1 for c in selected_categories if c in {'Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage'})
         wants_count = sum(1 for c in selected_categories if c in {'Entertainment','Hobbies','Subscription'})
         savings_count = sum(1 for c in selected_categories if c == 'Savings')
 
         if needs_count == 0 and wants_count == 0 and savings_count == 0:
-            # fallback: equal split
             allocation = {cat: 100.0 / len(selected_categories) for cat in selected_categories}
         else:
             if mindset.lower() == 'saver':
                 need_weight, want_weight, saving_weight = 1.5, 0.5, 1.2
             elif mindset.lower() == 'spender':
                 need_weight, want_weight, saving_weight = 1.0, 1.5, 0.7
-            else:  # neutral
+            else:
                 need_weight, want_weight, saving_weight = 1.0, 1.0, 1.0
 
             total_weight = needs_count * need_weight + wants_count * want_weight + savings_count * saving_weight
@@ -915,44 +906,32 @@ Example output for selected categories ["Food & Dining","Transport","Savings"]:
                 else:
                     allocation[cat] = round((1.0 / total_weight) * 100, 1)
 
-            # Ensure sum is exactly 100 (fix rounding drift)
             diff = 100.0 - sum(allocation.values())
             if abs(diff) > 0.1:
                 max_cat = max(allocation, key=allocation.get)
                 allocation[max_cat] = round(allocation[max_cat] + diff, 1)
 
-       # Ensure only selected categories are present
     allocation = {k: v for k, v in allocation.items() if k in selected_categories}
-    # Normalise to 100 (safety)
     total = sum(allocation.values())
     if total > 0 and abs(total - 100) > 0.1:
         factor = 100 / total
         allocation = {k: round(v * factor, 1) for k, v in allocation.items()}
 
-    # Prepare the rest of the response (savings_plan, advice, financial_summary) using Gemini again or simple logic
-    # We'll also ask Gemini for savings plan and advice in a separate call or combine? To keep it clean, we'll use the same router for a second prompt.
+    # Savings plan
     savings_prompt = f"""
 User monthly income: ₱{monthly_income:.2f}, monthly expenses: ₱{sum(recent_spending.values()):.2f}, current balance: ₱{get_monthly_summary(user.id)['balance']:.2f}.
 Spending mindset: {mindset}.
-Recommend how much they should save per day, per week, and per month. Give realistic, actionable amounts.
-Return a JSON object: {{"daily": float, "weekly": float, "monthly": float, "tip": "string"}}.
-No extra text.
+Recommend how much they should save per day, per week, and per month.
+Return JSON: {{"daily": float, "weekly": float, "monthly": float, "tip": "string"}}.
 """
-    advice_prompt = f"""
-User has these budget allocations: {allocation}. Their recent spending: {dict(recent_spending)}.
-Provide 3 short pieces of financial advice (title and body). Return JSON array: [{{"title":"...","body":"...","type":"info|warning|success"}}].
-"""
-    summary_prompt = f"Based on monthly income ₱{monthly_income}, mindset {mindset}, and allocations {allocation}, give a one‑sentence overall financial health assessment."
-
     try:
-        # Get savings plan
         raw_savings = route_ai_request(savings_prompt, max_tokens=200)
         if raw_savings.startswith('```'):
             raw_savings = raw_savings.split('```')[1]
             if raw_savings.startswith('json'):
                 raw_savings = raw_savings[4:]
         savings_plan = json.loads(raw_savings.strip())
-    except:
+    except Exception:
         monthly_save = monthly_income * 0.2
         savings_plan = {
             "daily": round(monthly_save / 30, 2),
@@ -961,6 +940,12 @@ Provide 3 short pieces of financial advice (title and body). Return JSON array: 
             "tip": "Automate your savings on payday."
         }
 
+    # Advice
+    advice_prompt = f"""
+User has budget allocations: {allocation}. Recent spending: {dict(recent_spending)}.
+Provide 3 short pieces of financial advice as JSON array:
+[{{"title":"...","body":"...","type":"info|warning|success"}}]
+"""
     try:
         raw_advice = route_ai_request(advice_prompt, max_tokens=300)
         if raw_advice.startswith('```'):
@@ -970,20 +955,22 @@ Provide 3 short pieces of financial advice (title and body). Return JSON array: 
         advice = json.loads(raw_advice.strip())
         if not isinstance(advice, list):
             advice = []
-    except:
+    except Exception:
         advice = [
             {"title": "Stay Consistent", "body": "Track every expense to improve your score.", "type": "info"},
             {"title": "Savings First", "body": "Transfer savings immediately after receiving income.", "type": "success"},
             {"title": "Review Wants", "body": "Audit subscriptions and entertainment monthly.", "type": "warning"}
         ]
 
+    # Financial summary
+    summary_prompt = f"Based on monthly income ₱{monthly_income}, mindset {mindset}, and allocations {allocation}, give a one‑sentence overall financial health assessment."
     try:
         raw_summary = route_ai_request(summary_prompt, max_tokens=100)
         financial_summary = raw_summary.strip()
-    except:
+    except Exception:
         financial_summary = "Your AI plan is ready. Start by logging your expenses to get personalized insights."
 
-    # Persist allocation and budgets
+    # Persist to database
     UserAllocation.query.filter_by(user_id=user.id).delete()
     needs = {'Food & Dining', 'Transport', 'Groceries', 'Health', 'Debt repayment', 'Mortgage'}
     savings_cats = {'Savings'}
@@ -1006,8 +993,6 @@ Provide 3 short pieces of financial advice (title and body). Return JSON array: 
         'monthly_income': monthly_income
     }
     return jsonify(result), 200
-
-
 @app.route('/api/ai/classify_transaction', methods=['POST'])
 @login_required
 def ai_classify_transaction():
