@@ -1059,7 +1059,6 @@ def apply_future_expenses():
     return jsonify({'applied': applied, 'count': len(applied)}), 200
 
 
-
 HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1084,15 +1083,11 @@ HTML_PAGE = r"""<!DOCTYPE html>
 }
 body{font-family:var(--font-display);background:var(--void);color:var(--text);min-height:100vh;overflow-x:hidden;}
 ::selection{background:var(--green-dim);color:var(--green);}
-
-/* Noise texture overlay */
 body::before{
   content:'';position:fixed;inset:0;
   background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.03'/%3E%3C/svg%3E");
   pointer-events:none;z-index:0;opacity:0.4;
 }
-
-/* SIDEBAR */
 .sidebar{
   position:fixed;left:0;top:0;bottom:0;width:72px;
   background:rgba(11,17,32,0.95);backdrop-filter:blur(20px);
@@ -1123,12 +1118,8 @@ body::before{
 .sidebar:hover .nav-label{opacity:1;}
 .sidebar-sep{width:40px;height:1px;background:var(--border2);margin:8px 0;}
 .sidebar:hover .sidebar-sep{width:calc(100% - 28px);}
-
-/* MAIN */
 .main{margin-left:72px;padding:28px 36px;min-height:100vh;position:relative;z-index:1;}
 @media(max-width:768px){.main{margin-left:0;padding:16px;}.sidebar{display:none;}}
-
-/* TOPBAR */
 .topbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:32px;gap:16px;flex-wrap:wrap;}
 .page-title{font-size:1.6rem;font-weight:800;letter-spacing:-0.5px;}
 .topbar-right{display:flex;align-items:center;gap:12px;}
@@ -1147,20 +1138,14 @@ body::before{
   font-weight:700;font-size:0.9rem;cursor:pointer;
 }
 .btn-signout{background:var(--red-dim);border:1px solid rgba(255,59,92,0.2);color:var(--red);padding:8px 16px;border-radius:10px;cursor:pointer;font-family:var(--font-display);font-weight:600;font-size:0.85rem;}
-
-/* SCREENS */
 .screen{display:none;animation:fadeIn 0.3s ease;}
 .screen.active{display:block;}
 @keyframes fadeIn{from{opacity:0;transform:translateY(12px);}to{opacity:1;transform:translateY(0);}}
-
-/* CARDS */
 .card{background:var(--bg2);border:1px solid var(--border2);border-radius:var(--r2);padding:24px;margin-bottom:20px;transition:border-color 0.2s;}
 .card:hover{border-color:var(--border);}
 .card-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;flex-wrap:wrap;gap:12px;}
 .card-title{font-size:0.95rem;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;}
 .ai-badge{background:linear-gradient(90deg,var(--purple),var(--blue));color:#fff;padding:3px 10px;border-radius:99px;font-size:0.68rem;font-weight:600;letter-spacing:0.5px;}
-
-/* STATS GRID */
 .stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:24px;}
 .stat-card{
   background:var(--bg2);border:1px solid var(--border2);border-radius:var(--r2);padding:22px;
@@ -1176,8 +1161,6 @@ body::before{
 .stat-value{font-family:var(--font-mono);font-size:1.7rem;font-weight:600;margin-bottom:6px;letter-spacing:-1px;}
 .stat-label{font-size:0.72rem;color:var(--muted2);text-transform:uppercase;letter-spacing:0.5px;}
 .stat-sub{font-size:0.75rem;color:var(--muted);font-family:var(--font-mono);margin-top:4px;}
-
-/* INCOME HERO (UPDATED) */
 .income-hero{
   background:linear-gradient(135deg,var(--bg2) 0%,rgba(0,229,160,0.05) 100%);
   border:1px solid var(--border);border-radius:var(--r2);padding:32px;
@@ -1212,9 +1195,7 @@ body::before{
   transition:border-color 0.2s;
 }
 .income-input:focus{border-color:var(--green);}
-.income-image-upload{
-  display:none;margin-top:12px;
-}
+.income-image-upload{display:none;margin-top:12px;}
 .income-image-upload input{background:var(--bg3);padding:8px;border-radius:8px;}
 .ocr-hint{font-size:0.7rem;color:var(--muted2);margin-top:4px;}
 .mindset-row{display:flex;gap:10px;margin-top:20px;flex-wrap:wrap;}
@@ -1234,32 +1215,15 @@ body::before{
 }
 .btn-analyze:hover{transform:translateY(-2px);box-shadow:0 8px 28px var(--green-glow);}
 .btn-analyze:disabled{opacity:0.5;cursor:not-allowed;transform:none;}
-
-/* AI Autonomous Allocation Checklist */
 .ai-checklist{
   background:var(--bg3);border-radius:12px;padding:20px;margin-top:20px;
 }
-.checklist-section{
-  margin-bottom:16px;
-}
-.checklist-section-title{
-  font-size:0.85rem;font-weight:600;color:var(--green);margin-bottom:8px;
-}
-.checklist-item{
-  display:flex;align-items:center;gap:12px;margin-bottom:8px;flex-wrap:wrap;
-}
-.checklist-item label{
-  display:flex;align-items:center;gap:6px;cursor:pointer;
-}
-.checklist-item .cat-percent{
-  font-family:var(--font-mono);font-size:0.8rem;color:var(--muted2);
-  min-width:45px;
-}
-.total-warning{
-  color:var(--red);font-size:0.75rem;margin-top:8px;
-}
-
-/* AI STATUS FEED */
+.checklist-section{margin-bottom:16px;}
+.checklist-section-title{font-size:0.85rem;font-weight:600;color:var(--green);margin-bottom:8px;}
+.checklist-item{display:flex;align-items:center;gap:12px;margin-bottom:8px;flex-wrap:wrap;}
+.checklist-item label{display:flex;align-items:center;gap:6px;cursor:pointer;}
+.checklist-item .cat-percent{font-family:var(--font-mono);font-size:0.8rem;color:var(--muted2);min-width:45px;}
+.total-warning{color:var(--red);font-size:0.75rem;margin-top:8px;}
 .ai-feed{margin-bottom:24px;}
 .ai-feed-header{display:flex;align-items:center;gap:10px;margin-bottom:14px;}
 .ai-pulse{width:10px;height:10px;border-radius:50%;background:var(--green);animation:pulse 1.5s infinite;}
@@ -1274,8 +1238,6 @@ body::before{
 .ai-event-icon{font-size:1rem;flex-shrink:0;margin-top:1px;}
 .ai-event-text{font-size:0.83rem;color:var(--text2);line-height:1.5;}
 .ai-event-time{font-family:var(--font-mono);font-size:0.7rem;color:var(--muted);margin-left:auto;flex-shrink:0;}
-
-/* ALLOCATION DISPLAY */
 .alloc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;}
 .alloc-item{background:var(--bg3);border-radius:12px;padding:16px;position:relative;overflow:hidden;}
 .alloc-item-bar{position:absolute;bottom:0;left:0;height:3px;background:var(--green);transition:width 1s ease;}
@@ -1288,14 +1250,10 @@ body::before{
 .alloc-type.need{background:var(--green-dim);color:var(--green);}
 .alloc-type.want{background:rgba(245,166,35,0.12);color:var(--amber);}
 .alloc-type.savings{background:rgba(59,139,255,0.12);color:var(--blue);}
-
-/* SAVINGS PLAN */
 .savings-cards{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:16px;}
 .savings-card{background:var(--bg3);border-radius:12px;padding:16px;text-align:center;}
 .savings-period{font-size:0.72rem;color:var(--muted2);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px;}
 .savings-amount{font-family:var(--font-mono);font-size:1.3rem;font-weight:600;color:var(--green);}
-
-/* ADVICE CARDS */
 .advice-list{display:flex;flex-direction:column;gap:10px;}
 .advice-card{background:var(--bg3);border-radius:12px;padding:16px;display:flex;gap:12px;align-items:flex-start;border-left:3px solid var(--muted);}
 .advice-card.info{border-color:var(--blue);}
@@ -1304,8 +1262,6 @@ body::before{
 .advice-icon{font-size:1.1rem;flex-shrink:0;}
 .advice-title{font-size:0.85rem;font-weight:600;margin-bottom:4px;}
 .advice-body{font-size:0.8rem;color:var(--text2);line-height:1.5;}
-
-/* TRANSACTION FORM */
 .tx-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;align-items:end;}
 .form-group{display:flex;flex-direction:column;gap:6px;}
 .form-label{font-size:0.72rem;color:var(--muted2);text-transform:uppercase;letter-spacing:0.5px;}
@@ -1326,8 +1282,6 @@ body::before{
 }
 .btn-add:hover{transform:translateY(-1px);}
 .btn-add:disabled{opacity:0.5;cursor:not-allowed;}
-
-/* AI CLASSIFICATION TAG */
 .ai-classify-result{
   display:inline-flex;align-items:center;gap:6px;
   background:var(--green-dim);border:1px solid var(--border);
@@ -1335,8 +1289,6 @@ body::before{
   font-family:var(--font-mono);font-size:0.75rem;margin-top:8px;
   animation:fadeIn 0.3s ease;
 }
-
-/* TRANSACTION LIST */
 .tx-list{display:flex;flex-direction:column;gap:8px;}
 .tx-item{
   display:flex;align-items:center;gap:14px;
@@ -1356,25 +1308,16 @@ body::before{
 .tx-badge.want{background:rgba(245,166,35,0.12);color:var(--amber);}
 .btn-del{background:none;border:none;color:var(--muted);cursor:pointer;font-size:1rem;padding:4px;border-radius:6px;transition:all 0.15s;}
 .btn-del:hover{color:var(--red);background:var(--red-dim);}
-
-/* FUTURE EXPENSES */
-.future-item{
-  display:flex;align-items:center;gap:14px;
-  background:var(--bg3);border-radius:12px;padding:14px 16px;margin-bottom:8px;
-}
+.future-item{display:flex;align-items:center;gap:14px;background:var(--bg3);border-radius:12px;padding:14px 16px;margin-bottom:8px;}
 .future-info{flex:1;}
 .future-desc{font-size:0.88rem;font-weight:500;}
 .future-meta{font-size:0.72rem;color:var(--muted);margin-top:2px;font-family:var(--font-mono);}
 .future-amount{font-family:var(--font-mono);font-weight:600;font-size:0.9rem;color:var(--amber);}
-
-/* FORECAST BARS */
 .forecast-bar-row{display:flex;align-items:center;gap:14px;margin-bottom:14px;}
 .forecast-week-label{font-family:var(--font-mono);font-size:0.75rem;color:var(--green);width:60px;flex-shrink:0;}
 .forecast-track{flex:1;height:6px;background:var(--bg3);border-radius:99px;overflow:hidden;}
 .forecast-fill{height:100%;background:linear-gradient(90deg,var(--green),#00b87a);border-radius:99px;width:0;transition:width 1.2s cubic-bezier(0.4,0,0.2,1);}
 .forecast-val{font-family:var(--font-mono);font-size:0.75rem;color:var(--text2);width:90px;text-align:right;flex-shrink:0;}
-
-/* LONGEVITY */
 .longevity-display{display:flex;align-items:center;gap:24px;padding:20px 0;flex-wrap:wrap;}
 .longevity-days{font-family:var(--font-mono);font-size:3rem;font-weight:600;color:var(--green);line-height:1;}
 .longevity-label{color:var(--muted2);font-size:0.85rem;margin-top:6px;}
@@ -1382,8 +1325,6 @@ body::before{
 .longevity-stat{text-align:center;}
 .longevity-stat-val{font-family:var(--font-mono);font-size:1.1rem;font-weight:600;}
 .longevity-stat-label{font-size:0.72rem;color:var(--muted);margin-top:4px;}
-
-/* BUTTONS */
 .btn{
   background:var(--bg3);color:var(--text);border:1px solid var(--border2);
   border-radius:10px;padding:10px 16px;cursor:pointer;
@@ -1393,8 +1334,6 @@ body::before{
 .btn:hover{border-color:var(--border);background:var(--bg4);}
 .btn-primary{background:var(--green-dim);border-color:var(--border);color:var(--green);}
 .btn-danger{background:var(--red-dim);border-color:rgba(255,59,92,0.2);color:var(--red);}
-
-/* TOAST */
 #toast{
   position:fixed;bottom:28px;left:50%;transform:translateX(-50%) translateY(80px);
   background:var(--bg2);border:1px solid var(--border);border-radius:12px;
@@ -1404,13 +1343,9 @@ body::before{
   box-shadow:0 8px 32px rgba(0,0,0,0.4);
 }
 #toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
-
-/* EMPTY STATE */
 .empty-state{text-align:center;padding:40px;color:var(--muted);}
 .empty-state-icon{font-size:2.5rem;margin-bottom:12px;}
 .empty-state-text{font-size:0.9rem;line-height:1.6;}
-
-/* AUTH */
 .auth-overlay{
   position:fixed;inset:0;
   background:rgba(6,10,16,0.97);backdrop-filter:blur(20px);
@@ -1444,8 +1379,6 @@ body::before{
 .auth-toggle span{color:var(--green);font-weight:600;}
 .auth-error{color:var(--red);font-size:0.8rem;margin-top:8px;min-height:18px;}
 .auth-checkbox{display:flex;align-items:center;gap:8px;margin-bottom:12px;font-size:0.85rem;color:var(--muted2);cursor:pointer;}
-
-/* CHATBOT */
 .chatbot{
   position:fixed;bottom:20px;right:20px;
   width:360px;height:460px;
@@ -1467,9 +1400,6 @@ body::before{
 }
 .chat-header-title{font-size:0.875rem;font-weight:600;}
 .chat-msgs{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:8px;}
-.chat-msgs::-webkit-scrollbar{width:4px;}
-.chat-msgs::-webkit-scrollbar-track{background:transparent;}
-.chat-msgs::-webkit-scrollbar-thumb{background:var(--bg4);border-radius:99px;}
 .msg{max-width:84%;padding:10px 14px;border-radius:16px;font-size:0.82rem;line-height:1.5;}
 .msg.user{align-self:flex-end;background:var(--green-dim);color:var(--green);border-bottom-right-radius:4px;}
 .msg.bot{align-self:flex-start;background:var(--bg3);color:var(--text2);border-bottom-left-radius:4px;}
@@ -1478,45 +1408,24 @@ body::before{
 .chat-inp:focus{border-color:var(--green);}
 .chat-send{background:var(--green-dim);border:1px solid var(--border);color:var(--green);border-radius:10px;padding:8px 14px;cursor:pointer;font-weight:600;font-size:0.82rem;transition:all 0.15s;}
 .chat-send:hover{background:var(--green);color:#000;}
-
-/* SPINNER */
+.chat-toggle-btn{background:none;border:none;color:var(--muted2);cursor:pointer;font-size:1.2rem;padding:0 4px;line-height:1;transition:color 0.2s;margin-left:auto;}
+.chat-toggle-btn:hover{color:var(--green);}
+.chatbot.minimized .chat-msgs,
+.chatbot.minimized .chat-input-row{display:none;}
+.chatbot.minimized .chat-window{height:auto !important;border-radius:20px;}
 .spinner{display:inline-block;width:16px;height:16px;border:2px solid rgba(0,229,160,0.3);border-top-color:var(--green);border-radius:50%;animation:spin 0.7s linear infinite;}
 @keyframes spin{to{transform:rotate(360deg);}}
-
-/* SUMMARY LINE */
 .financial-summary-text{font-size:0.875rem;color:var(--text2);line-height:1.6;font-style:italic;border-left:3px solid var(--green);padding-left:14px;margin-bottom:20px;}
-
-/* CHART WRAPPER */
 .chart-wrapper{position:relative;height:220px;}
-
-/* TABS */
 .tabs{display:flex;gap:4px;background:var(--bg3);border-radius:12px;padding:4px;margin-bottom:20px;}
 .tab{flex:1;padding:8px;border:none;background:transparent;color:var(--muted2);border-radius:8px;cursor:pointer;font-family:var(--font-display);font-size:0.82rem;font-weight:500;transition:all 0.2s;}
 .tab.active{background:var(--bg2);color:var(--text);box-shadow:0 2px 8px rgba(0,0,0,0.3);}
-
-/* CHATBOT MINIMIZE BUTTON */
-.chat-toggle-btn{
-  background:none; border:none; color:var(--muted2); cursor:pointer;
-  font-size:1.2rem; padding:0 4px; line-height:1;
-  transition: color 0.2s; margin-left:auto;
-}
-.chat-toggle-btn:hover{ color:var(--green); }
-
-/* Minimized state */
-.chatbot.minimized .chat-msgs,
-.chatbot.minimized .chat-input-row{ display:none; }
-.chatbot.minimized .chat-window{ height:auto !important; border-radius:20px; }
-
-
-/* SCROLLBAR */
 ::-webkit-scrollbar{width:6px;}
 ::-webkit-scrollbar-track{background:transparent;}
 ::-webkit-scrollbar-thumb{background:var(--bg4);border-radius:99px;}
 </style>
 </head>
 <body>
-
-<!-- SIDEBAR -->
 <nav class="sidebar">
   <div class="logo">💚</div>
   <button class="nav-item active" data-nav="dashboard"><span class="nav-icon">⚡</span><span class="nav-label">Dashboard</span></button>
@@ -1527,8 +1436,6 @@ body::before{
   <div class="sidebar-sep"></div>
   <button class="nav-item" id="exportBtn"><span class="nav-icon">⬇</span><span class="nav-label">Export CSV</span></button>
 </nav>
-
-<!-- MAIN -->
 <main class="main">
   <div class="topbar">
     <div class="page-title" id="pageTitle">Dashboard</div>
@@ -1539,64 +1446,76 @@ body::before{
     </div>
   </div>
 
-  <!-- ── DASHBOARD SCREEN ── -->
   <div class="screen active" id="screen-dashboard">
     <div class="income-hero">
-      <div class="income-label">Monthly Income — Tell AI, it handles the rest</div>
+      <div class="income-label">Monthly Income & Expenses — Tell AI, it handles the rest</div>
       <div class="income-tool-row">
         <select id="incomeTool" class="tool-picker">
-          <option value="manual">📝 Manual</option>
+          <option value="manual-income">📝 Manual Income (AI Plan)</option>
+          <option value="manual-expense">📝 Manual Expense (Quick Log)</option>
           <option value="auto">📸 Automatic (Image/OCR)</option>
         </select>
         <div style="margin-left:auto;"><span class="ai-badge">GEMINI</span></div>
       </div>
-      <div class="income-input-row">
-        <div class="income-peso">₱</div>
-        <input class="income-input" id="incomeInput" type="number" placeholder="0.00" step="100" min="0">
+
+      <!-- Manual Income Mode -->
+      <div id="manualIncomeBlock">
+        <div class="income-input-row">
+          <div class="income-peso">₱</div>
+          <input class="income-input" id="incomeInput" type="number" placeholder="0.00" step="100" min="0">
+        </div>
+        <div class="mindset-row">
+          <span style="font-size:0.78rem;color:var(--muted);align-self:center;">Spending style:</span>
+          <button class="mindset-btn" data-mindset="Saver">🏦 Saver</button>
+          <button class="mindset-btn active" data-mindset="Neutral">⚖️ Balanced</button>
+          <button class="mindset-btn" data-mindset="Spender">🛍️ Spender</button>
+        </div>
+        <div class="ai-checklist">
+          <div style="font-weight:600;margin-bottom:12px;">🧠 AI Autonomous Allocation (100% Sum Rule)</div>
+          <div class="checklist-section"><div class="checklist-section-title">Needs ▼</div><div id="needsChecklist" class="checklist-item"></div></div>
+          <div class="checklist-section"><div class="checklist-section-title">Wants ▼</div><div id="wantsChecklist" class="checklist-item"></div></div>
+          <div id="totalWarning" class="total-warning" style="display:none;">⚠️ Total allocation must be 100% – AI will normalise.</div>
+          <div style="margin-top:12px;"><button class="btn-analyze" id="analyzeBtn"><span id="analyzeBtnContent">🤖 Let AI Plan</span></button></div>
+          <div id="needsWantsSummary" style="margin-top:12px;font-size:0.8rem;color:var(--text2);"></div>
+        </div>
       </div>
+
+      <!-- Manual Expense Mode (hidden by default) -->
+      <div id="manualExpenseBlock" style="display:none;">
+        <div class="tx-form">
+          <div class="form-group"><label class="form-label">Amount (₱)</label><input class="form-input" id="expenseAmount" type="number" placeholder="0.00" step="0.01" min="0"></div>
+          <div class="form-group"><label class="form-label">Category</label>
+            <select class="form-select" id="expenseCategory">
+              <option>Food & Dining</option><option>Transport</option><option>Groceries</option>
+              <option>Entertainment</option><option>Health</option><option>Debt repayment</option>
+              <option>Mortgage</option><option>Subscription</option><option>Hobbies</option><option>Other</option>
+            </select>
+          </div>
+          <div class="form-group"><label class="form-label">Note</label><input class="form-input" id="expenseNote" placeholder="Short description"></div>
+          <div class="form-group" style="justify-content:flex-end;"><button class="btn-add" id="addExpenseBtn">Add Expense →</button></div>
+        </div>
+        <div id="expenseClassifyResult" style="display:none;margin-top:8px;"></div>
+      </div>
+
+      <!-- OCR Upload Block -->
       <div id="incomeImageUpload" class="income-image-upload">
         <input type="file" id="incomeImage" accept="image/*" capture="environment">
-        <div class="ocr-hint">📸 Take a photo or upload a payslip / budget screenshot. AI will read the amount.</div>
-      </div>
-      <div class="mindset-row">
-        <span style="font-size:0.78rem;color:var(--muted);align-self:center;">Spending style:</span>
-        <button class="mindset-btn" data-mindset="Saver">🏦 Saver</button>
-        <button class="mindset-btn active" data-mindset="Neutral">⚖️ Balanced</button>
-        <button class="mindset-btn" data-mindset="Spender">🛍️ Spender</button>
-      </div>
-      <div class="ai-checklist">
-        <div style="font-weight:600;margin-bottom:12px;">🧠 AI Autonomous Allocation (100% Sum Rule)</div>
-        <div class="checklist-section">
-          <div class="checklist-section-title">Needs ▼</div>
-          <div id="needsChecklist" class="checklist-item"></div>
-        </div>
-        <div class="checklist-section">
-          <div class="checklist-section-title">Wants ▼</div>
-          <div id="wantsChecklist" class="checklist-item"></div>
-        </div>
-        <div id="totalWarning" class="total-warning" style="display:none;">⚠️ Total allocation must be 100% – AI will normalise.</div>
-        <div style="margin-top:12px;">
-          <button class="btn-analyze" id="analyzeBtn">
-            <span id="analyzeBtnContent">🤖 Let AI Plan</span>
-          </button>
-        </div>
-        <div id="needsWantsSummary" style="margin-top:12px;font-size:0.8rem;color:var(--text2);"></div>
+        <div class="ocr-hint">📸 Take a photo or upload a payslip / budget screenshot. AI will read all income & expenses.</div>
       </div>
     </div>
+
     <div class="stats-grid">
       <div class="stat-card"><div class="stat-value" id="sBalance">—</div><div class="stat-label">Balance</div></div>
       <div class="stat-card neg"><div class="stat-value" id="sExpense" style="color:var(--red)">—</div><div class="stat-label">Month Expenses</div></div>
       <div class="stat-card"><div class="stat-value" id="sIncome" style="color:var(--green)">—</div><div class="stat-label">Month Income</div></div>
       <div class="stat-card blue-glow"><div class="stat-value" id="sScore" style="color:var(--blue)">—</div><div class="stat-label">AI Health Score</div><div class="stat-sub" id="scoreLabel">awaiting data</div></div>
     </div>
+
     <div class="card ai-feed">
-      <div class="ai-feed-header">
-        <div class="ai-pulse"></div>
-        <div class="ai-feed-title">AI Activity Feed</div>
-        <div class="ai-badge" style="margin-left:auto;">GEMINI</div>
-      </div>
+      <div class="ai-feed-header"><div class="ai-pulse"></div><div class="ai-feed-title">AI Activity Feed</div><div class="ai-badge" style="margin-left:auto;">GEMINI</div></div>
       <div id="aiFeed"><div class="empty-state"><div class="empty-state-icon">🤖</div><div class="empty-state-text">Enter your income above and click<br><strong style="color:var(--green)">Let AI Plan</strong> — Gemini will build your entire financial plan automatically.</div></div></div>
     </div>
+
     <div id="financialSummaryBlock" style="display:none" class="card">
       <div class="card-header"><span class="card-title">AI Assessment</span><span class="ai-badge">Gemini</span></div>
       <div class="financial-summary-text" id="financialSummaryText"></div>
@@ -1608,25 +1527,46 @@ body::before{
       </div>
       <div id="savingsTip" style="font-size:0.8rem;color:var(--muted2);margin-top:12px;font-style:italic;"></div>
     </div>
+
     <div id="allocationBlock" style="display:none" class="card">
       <div class="card-header"><span class="card-title">AI Budget Allocation</span><span class="ai-badge">100% Autonomous</span></div>
       <div class="alloc-grid" id="allocGrid"></div>
     </div>
+
     <div id="adviceBlock" style="display:none" class="card">
       <div class="card-header"><span class="card-title">AI Insights</span></div>
       <div class="advice-list" id="adviceList"></div>
     </div>
+
     <div class="card" id="chartBlock" style="display:none">
       <div class="card-header"><span class="card-title">Income vs Expense Trend</span></div>
       <div class="chart-wrapper"><canvas id="trendChart"></canvas></div>
     </div>
+
     <div class="card" id="forecastBlock" style="display:none">
       <div class="card-header"><span class="card-title">ML Spending Forecast (4 weeks)</span></div>
       <div id="forecastBars"></div>
     </div>
   </div>
 
-  
+  <!-- Other screens (future, insights, history, admin) kept the same -->
+  <div class="screen" id="screen-future">
+    <div class="card">
+      <div class="card-header"><span class="card-title">Pin Future Expense</span></div>
+      <div class="tx-form">
+        <div class="form-group" style="flex:2;min-width:200px;"><label class="form-label">Description</label><input class="form-input" id="futureDesc" placeholder="e.g. Rent"></div>
+        <div class="form-group"><label class="form-label">Amount (₱)</label><input class="form-input" id="futureAmt" type="number" min="0" step="0.01"></div>
+        <div class="form-group"><label class="form-label">Category</label><select class="form-select" id="futureCat"><option>Food & Dining</option><option>Transport</option><option>Groceries</option><option>Health</option><option>Entertainment</option><option>Mortgage</option><option>Debt repayment</option><option>Other</option></select></div>
+        <div class="form-group"><label class="form-label">Cycle</label><select class="form-select" id="futureCycle"><option>One-time</option><option>Weekly</option><option>Monthly</option></select></div>
+        <div class="form-group"><label class="form-label">Due Date</label><input class="form-input" id="futureDate" type="date"></div>
+        <div class="form-group" style="justify-content:flex-end;"><button class="btn-add" id="pinFutureBtn">Pin →</button></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-title">Pinned Expenses</span><button class="btn btn-primary" id="applyFutureBtn" style="font-size:0.8rem;padding:8px 14px;">⚡ Process Pending</button></div>
+      <div id="futureList"></div>
+    </div>
+  </div>
 
   <div class="screen" id="screen-insights">
     <div class="card">
@@ -1648,24 +1588,6 @@ body::before{
     </div>
   </div>
 
-  <div class="screen" id="screen-future">
-    <div class="card">
-      <div class="card-header"><span class="card-title">Pin Future Expense</span></div>
-      <div class="tx-form">
-        <div class="form-group" style="flex:2;min-width:200px;"><label class="form-label">Description</label><input class="form-input" id="futureDesc" placeholder="e.g. Rent, School fee"></div>
-        <div class="form-group"><label class="form-label">Amount (₱)</label><input class="form-input" id="futureAmt" type="number" min="0" step="0.01"></div>
-        <div class="form-group"><label class="form-label">Category</label><select class="form-select" id="futureCat"><option>Food & Dining</option><option>Transport</option><option>Groceries</option><option>Health</option><option>Entertainment</option><option>Mortgage</option><option>Debt repayment</option><option>Other</option></select></div>
-        <div class="form-group"><label class="form-label">Cycle</label><select class="form-select" id="futureCycle"><option>One-time</option><option>Weekly</option><option>Monthly</option></select></div>
-        <div class="form-group"><label class="form-label">Due Date</label><input class="form-input" id="futureDate" type="date"></div>
-        <div class="form-group" style="justify-content:flex-end;"><button class="btn-add" id="pinFutureBtn">Pin →</button></div>
-      </div>
-    </div>
-    <div class="card">
-      <div class="card-header"><span class="card-title">Pinned Expenses</span><button class="btn btn-primary" id="applyFutureBtn" style="font-size:0.8rem;padding:8px 14px;">⚡ Process Pending</button></div>
-      <div id="futureList"></div>
-    </div>
-  </div>
-
   <div class="screen" id="screen-history">
     <div class="card">
       <div class="card-header"><span class="card-title">Transaction History</span><div style="display:flex;gap:8px;"><input class="form-input" id="historySearch" placeholder="Search…" style="width:180px;padding:8px 12px;font-size:0.82rem;"></div></div>
@@ -1683,11 +1605,11 @@ body::before{
       </div>
       <div id="adminUsersPanel">
         <input type="text" id="adminSearchUser" placeholder="Search user..." class="form-input" style="margin-bottom:12px;">
-        <div class="table-wrap"><table style="width:100%; border-collapse:collapse;"><thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Role</th><th>Created</th><th>Actions</th></tr></thead><tbody id="adminUserTable"></tbody></table></div>
+        <table style="width:100%; border-collapse:collapse;"><thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Role</th><th>Created</th><th>Actions</th></tr></thead><tbody id="adminUserTable"></tbody></table>
       </div>
       <div id="adminTransactionsPanel" style="display:none;">
         <select id="adminUserFilter" class="form-select" style="margin-bottom:12px;"><option value="">All Users</option></select>
-        <div class="table-wrap"><table style="width:100%; border-collapse:collapse;"><thead><tr><th>Date</th><th>User</th><th>Category</th><th>Type</th><th>Amount</th><th>Need/Want</th></tr></thead><tbody id="adminTxTable"></tbody></table></div>
+        <table style="width:100%; border-collapse:collapse;"><thead><tr><th>Date</th><th>User</th><th>Category</th><th>Type</th><th>Amount</th><th>Need/Want</th></tr></thead><tbody id="adminTxTable"></tbody></table>
       </div>
     </div>
   </div>
@@ -1712,20 +1634,14 @@ body::before{
 
 <div class="chatbot" id="chatbot">
   <div class="chat-window">
-    <!-- NEW header with minimize button -->
-<div class="chat-header" id="chatHeader">
-  <div class="ai-pulse"></div>
-  <div class="chat-header-title">SmartSpend AI <span class="ai-badge">Gemini</span></div>
-  <button class="chat-toggle-btn" id="chatToggleBtn" title="Minimize">–</button>
-</div>
-
+    <div class="chat-header" id="chatHeader"><div class="ai-pulse"></div><div class="chat-header-title">SmartSpend AI <span class="ai-badge">Gemini</span></div><button class="chat-toggle-btn" id="chatToggleBtn" title="Minimize">–</button></div>
     <div class="chat-msgs" id="chatMsgs"><div class="msg bot">👋 I'm your AI finance assistant. Ask me anything about your money, budget, or how to save more.</div></div>
     <div class="chat-input-row"><input class="chat-inp" id="chatInp" placeholder="Ask anything…"><button class="chat-send" id="chatSend">→</button></div>
   </div>
 </div>
 
 <script>
-// ── FULL JS (NO PLACEHOLDERS) ──
+// ── GLOBAL VARS ──
 let currentUser = null;
 let allTransactions = [];
 let currentMindset = 'Neutral';
@@ -1739,7 +1655,6 @@ const CAT_ICONS = {
   'Hobbies':'🎮','Salary':'💰','Savings':'🏦','Other':'📦'
 };
 
-// Category configuration for checklist (must match backend names exactly)
 const categoryConfig = [
   { name: 'Food & Dining', type: 'need', defaultPct: 0 },
   { name: 'Debt repayment', type: 'need', defaultPct: 0 },
@@ -1886,7 +1801,6 @@ function renderChecklist() {
     </div>`;
     if(cat.type === 'need') needsHtml += itemHtml;
     else if(cat.type === 'want') wantsHtml += itemHtml;
-    // savings categories can be shown under wants for simplicity
   });
   needsDiv.innerHTML = needsHtml;
   wantsDiv.innerHTML = wantsHtml;
@@ -1921,20 +1835,49 @@ function updateChecklistPercentages(allocations = null) {
   }
 }
 
-// ── DASHBOARD ──
+// ── TOOL PICKER TOGGLES (Manual Income / Manual Expense / Auto) ──
+document.getElementById('incomeTool').addEventListener('change', function(){
+  const val = this.value;
+  document.getElementById('manualIncomeBlock').style.display = (val === 'manual-income') ? 'block' : 'none';
+  document.getElementById('manualExpenseBlock').style.display = (val === 'manual-expense') ? 'block' : 'none';
+  document.getElementById('incomeImageUpload').style.display = (val === 'auto') ? 'block' : 'none';
+});
+
+// ── MANUAL EXPENSE LOGIC ──
+document.getElementById('addExpenseBtn').addEventListener('click', async ()=>{
+  const amount = parseFloat(document.getElementById('expenseAmount').value);
+  if(!amount || amount<=0) { toast('Enter a valid amount'); return; }
+  const category = document.getElementById('expenseCategory').value;
+  const note = document.getElementById('expenseNote').value;
+  try {
+    let classify = { is_need: true, priority: 1, suggested_note: note };
+    try {
+      const cl = await api('/api/ai/classify_transaction', { method:'POST', body: JSON.stringify({ amount, category, note }) });
+      classify = cl;
+      document.getElementById('expenseClassifyResult').innerHTML = `<div class="ai-classify-result">🤖 AI: ${classify.is_need?'Need':'Want'} · Priority ${classify.priority} · Note: ${esc(classify.suggested_note)}</div>`;
+      document.getElementById('expenseClassifyResult').style.display = 'block';
+    } catch(e) {}
+    await api('/api/transactions', { method:'POST', body: JSON.stringify({ amount, category, tx_type: 'expense', is_need: classify.is_need, priority: classify.priority, note: classify.suggested_note||note }) });
+    toast('Expense added!');
+    document.getElementById('expenseAmount').value = '';
+    document.getElementById('expenseNote').value = '';
+    loadDashboard(); // refresh stats
+  } catch(e) { toast(e.message); }
+});
+
+// ── DASHBOARD LOAD ──
 async function loadDashboard() {
   if(!currentUser) return;
   try {
-    // Automatically process pending future expenses before fetching stats
-    await api('/api/apply_future_expenses', { method:'POST' });
-
+    await api('/api/apply_future_expenses', { method:'POST' }); // auto‑process pending
     const summary = await api(`/api/summary/${currentUser.id}`);
     const predict = await api(`/api/predict/${currentUser.id}`);
     const longevity = await api(`/api/longevity/${currentUser.id}`);
     renderStats(summary, predict.score, longevity);
     renderForecast(predict.predictions?.weekly);
     renderTrendChart(summary.monthly);
-    // ... rest of the function
+    document.getElementById('chartBlock').style.display = Object.keys(summary.monthly).length ? 'block' : 'none';
+    document.getElementById('forecastBlock').style.display = Object.keys(predict.predictions?.weekly||{}).length ? 'block' : 'none';
   } catch(e) { toast(e.message); }
 }
 
@@ -1957,7 +1900,7 @@ function addFeedEvent(icon, text) {
   if(feed.querySelector('.empty-state')) feed.innerHTML = '';
 }
 
-// AI Plan button
+// ── AI PLAN ──
 document.getElementById('analyzeBtn').addEventListener('click', runAIPlan);
 
 async function runAIPlan() {
@@ -1989,7 +1932,7 @@ async function runAIPlan() {
     addFeedEvent('❌','AI error: '+e.message);
   }
   btn.disabled = false;
-  btnContent.innerHTML = '🔄 Re-Analyze';
+  btnContent.innerHTML = '🔄 Re‑Analyze';
 }
 
 function renderAIPlan(plan) {
@@ -2017,8 +1960,8 @@ function renderAIPlan(plan) {
   document.getElementById('allocationBlock').style.display = 'block';
 
   const adviceIcons = { info:'ℹ️', warning:'⚠️', success:'✅' };
-  document.getElementById('adviceList').innerHTML = plan.advice.map(a=>`
-    <div class="advice-card ${esc(a.type)}">
+  document.getElementById('adviceList').innerHTML = plan.advice.map(a=>
+    `<div class="advice-card ${esc(a.type)}">
       <span class="advice-icon">${adviceIcons[a.type]||'💡'}</span>
       <div><div class="advice-title">${esc(a.title)}</div><div class="advice-body">${esc(a.body)}</div></div>
     </div>`).join('');
@@ -2059,9 +2002,22 @@ function renderTrendChart(monthly) {
   });
 }
 
-// Income tool toggle
-document.getElementById('incomeTool').addEventListener('change', function(){
-  document.getElementById('incomeImageUpload').style.display = this.value === 'auto' ? 'block' : 'none';
+// ── OCR IMAGE UPLOAD ──
+document.getElementById('incomeImage').addEventListener('change', async function(){
+  const file = this.files[0];
+  if(!file) return;
+  try {
+    const formData = new FormData();
+    formData.append('image', file);
+    const resp = await fetch('/api/ocr_income', { method:'POST', body: formData, credentials:'include' });
+    const data = await resp.json();
+    if(data.transactions){
+      toast(`Extracted ${data.count} transactions (Income: ${fmt(data.total_income)}, Expenses: ${fmt(data.total_expense)})`);
+      loadDashboard();
+    } else if(data.amount){
+      document.getElementById('incomeInput').value = data.amount;
+    }
+  } catch(e) { toast('OCR failed: '+e.message); }
 });
 
 // Mindset buttons
@@ -2073,38 +2029,52 @@ document.querySelectorAll('.mindset-btn').forEach(btn => {
   });
 });
 
-// Income image OCR
-document.getElementById('incomeImage').addEventListener('change', async function(){
-  const file = this.files[0];
-  if(!file) return;
+// ── FUTURE EXPENSES ──
+async function loadFutureExpenses() {
+  if(!currentUser) return;
   try {
-    const formData = new FormData();
-    formData.append('image', file);
-    const resp = await fetch('/api/ocr_income', { method:'POST', body: formData, credentials:'include' });
-    const data = await resp.json();
-    if(data.transactions){
-      toast(`Extracted ${data.count} transactions (Income: ${fmt(data.total_income)}, Expenses: ${fmt(data.total_expense)})`);
-      loadDashboard(); // refresh everything
-    } else if(data.amount){
-      document.getElementById('incomeInput').value = data.amount; // legacy fallback
-    }
-  } catch(e) { toast('OCR failed: '+e.message); }
-});
-
-// ── ADD TRANSACTION SCREEN ──
-
-async function deleteTransaction(id) {
-  if(!confirm('Delete this transaction?')) return;
-  try {
-    await api(`/api/transactions/${id}`, { method:'DELETE' });
-    toast('Deleted');
-    // Refresh the history list if the History screen is active
-    if(document.getElementById('screen-history').classList.contains('active')) {
-      loadHistory();
-    }
+    const exps = await api('/api/future_expenses');
+    renderFutureList(exps);
   } catch(e) { toast(e.message); }
 }
-
+function renderFutureList(exps) {
+  const list = document.getElementById('futureList');
+  if(!exps.length) { list.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📌</div><div class="empty-state-text">No pinned expenses yet.</div></div>'; return; }
+  list.innerHTML = exps.map(e=>`
+    <div class="future-item">
+      <div class="future-info"><div class="future-desc">${esc(e.description)}</div><div class="future-meta">${esc(e.category)} · ${e.cycle} · ${e.date}</div></div>
+      <div class="future-amount">${fmt(e.amount)}</div>
+      <button class="btn-del" onclick="deleteFuture(${e.id})">🗑</button>
+    </div>`).join('');
+}
+document.getElementById('pinFutureBtn').addEventListener('click', async ()=>{
+  const desc = document.getElementById('futureDesc').value;
+  const amount = parseFloat(document.getElementById('futureAmt').value);
+  const category = document.getElementById('futureCat').value;
+  const cycle = document.getElementById('futureCycle').value;
+  const date = document.getElementById('futureDate').value;
+  if(!desc || !amount || !date) { toast('Please fill all fields'); return; }
+  try {
+    await api('/api/future_expenses', { method:'POST', body: JSON.stringify({ description:desc, amount, category, cycle, date }) });
+    toast('Pinned');
+    document.getElementById('futureDesc').value=''; document.getElementById('futureAmt').value='';
+    loadFutureExpenses();
+  } catch(e) { toast(e.message); }
+});
+async function deleteFuture(id) {
+  if(!confirm('Remove this future expense?')) return;
+  try {
+    await api(`/api/future_expenses/${id}`, { method:'DELETE' });
+    toast('Removed'); loadFutureExpenses();
+  } catch(e) { toast(e.message); }
+}
+document.getElementById('applyFutureBtn').addEventListener('click', async ()=>{
+  try {
+    const result = await api('/api/apply_future_expenses', { method:'POST' });
+    toast(`Processed ${result.count} pending expenses`);
+    loadFutureExpenses();
+  } catch(e) { toast(e.message); }
+});
 
 // ── INSIGHTS ──
 async function loadInsights() {
@@ -2119,7 +2089,6 @@ async function loadInsights() {
     renderCategoryChart(predict.predictions?.categories);
   } catch(e) { toast(e.message); }
 }
-
 function renderForecastInsights(weekly) {
   const container = document.getElementById('forecastBarsInsights');
   if(!weekly) { container.innerHTML = ''; return; }
@@ -2133,7 +2102,6 @@ function renderForecastInsights(weekly) {
             </div>`;
   }).join('');
 }
-
 function renderCategoryChart(categories) {
   const ctx = document.getElementById('catChart');
   if(!ctx) return;
@@ -2150,62 +2118,6 @@ function renderCategoryChart(categories) {
   });
 }
 
-// ── FUTURE EXPENSES ──
-async function loadFutureExpenses() {
-  if(!currentUser) return;
-  try {
-    const exps = await api('/api/future_expenses');
-    renderFutureList(exps);
-  } catch(e) { toast(e.message); }
-}
-
-function renderFutureList(exps) {
-  const list = document.getElementById('futureList');
-  if(!exps.length) { list.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📌</div><div class="empty-state-text">No pinned expenses yet.</div></div>'; return; }
-  list.innerHTML = exps.map(e=>`
-    <div class="future-item">
-      <div class="future-info">
-        <div class="future-desc">${esc(e.description)}</div>
-        <div class="future-meta">${esc(e.category)} · ${e.cycle} · ${e.date}</div>
-      </div>
-      <div class="future-amount">${fmt(e.amount)}</div>
-      <button class="btn-del" onclick="deleteFuture(${e.id})">🗑</button>
-    </div>`).join('');
-}
-
-document.getElementById('pinFutureBtn').addEventListener('click', async ()=>{
-  const desc = document.getElementById('futureDesc').value;
-  const amount = parseFloat(document.getElementById('futureAmt').value);
-  const category = document.getElementById('futureCat').value;
-  const cycle = document.getElementById('futureCycle').value;
-  const date = document.getElementById('futureDate').value;
-  if(!desc || !amount || !date) { toast('Please fill all fields'); return; }
-  try {
-    await api('/api/future_expenses', { method:'POST', body: JSON.stringify({ description:desc, amount, category, cycle, date }) });
-    toast('Pinned');
-    document.getElementById('futureDesc').value='';
-    document.getElementById('futureAmt').value='';
-    loadFutureExpenses();
-  } catch(e) { toast(e.message); }
-});
-
-async function deleteFuture(id) {
-  if(!confirm('Remove this future expense?')) return;
-  try {
-    await api(`/api/future_expenses/${id}`, { method:'DELETE' });
-    toast('Removed');
-    loadFutureExpenses();
-  } catch(e) { toast(e.message); }
-}
-
-document.getElementById('applyFutureBtn').addEventListener('click', async ()=>{
-  try {
-    const result = await api('/api/apply_future_expenses', { method:'POST' });
-    toast(`Processed ${result.count} pending expenses`);
-    loadFutureExpenses();
-  } catch(e) { toast(e.message); }
-});
-
 // ── HISTORY ──
 async function loadHistory() {
   if(!currentUser) return;
@@ -2215,7 +2127,6 @@ async function loadHistory() {
     renderHistory(txs);
   } catch(e) { toast(e.message); }
 }
-
 function renderHistory(txs) {
   const list = document.getElementById('historyList');
   const search = document.getElementById('historySearch').value.toLowerCase();
@@ -2233,6 +2144,14 @@ function renderHistory(txs) {
     </div>`).join('');
 }
 document.getElementById('historySearch').addEventListener('input', ()=> renderHistory(allTransactions));
+async function deleteTransaction(id) {
+  if(!confirm('Delete this transaction?')) return;
+  try {
+    await api(`/api/transactions/${id}`, { method:'DELETE' });
+    toast('Deleted');
+    if(document.getElementById('screen-history').classList.contains('active')) loadHistory();
+  } catch(e) { toast(e.message); }
+}
 
 // ── ADMIN ──
 async function loadAdmin() {
@@ -2249,7 +2168,6 @@ async function loadAdmin() {
     loadAdminTransactions();
   } catch(e) { toast(e.message); }
 }
-
 document.getElementById('adminSearchUser').addEventListener('input', loadAdminUsers);
 document.getElementById('adminUserFilter').addEventListener('change', loadAdminTransactions);
 document.querySelectorAll('#adminTabs .tab').forEach(tab=>{
@@ -2265,7 +2183,6 @@ document.querySelectorAll('#adminTabs .tab').forEach(tab=>{
     }
   });
 });
-
 async function loadAdminUsers(){
   try {
     const users = await api('/api/admin/users');
@@ -2282,24 +2199,19 @@ async function loadAdminUsers(){
       </tr>`).join('');
   } catch(e) { toast(e.message); }
 }
-
 async function adminUpdateRole(id, newRole){
   try {
     await api(`/api/admin/users/${id}`, { method:'PUT', body: JSON.stringify({ role: newRole }) });
-    toast(`Role updated to ${newRole}`);
-    loadAdminUsers();
+    toast(`Role updated to ${newRole}`); loadAdminUsers();
   } catch(e) { toast(e.message); }
 }
-
 async function adminDeleteUser(id){
   if(!confirm('Delete this user and all their data?')) return;
   try {
     await api(`/api/admin/users/${id}`, { method:'DELETE' });
-    toast('User deleted');
-    loadAdminUsers();
+    toast('User deleted'); loadAdminUsers();
   } catch(e) { toast(e.message); }
 }
-
 async function loadAdminTransactions(){
   try {
     const userId = document.getElementById('adminUserFilter').value;
@@ -2310,7 +2222,6 @@ async function loadAdminTransactions(){
         <td>${fmtDate(t.tx_date)}</td><td>User ${t.user_id}</td><td>${esc(t.category)}</td><td>${t.tx_type}</td>
         <td>${fmt(t.amount)}</td><td>${t.is_need?'Need':'Want'}</td>
       </tr>`).join('');
-    // repopulate user filter
     const users = await api('/api/admin/users');
     document.getElementById('adminUserFilter').innerHTML = '<option value="">All Users</option>'+
       users.map(u=>`<option value="${u.id}">${esc(u.name)} (${u.id})</option>`).join('');
@@ -2322,10 +2233,40 @@ document.getElementById('exportBtn').addEventListener('click', ()=>{
   window.open('/api/export/csv', '_blank');
 });
 
-// ── CHATBOT ──
+// ── CHATBOT DRAGGABLE & MINIMIZABLE ──
+(function(){
+  const chatbot = document.getElementById('chatbot');
+  const header = document.getElementById('chatHeader');
+  let offsetX, offsetY, isDragging = false;
+  header.addEventListener('mousedown', (e) => {
+    if(e.target.id === 'chatToggleBtn') return;
+    isDragging = true;
+    offsetX = e.clientX - chatbot.getBoundingClientRect().left;
+    offsetY = e.clientY - chatbot.getBoundingClientRect().top;
+    chatbot.style.cursor = 'grabbing';
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove', (e) => {
+    if(!isDragging) return;
+    const left = e.clientX - offsetX;
+    const top = e.clientY - offsetY;
+    const w = window.innerWidth, h = window.innerHeight;
+    const bw = chatbot.offsetWidth, bh = chatbot.offsetHeight;
+    chatbot.style.left = Math.max(0, Math.min(left, w - bw)) + 'px';
+    chatbot.style.top = Math.max(0, Math.min(top, h - bh)) + 'px';
+    chatbot.style.right = 'auto'; chatbot.style.bottom = 'auto';
+  });
+  document.addEventListener('mouseup', () => {
+    if(isDragging){ isDragging = false; chatbot.style.cursor = ''; }
+  });
+  document.getElementById('chatToggleBtn').addEventListener('click', () => {
+    chatbot.classList.toggle('minimized');
+    document.getElementById('chatToggleBtn').textContent = chatbot.classList.contains('minimized') ? '□' : '–';
+  });
+})();
+
 document.getElementById('chatSend').addEventListener('click', sendChat);
 document.getElementById('chatInp').addEventListener('keypress', e=>{ if(e.key==='Enter') sendChat(); });
-
 async function sendChat() {
   const inp = document.getElementById('chatInp');
   const msg = inp.value.trim();
@@ -2341,52 +2282,6 @@ async function sendChat() {
   }
   msgs.scrollTop = msgs.scrollHeight;
 }
-
-// ── DRAGGABLE CHATBOT ──
-(function(){
-  const chatbot = document.getElementById('chatbot');
-  const header = document.getElementById('chatHeader');
-  let offsetX, offsetY, isDragging = false;
-
-  header.addEventListener('mousedown', (e) => {
-    // Don't drag if clicking the minimize button
-    if(e.target.id === 'chatToggleBtn') return;
-    isDragging = true;
-    offsetX = e.clientX - chatbot.getBoundingClientRect().left;
-    offsetY = e.clientY - chatbot.getBoundingClientRect().top;
-    chatbot.style.cursor = 'grabbing';
-    e.preventDefault();
-  });
-
-  document.addEventListener('mousemove', (e) => {
-    if(!isDragging) return;
-    const left = e.clientX - offsetX;
-    const top = e.clientY - offsetY;
-    // Keep inside viewport
-    const w = window.innerWidth, h = window.innerHeight;
-    const bw = chatbot.offsetWidth, bh = chatbot.offsetHeight;
-    chatbot.style.left = Math.max(0, Math.min(left, w - bw)) + 'px';
-    chatbot.style.top = Math.max(0, Math.min(top, h - bh)) + 'px';
-    chatbot.style.right = 'auto';
-    chatbot.style.bottom = 'auto';
-  });
-
-  document.addEventListener('mouseup', () => {
-    if(isDragging){
-      isDragging = false;
-      chatbot.style.cursor = '';
-    }
-  });
-})();
-
-// ── MINIMIZE TOGGLE ──
-const toggleBtn = document.getElementById('chatToggleBtn');
-toggleBtn.addEventListener('click', () => {
-  const chatbot = document.getElementById('chatbot');
-  chatbot.classList.toggle('minimized');
-  toggleBtn.textContent = chatbot.classList.contains('minimized') ? '□' : '–';
-});
-
 
 // ── INITIAL LOAD ──
 (async ()=>{
