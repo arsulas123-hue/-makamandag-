@@ -1413,7 +1413,6 @@ body::before{
 <nav class="sidebar">
   <div class="logo">💚</div>
   <button class="nav-item active" data-nav="dashboard"><span class="nav-icon">⚡</span><span class="nav-label">Dashboard</span></button>
-  <button class="nav-item" data-nav="add"><span class="nav-icon">＋</span><span class="nav-label">Add Transaction</span></button>
   <button class="nav-item" data-nav="insights"><span class="nav-icon">📈</span><span class="nav-label">Insights</span></button>
   <button class="nav-item" data-nav="future"><span class="nav-icon">📌</span><span class="nav-label">Future Expenses</span></button>
   <button class="nav-item" data-nav="history"><span class="nav-icon">📋</span><span class="nav-label">History</span></button>
@@ -1520,45 +1519,7 @@ body::before{
     </div>
   </div>
 
-  <div class="screen" id="screen-add">
-    <div class="card">
-      <div class="card-header"><span class="card-title">New Transaction</span><span class="ai-badge">AI Auto-Classify</span></div>
-      <div class="tx-form">
-        <div class="form-group">
-          <label class="form-label">Amount (₱)</label>
-          <input class="form-input" id="txAmount" type="number" placeholder="0.00" step="0.01" min="0">
-        </div>
-        <div class="form-group">
-          <label class="form-label">Category</label>
-          <select class="form-select" id="txCategory">
-            <option>Food & Dining</option><option>Transport</option><option>Groceries</option>
-            <option>Entertainment</option><option>Health</option><option>Debt repayment</option>
-            <option>Mortgage</option><option>Subscription</option><option>Hobbies</option>
-            <option>Salary</option><option>Savings</option><option>Other</option>
-          </select>
-        </div>
-        <div class="form-group">
-          <label class="form-label">Type</label>
-          <select class="form-select" id="txType">
-            <option value="expense">Expense</option>
-            <option value="income">Income</option>
-          </select>
-        </div>
-        <div class="form-group">
-          <label class="form-label">Note (optional)</label>
-          <input class="form-input" id="txNote" placeholder="Short description">
-        </div>
-        <div class="form-group" style="justify-content:flex-end;">
-          <button class="btn-add" id="addTxBtn">Add →</button>
-        </div>
-      </div>
-      <div id="classifyResult" style="display:none;margin-top:4px;"></div>
-    </div>
-    <div class="card">
-      <div class="card-header"><span class="card-title">Recent (Last 10)</span></div>
-      <div class="tx-list" id="recentTxList"><div class="empty-state"><div class="empty-state-icon">📋</div><div class="empty-state-text">No transactions yet.</div></div></div>
-    </div>
-  </div>
+  
 
   <div class="screen" id="screen-insights">
     <div class="card">
@@ -1788,7 +1749,6 @@ document.querySelectorAll('.nav-item[data-nav]').forEach(btn => {
     document.getElementById('screen-'+nav).classList.add('active');
     document.getElementById('pageTitle').textContent = btn.querySelector('.nav-label').textContent || 'Dashboard';
     if(nav==='dashboard') loadDashboard();
-    else if(nav==='add') loadAddScreen();
     else if(nav==='insights') loadInsights();
     else if(nav==='future') loadFutureExpenses();
     else if(nav==='history') loadHistory();
@@ -2021,63 +1981,19 @@ document.getElementById('incomeImage').addEventListener('change', async function
 });
 
 // ── ADD TRANSACTION SCREEN ──
-async function loadAddScreen() {
-  if(!currentUser) return;
-  try {
-    const txs = await api('/api/transactions');
-    allTransactions = txs;
-    renderRecentTransactions(txs.slice(0,10));
-  } catch(e) { toast(e.message); }
-}
-
-function renderRecentTransactions(txs) {
-  const list = document.getElementById('recentTxList');
-  if(!txs.length) { list.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📋</div><div class="empty-state-text">No transactions yet.</div></div>'; return; }
-  list.innerHTML = txs.map(t=>`
-    <div class="tx-item">
-      <div class="tx-cat-icon">${CAT_ICONS[t.category]||'📦'}</div>
-      <div class="tx-info">
-        <div class="tx-cat">${esc(t.category)} ${t.is_need?'<span class="tx-badge need">Need</span>':'<span class="tx-badge want">Want</span>'}</div>
-        <div class="tx-meta">${t.note?esc(t.note)+' · ':''}${fmtDate(t.tx_date)}</div>
-      </div>
-      <div class="tx-amount ${t.tx_type}">${t.tx_type==='income'?'+':'-'}${fmt(t.amount)}</div>
-      <button class="btn-del" onclick="deleteTransaction(${t.id})">🗑</button>
-    </div>`).join('');
-}
 
 async function deleteTransaction(id) {
   if(!confirm('Delete this transaction?')) return;
   try {
     await api(`/api/transactions/${id}`, { method:'DELETE' });
     toast('Deleted');
-    loadAddScreen();
-    if(document.getElementById('screen-history').classList.contains('active')) loadHistory();
+    // Refresh the history list if the History screen is active
+    if(document.getElementById('screen-history').classList.contains('active')) {
+      loadHistory();
+    }
   } catch(e) { toast(e.message); }
 }
 
-document.getElementById('addTxBtn').addEventListener('click', async ()=>{
-  const amount = parseFloat(document.getElementById('txAmount').value);
-  if(!amount || amount<=0) { toast('Enter amount'); return; }
-  const category = document.getElementById('txCategory').value;
-  const tx_type = document.getElementById('txType').value;
-  const note = document.getElementById('txNote').value;
-  try {
-    let classify = { is_need: true, priority: 1, suggested_note: note };
-    if(tx_type==='expense') {
-      try {
-        const cl = await api('/api/ai/classify_transaction', { method:'POST', body: JSON.stringify({ amount, category, note }) });
-        classify = cl;
-        document.getElementById('classifyResult').innerHTML = `<div class="ai-classify-result">🤖 AI: ${classify.is_need?'Need':'Want'} · Priority ${classify.priority} · Note: ${esc(classify.suggested_note)}</div>`;
-        document.getElementById('classifyResult').style.display = 'block';
-      } catch(e) {}
-    }
-    await api('/api/transactions', { method:'POST', body: JSON.stringify({ amount, category, tx_type, is_need: classify.is_need, priority: classify.priority, note: classify.suggested_note||note }) });
-    toast('Transaction added');
-    document.getElementById('txAmount').value = '';
-    document.getElementById('txNote').value = '';
-    loadAddScreen();
-  } catch(e) { toast(e.message); }
-});
 
 // ── INSIGHTS ──
 async function loadInsights() {
