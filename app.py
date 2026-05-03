@@ -123,7 +123,8 @@ class User(db.Model):
     monthly_budget_limit = db.Column(db.Float, default=0.0)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     role = db.Column(db.String(20), default='user')
-    avatar_url = db.Column(db.String(500), nullable=True, default=None)
+    # FIX: changed from String(500) to Text to allow long data URLs
+    avatar_url = db.Column(db.Text, nullable=True, default=None)
 
     transactions = db.relationship('Transaction', backref='user', lazy=True)
     budgets = db.relationship('Budget', backref='user', lazy=True)
@@ -239,6 +240,13 @@ def ensure_schema():
                 with db.engine.connect() as conn:
                     conn.execute(text(f'ALTER TABLE users ADD COLUMN {col} {defn}'))
                     conn.commit()
+
+        # Ensure avatar_url can hold long data URLs (change to TEXT if still VARCHAR)
+        avatar_col_info = next((col for col in inspector.get_columns('users') if col['name'] == 'avatar_url'), None)
+        if avatar_col_info and 'varchar' in str(avatar_col_info['type']).lower() and str(avatar_col_info['type']).lower().find('char') != -1:
+            with db.engine.connect() as conn:
+                conn.execute(text('ALTER TABLE users ALTER COLUMN avatar_url TYPE TEXT'))
+                conn.commit()
 
     # Transactions table
     if inspector.has_table('transactions'):
