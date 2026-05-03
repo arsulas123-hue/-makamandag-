@@ -4,6 +4,7 @@ import io
 import os
 import requests
 import base64
+from zoneinfo import ZoneInfo
 import google.generativeai as genai
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
@@ -509,7 +510,7 @@ def create_transaction():
     db.session.commit()
     # Auto-apply one-time future expenses only on salary income
     if tx.tx_type == 'income' and tx.category.lower() == 'salary':
-        today = datetime.now(timezone.utc).date()
+        today = datetime.now(ZoneInfo("Asia/Manila")).date()
         for exp in FutureExpense.query.filter(
             FutureExpense.user_id == user.id,
             FutureExpense.expense_date <= today,
@@ -1143,7 +1144,7 @@ Reply in 3-5 sentences, warm, actionable, use ₱.
 @login_required
 def apply_future_expenses():
     user = get_current_user()
-    today = datetime.now(timezone.utc).date()
+        today = datetime.now(ZoneInfo("Asia/Manila")).date()
     applied = []
 
     # 1. One-time expenses
