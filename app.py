@@ -195,21 +195,16 @@ class UserAllocation(db.Model):
     percentage = db.Column(db.Float, nullable=False)
     __table_args__ = (db.UniqueConstraint('user_id', 'category_name', name='unique_user_category_allocation'),)
 
-
-# ----------------------------------------------------------------------
-# Schema migration (add role column if missing)
-# ----------------------------------------------------------------------
 def ensure_schema():
     inspector = inspect(db.engine)
 
     # Users table
     if inspector.has_table('users'):
         existing_columns = [col['name'] for col in inspector.get_columns('users')]
-           if 'password' in existing_columns and 'password_hash' in existing_columns:
+        if 'password' in existing_columns and 'password_hash' in existing_columns:
             with db.engine.connect() as conn:
                 conn.execute(text('ALTER TABLE users DROP COLUMN password'))
                 conn.commit()
-
         for col, defn in [
             ('password_hash', "VARCHAR(128) NOT NULL DEFAULT ''"),
             ('social_status', "VARCHAR(20) DEFAULT 'Middle'"),
@@ -247,7 +242,6 @@ def ensure_schema():
     elif admin.role != 'admin':
         admin.role = 'admin'
         db.session.commit()
-
 
 # ----------------------------------------------------------------------
 # Authentication helpers
