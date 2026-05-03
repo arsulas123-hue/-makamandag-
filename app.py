@@ -698,7 +698,6 @@ def admin_budgets(user_id):
 def admin_future_expenses(user_id):
     exps = FutureExpense.query.filter_by(user_id=user_id).all()
     return jsonify([e.to_dict() for e in exps])
-
 # ----------------------------------------------------------------------
 # OCR endpoint (optional, for automatic income extraction)
 # ----------------------------------------------------------------------
@@ -803,8 +802,8 @@ Example:
     if not items:
         return jsonify({'error': 'Failed to parse AI output', 'raw_output': raw[:200]}), 500
 
-    # Create transactions
-    created = []
+    # Create transactions (first collect, then flush to get DB defaults)
+    created_txs = []
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -826,7 +825,13 @@ Example:
             note=note
         )
         db.session.add(tx)
-        created.append(tx.to_dict())
+        created_txs.append(tx)
+
+    # Flush to populate defaults (like tx_date) from the database
+    db.session.flush()
+
+    # Now safe to call to_dict because tx_date will be set
+    created = [tx.to_dict() for tx in created_txs]
     db.session.commit()
 
     total_income = sum(t['amount'] for t in created if t['tx_type']=='income')
@@ -837,7 +842,6 @@ Example:
         'total_expense': total_expense,
         'count': len(created)
     })
-
 # ----------------------------------------------------------------------
 # AI full setup
 # ----------------------------------------------------------------------
