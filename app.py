@@ -1204,14 +1204,14 @@ def apply_future_expenses():
     return jsonify({'applied': applied, 'count': len(applied)}), 200
 
 # ----------------------------------------------------------------------
-# Frontend (single HTML page) – Profile with image upload & preview
+# Frontend (single HTML page) – ALL references to "Gemini"/"AI" replaced with "ML"
 # ----------------------------------------------------------------------
 HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>SmartSpend — AI Finance</title>
+<title>SmartSpend — Finance</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@300;400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
@@ -1762,7 +1762,7 @@ body::before{
       <div class="stat-card"><div class="stat-value" id="sBalance">—</div><div class="stat-label">Balance</div></div>
       <div class="stat-card neg"><div class="stat-value" id="sExpense" style="color:var(--red)">—</div><div class="stat-label">Month Expenses</div></div>
       <div class="stat-card"><div class="stat-value" id="sIncome" style="color:var(--green)">—</div><div class="stat-label">Month Income</div></div>
-      <div class="stat-card blue-glow"><div class="stat-value" id="sScore" style="color:var(--blue)">—</div><div class="stat-label">AI Health Score</div><div class="stat-sub" id="scoreLabel">awaiting data</div></div>
+      <div class="stat-card blue-glow"><div class="stat-value" id="sScore" style="color:var(--blue)">—</div><div class="stat-label">Health Score</div><div class="stat-sub" id="scoreLabel">awaiting data</div></div>
     </div>
 
     <div class="card ai-feed">
@@ -1776,7 +1776,7 @@ body::before{
     </div>
 
     <div id="financialSummaryBlock" style="display:none" class="card">
-      <div class="card-header"><span class="card-title">ML Assessment</span><span class="ai-badge">Gemini</span></div>
+      <div class="card-header"><span class="card-title">ML Assessment</span><span class="ai-badge">ML</span></div>
       <div class="financial-summary-text" id="financialSummaryText"></div>
       <div class="card-title" style="margin-bottom:12px;">Savings Target</div>
       <div class="savings-cards">
@@ -2084,7 +2084,7 @@ toggleAuth.addEventListener('click', () => {
     toggleAuth.innerHTML = 'No account? <span>Register here</span>';
   } else {
     authTitle.textContent = 'Create account';
-    authSub.textContent = 'Start your AI-powered financial journey';
+    authSub.textContent = 'Start your ML-powered financial journey';
     authBtn.textContent = 'Register';
     regName.style.display='block';
     authConfirm.style.display='block';
@@ -2263,7 +2263,7 @@ document.getElementById('addExpenseBtn').addEventListener('click', async ()=>{
     try {
       const cl = await api('/api/ai/classify_transaction', { method:'POST', body: JSON.stringify({ amount, category, note }) });
       classify = cl;
-      document.getElementById('expenseClassifyResult').innerHTML = `<div class="ai-classify-result">🤖 AI: ${classify.is_need?'Need':'Want'} · Priority ${classify.priority} · Note: ${esc(classify.suggested_note)}</div>`;
+      document.getElementById('expenseClassifyResult').innerHTML = `<div class="ai-classify-result">🤖 ML: ${classify.is_need?'Need':'Want'} · Priority ${classify.priority} · Note: ${esc(classify.suggested_note)}</div>`;
       document.getElementById('expenseClassifyResult').style.display = 'block';
     } catch(e) {}
     await api('/api/transactions', { method:'POST', body: JSON.stringify({ amount, category, tx_type: 'expense', is_need: classify.is_need, priority: classify.priority, note: classify.suggested_note||note }) });
@@ -2295,7 +2295,7 @@ function renderStats(summary, score, longevity) {
   document.getElementById('sExpense').textContent = fmt(summary.expense);
   document.getElementById('sIncome').textContent = fmt(summary.income);
   document.getElementById('sScore').textContent = score ?? '—';
-  document.getElementById('scoreLabel').textContent = score ? 'AI Health Score' : 'awaiting data';
+  document.getElementById('scoreLabel').textContent = score ? 'Health Score' : 'awaiting data';
   document.getElementById('topScore').textContent = score ?? '—';
 }
 
@@ -2323,7 +2323,7 @@ async function runAIPlan() {
   const btnContent = document.getElementById('analyzeBtnContent');
   btn.disabled = true;
   btnContent.innerHTML = '<div class="spinner"></div> Analyzing…';
-  addFeedEvent('🤖','AI is analyzing your financial profile…');
+  addFeedEvent('🤖','ML is analyzing your financial profile…');
   try {
     const result = await api('/api/ai/full_setup', {
       method:'POST',
@@ -2336,10 +2336,10 @@ async function runAIPlan() {
     addFeedEvent('🧠',`Financial summary: "${result.financial_summary.substring(0,60)}…"`);
     addFeedEvent('📋',`${result.advice.length} personalized insights ready`);
     renderAIPlan(result);
-    toast('AI plan complete! 🎉', 'var(--green)');
+    toast('ML plan complete! 🎉', 'var(--green)');
   } catch(e){
-    toast('AI error: '+e.message);
-    addFeedEvent('❌','AI error: '+e.message);
+    toast('ML error: '+e.message);
+    addFeedEvent('❌','ML error: '+e.message);
   }
   btn.disabled = false;
   btnContent.innerHTML = '🔄 Re‑Analyze';
