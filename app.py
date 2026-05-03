@@ -447,7 +447,6 @@ def update_avatar():
     db.session.commit()
     return jsonify({'avatar_url': user.avatar_url}), 200
 
-# NEW: Full profile editing
 @app.route('/api/profile', methods=['PUT'])
 @login_required
 def update_profile():
@@ -457,7 +456,6 @@ def update_profile():
     if 'name' in data:
         user.name = data['name']
     if 'email' in data:
-        # Ensure email is not taken by another user
         if User.query.filter(User.email == data['email'], User.id != user.id).first():
             return jsonify({'error': 'Email already in use'}), 400
         user.email = data['email']
@@ -530,7 +528,7 @@ def delete_transaction(tx_id):
     return jsonify({'message': 'Deleted'}), 200
 
 # ----------------------------------------------------------------------
-# Budget routes
+# Budget routes (including single update)
 # ----------------------------------------------------------------------
 @app.route('/api/budgets/<int:user_id>', methods=['GET'])
 @login_required
@@ -1198,7 +1196,7 @@ def apply_future_expenses():
     return jsonify({'applied': applied, 'count': len(applied)}), 200
 
 # ----------------------------------------------------------------------
-# Frontend (single HTML page) – FULLY UPDATED with Profile screen
+# Frontend (single HTML page) – Profile integrated into Dashboard tool picker
 # ----------------------------------------------------------------------
 HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="en">
@@ -1616,6 +1614,13 @@ body::before{
     cursor: pointer; font-size: 0.75rem; font-weight: 600;
 }
 .budget-amount { font-family: var(--font-mono); font-size: 0.8rem; color: var(--muted2); margin-left: auto; }
+/* Profile block within hero */
+.profile-block .form-group {
+    margin-bottom: 12px;
+}
+.profile-block .avatar-row {
+    display: flex; gap: 10px; align-items: center;
+}
 </style>
 </head>
 <body>
@@ -1625,7 +1630,6 @@ body::before{
   <button class="nav-item" data-nav="future"><span class="nav-icon">📌</span><span class="nav-label">Future Expenses</span></button>
   <button class="nav-item" data-nav="insights"><span class="nav-icon">📈</span><span class="nav-label">Insights</span></button>
   <button class="nav-item" data-nav="history"><span class="nav-icon">📋</span><span class="nav-label">History</span></button>
-  <button class="nav-item" data-nav="profile"><span class="nav-icon">👤</span><span class="nav-label">Profile</span></button>
   <button class="nav-item" id="adminNavBtn" data-nav="admin" style="display:none;"><span class="nav-icon">👑</span><span class="nav-label">Admin Panel</span></button>
   <div class="sidebar-sep"></div>
   <button class="nav-item" id="exportBtn"><span class="nav-icon">⬇</span><span class="nav-label">Export CSV</span></button>
@@ -1652,6 +1656,7 @@ body::before{
           <option value="manual-income">📝 Manual Income (AI Plan)</option>
           <option value="manual-expense">📝 Manual Expense (Quick Log)</option>
           <option value="auto">📸 Automatic (Image/OCR)</option>
+          <option value="profile">👤 Edit Profile</option>
         </select>
         <div style="margin-left:auto;"><span class="ai-badge">GEMINI</span></div>
       </div>
@@ -1696,9 +1701,39 @@ body::before{
       </div>
 
       <!-- OCR Upload Block -->
-      <div id="incomeImageUpload" class="income-image-upload">
+      <div id="incomeImageUpload" class="income-image-upload" style="display:none;">
         <input type="file" id="incomeImage" accept="image/*" capture="environment">
         <div class="ocr-hint">📸 Take a photo or upload a payslip / budget screenshot. AI will read all income & expenses.</div>
+      </div>
+
+      <!-- Profile Edit Block (NEW) -->
+      <div id="profileBlock" class="profile-block" style="display:none;">
+        <div style="font-size:1rem;font-weight:600;margin-bottom:16px;color:var(--green);">Edit Your Profile</div>
+        <div class="form-group">
+          <label class="form-label">Name</label>
+          <input class="form-input" id="profileName" value="">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Email</label>
+          <input class="form-input" id="profileEmail" type="email" value="">
+        </div>
+        <div class="form-group">
+          <label class="form-label">New Password (leave blank to keep current)</label>
+          <input class="form-input" id="profilePass" type="password" placeholder="●●●●●●">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Avatar URL</label>
+          <div class="avatar-row">
+            <input class="form-input" id="profileAvatar" placeholder="https://…" style="flex:1;">
+            <div class="preset-avatars" style="display:flex; gap:8px;">
+              <div class="preset-avatar" style="background:linear-gradient(135deg,#00E5A0,#009e6a);"></div>
+              <div class="preset-avatar" style="background:linear-gradient(135deg,#3B8BFF,#9B59F5);"></div>
+              <div class="preset-avatar" style="background:linear-gradient(135deg,#FF3B5C,#F5A623);"></div>
+              <div class="preset-avatar" style="background:linear-gradient(135deg,#F5A623,#FF3B5C);"></div>
+            </div>
+          </div>
+        </div>
+        <button class="btn-add" id="saveProfileBtn" style="margin-top:8px;">Save Changes</button>
       </div>
     </div>
 
@@ -1736,7 +1771,7 @@ body::before{
       <div class="alloc-grid" id="allocGrid"></div>
     </div>
 
-    <!-- BUDGET MANAGEMENT CARD -->
+    <!-- Budget Management Card -->
     <div id="budgetBlock" style="display:none" class="card">
       <div class="card-header"><span class="card-title">Manage Budgets</span></div>
       <div id="budgetList"></div>
@@ -1815,30 +1850,6 @@ body::before{
         </div>
         <div class="tx-list" id="historyList"></div>
       </div>
-    </div>
-  </div>
-
-  <!-- PROFILE SCREEN -->
-  <div class="screen" id="screen-profile">
-    <div class="card">
-      <div class="card-header"><span class="card-title">Your Profile</span></div>
-      <div class="form-group" style="margin-bottom:12px;">
-        <label class="form-label">Name</label>
-        <input class="form-input" id="profileName" value="">
-      </div>
-      <div class="form-group" style="margin-bottom:12px;">
-        <label class="form-label">Email</label>
-        <input class="form-input" id="profileEmail" type="email" value="">
-      </div>
-      <div class="form-group" style="margin-bottom:12px;">
-        <label class="form-label">New Password (leave blank to keep current)</label>
-        <input class="form-input" id="profilePass" type="password" placeholder="●●●●●●">
-      </div>
-      <div class="form-group" style="margin-bottom:12px;">
-        <label class="form-label">Avatar URL</label>
-        <input class="form-input" id="profileAvatar" placeholder="https://…">
-      </div>
-      <button class="btn-add" id="saveProfileBtn" style="margin-top:8px;">Save Changes</button>
     </div>
   </div>
 
@@ -2125,7 +2136,6 @@ document.querySelectorAll('.nav-item[data-nav]').forEach(btn => {
     else if(nav==='insights') loadInsights();
     else if(nav==='future') loadFutureExpenses();
     else if(nav==='history') loadHistory();
-    else if(nav==='profile') loadProfile();
     else if(nav==='admin') loadAdmin();
   });
 });
@@ -2173,6 +2183,7 @@ async function initApp() {
   });
 })();
 
+// Save avatar URL
 document.getElementById('saveAvatarBtn').addEventListener('click', async () => {
   const url = document.getElementById('avatarUrlInput').value.trim();
   try {
@@ -2194,6 +2205,7 @@ document.getElementById('saveAvatarBtn').addEventListener('click', async () => {
   document.getElementById('avatarDropdown').style.display = 'none';
 });
 
+// Preset avatar clicks
 document.querySelectorAll('.preset-avatar').forEach(el => {
   el.addEventListener('click', () => {
     const bg = el.style.background;
@@ -2205,6 +2217,9 @@ document.querySelectorAll('.preset-avatar').forEach(el => {
     ctx.fillRect(0,0,100,100);
     const dataUrl = canvas.toDataURL('image/png');
     document.getElementById('avatarUrlInput').value = dataUrl;
+    // also set the profile avatar input if visible
+    const profAvatar = document.getElementById('profileAvatar');
+    if (profAvatar) profAvatar.value = dataUrl;
   });
 });
 
@@ -2214,6 +2229,15 @@ document.getElementById('incomeTool').addEventListener('change', function(){
   document.getElementById('manualIncomeBlock').style.display = (val === 'manual-income') ? 'block' : 'none';
   document.getElementById('manualExpenseBlock').style.display = (val === 'manual-expense') ? 'block' : 'none';
   document.getElementById('incomeImageUpload').style.display = (val === 'auto') ? 'block' : 'none';
+  document.getElementById('profileBlock').style.display = (val === 'profile') ? 'block' : 'none';
+
+  // prefill profile fields when showing
+  if (val === 'profile' && currentUser) {
+    document.getElementById('profileName').value = currentUser.name || '';
+    document.getElementById('profileEmail').value = currentUser.email || '';
+    document.getElementById('profilePass').value = '';
+    document.getElementById('profileAvatar').value = currentUser.avatar_url || '';
+  }
 });
 
 // ── MANUAL EXPENSE LOGIC ──
@@ -2629,15 +2653,7 @@ async function deleteTransaction(id) {
   } catch(e) { toast(e.message); }
 }
 
-// ── PROFILE SCREEN ──
-function loadProfile() {
-  if (!currentUser) return;
-  document.getElementById('profileName').value = currentUser.name || '';
-  document.getElementById('profileEmail').value = currentUser.email || '';
-  document.getElementById('profilePass').value = '';
-  document.getElementById('profileAvatar').value = currentUser.avatar_url || '';
-}
-
+// ── PROFILE SAVE (integrated in dashboard) ──
 document.getElementById('saveProfileBtn').addEventListener('click', async () => {
   const name = document.getElementById('profileName').value.trim();
   const email = document.getElementById('profileEmail').value.trim();
