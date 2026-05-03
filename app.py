@@ -1777,21 +1777,23 @@ body::before{
     </div>
   </div>
 
-  <!-- HISTORY SCREEN -->
+  <!-- HISTORY SCREEN (MODIFIED) -->
   <div class="screen" id="screen-history">
     <div class="card">
       <div class="card-header">
         <span class="card-title">Transaction History</span>
-        <div style="display:flex;gap:8px;">
+        <button class="btn btn-primary" id="toggleHistoryViewBtn" style="font-size:0.8rem;padding:8px 14px;">🙈 Hide History</button>
+      </div>
+      <!-- Container that wraps search, badge toggle, and the list – this will be shown/hidden -->
+      <div id="historyContent">
+        <div style="display:flex; gap:8px; margin-bottom:12px; align-items:center;">
           <input class="form-input" id="historySearch" placeholder="Search…" style="width:180px;padding:8px 12px;font-size:0.82rem;">
+          <label style="font-size:0.78rem; color:var(--muted2); display:flex; align-items:center; gap:6px;">
+            <input type="checkbox" id="showNeedWantBadges" checked> Show Need/Want badges
+          </label>
         </div>
+        <div class="tx-list" id="historyList"></div>
       </div>
-      <!-- TOGGLE TO SHOW/HIDE NEED/WANT BADGES -->
-      <div style="display:flex; align-items:center; gap:8px; margin-bottom:12px;">
-        <input type="checkbox" id="showNeedWantBadges" checked>
-        <label for="showNeedWantBadges" style="font-size:0.78rem; color:var(--muted2);">Show Need/Want badges</label>
-      </div>
-      <div class="tx-list" id="historyList"></div>
     </div>
   </div>
 
@@ -1881,6 +1883,7 @@ let currentMindset = 'Neutral';
 let aiPlan = null;
 let trendChart = null, catChartInst = null;
 let isLogin = true;
+let historyVisible = true;   // NEW: track visibility of history content
 
 const CAT_ICONS = {
   'Food & Dining':'🍜','Transport':'🚗','Groceries':'🛒','Entertainment':'🎬',
@@ -2475,7 +2478,7 @@ function renderCategoryChart(categories) {
   });
 }
 
-// ── HISTORY ──
+// ── HISTORY ── (MODIFIED)
 async function loadHistory() {
   if(!currentUser) return;
   try {
@@ -2510,6 +2513,20 @@ document.getElementById('historySearch').addEventListener('input', ()=> renderHi
 // Toggle badge visibility
 document.getElementById('showNeedWantBadges').addEventListener('change', ()=> {
   renderHistory(allTransactions);
+});
+
+// NEW: Toggle entire history content
+document.getElementById('toggleHistoryViewBtn').addEventListener('click', () => {
+  const content = document.getElementById('historyContent');
+  const btn = document.getElementById('toggleHistoryViewBtn');
+  historyVisible = !historyVisible;
+  if (historyVisible) {
+    content.style.display = 'block';
+    btn.textContent = '🙈 Hide History';
+  } else {
+    content.style.display = 'none';
+    btn.textContent = '👁 Show History';
+  }
 });
 
 async function deleteTransaction(id) {
@@ -2666,7 +2683,6 @@ async function sendChat() {
 </body>
 </html>
 """
-
 @app.route('/')
 def index():
     return HTML_PAGE
