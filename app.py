@@ -503,7 +503,7 @@ def delete_transaction(tx_id):
     return jsonify({'message': 'Deleted'}), 200
 
 # ----------------------------------------------------------------------
-# Budget routes (existing GET + POST, plus new PUT for single budget)
+# Budget routes
 # ----------------------------------------------------------------------
 @app.route('/api/budgets/<int:user_id>', methods=['GET'])
 @login_required
@@ -552,7 +552,6 @@ def update_single_budget(user_id, category):
 
 # ----------------------------------------------------------------------
 # Summary, Predict, Longevity, Future expenses, Allocations, Export
-# (unchanged except for future expenses handling)
 # ----------------------------------------------------------------------
 @app.route('/api/summary/<int:user_id>')
 @login_required
@@ -660,7 +659,6 @@ def export_csv():
 
 # ----------------------------------------------------------------------
 # ADMIN API ROUTES
-# (unchanged)
 # ----------------------------------------------------------------------
 @app.route('/api/admin/stats', methods=['GET'])
 @admin_required
@@ -748,7 +746,6 @@ def admin_future_expenses(user_id):
 
 # ----------------------------------------------------------------------
 # OCR endpoint
-# (unchanged)
 # ----------------------------------------------------------------------
 @app.route('/api/ocr_income', methods=['POST'])
 @login_required
@@ -894,7 +891,6 @@ Example:
 
 # ----------------------------------------------------------------------
 # AI full setup
-# (unchanged)
 # ----------------------------------------------------------------------
 @app.route('/api/ai/full_setup', methods=['POST'])
 @login_required
@@ -1175,8 +1171,7 @@ def apply_future_expenses():
     return jsonify({'applied': applied, 'count': len(applied)}), 200
 
 # ----------------------------------------------------------------------
-# Frontend (single HTML page) – UPDATED with budget section
-# (Only changed parts shown; full HTML kept identical otherwise)
+# Frontend (single HTML page) – FULLY UPDATED
 # ----------------------------------------------------------------------
 HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="en">
@@ -1577,7 +1572,6 @@ body::before{
 .scenario-val {
   font-family:var(--font-mono); font-size:0.75rem; color:var(--text2); width:90px; text-align:right; flex-shrink:0;
 }
-/* NEW BUDGET CARD STYLES */
 .budget-item {
     display: flex; align-items: center; gap: 12px;
     background: var(--bg3); border-radius: 10px; padding: 10px 14px;
@@ -1883,7 +1877,7 @@ let currentMindset = 'Neutral';
 let aiPlan = null;
 let trendChart = null, catChartInst = null;
 let isLogin = true;
-let historyVisible = true;   // NEW: track visibility of history content
+let historyVisible = true;
 
 const CAT_ICONS = {
   'Food & Dining':'🍜','Transport':'🚗','Groceries':'🛒','Entertainment':'🎬',
@@ -1929,7 +1923,7 @@ async function api(url, opts={}){
   return res.json();
 }
 
-// ── RENDER CHECKLIST (MISSING FUNCTION RESTORED) ──
+// ── RENDER CHECKLIST ──
 function renderChecklist() {
   const needsCont = document.getElementById('needsChecklist');
   const wantsCont = document.getElementById('wantsChecklist');
@@ -2101,7 +2095,7 @@ async function initApp() {
   }
   if(currentUser.role === 'admin') document.getElementById('adminNavBtn').style.display = 'flex';
   else document.getElementById('adminNavBtn').style.display = 'none';
-  renderChecklist(); // ← ensure checkboxes appear
+  renderChecklist();
   loadDashboard();
 }
 
@@ -2127,7 +2121,6 @@ async function initApp() {
   });
 })();
 
-// Save avatar URL
 document.getElementById('saveAvatarBtn').addEventListener('click', async () => {
   const url = document.getElementById('avatarUrlInput').value.trim();
   try {
@@ -2149,7 +2142,6 @@ document.getElementById('saveAvatarBtn').addEventListener('click', async () => {
   document.getElementById('avatarDropdown').style.display = 'none';
 });
 
-// Preset avatar clicks
 document.querySelectorAll('.preset-avatar').forEach(el => {
   el.addEventListener('click', () => {
     const bg = el.style.background;
@@ -2294,13 +2286,11 @@ function renderAIPlan(plan) {
       <div><div class="advice-title">${esc(a.title)}</div><div class="advice-body">${esc(a.body)}</div></div>
     </div>`).join('');
 
-  // Hide the three big cards initially
   const blocks = ['financialSummaryBlock', 'allocationBlock', 'adviceBlock'];
   blocks.forEach(id => {
     document.getElementById(id).style.display = 'none';
   });
 
-  // Show the toggle button
   const toggleBtn = document.getElementById('showPlanToggle');
   const togglePlanBtn = document.getElementById('togglePlanBtn');
   toggleBtn.style.display = 'block';
@@ -2314,7 +2304,6 @@ function renderAIPlan(plan) {
     togglePlanBtn.textContent = detailsVisible ? '🔽 Hide Plan Details' : '📊 Show Plan Details';
   };
 
-  // Load budgets after AI plan
   loadBudgets();
 }
 
@@ -2562,12 +2551,10 @@ function renderHistory(txs) {
 
 document.getElementById('historySearch').addEventListener('input', ()=> renderHistory(allTransactions));
 
-// Toggle badge visibility
 document.getElementById('showNeedWantBadges').addEventListener('change', ()=> {
   renderHistory(allTransactions);
 });
 
-// Toggle whole history content
 document.getElementById('toggleHistoryViewBtn').addEventListener('click', () => {
   const content = document.getElementById('historyContent');
   const btn = document.getElementById('toggleHistoryViewBtn');
@@ -2735,6 +2722,7 @@ async function sendChat() {
 </body>
 </html>
 """
+
 @app.route('/')
 def index():
     return HTML_PAGE
