@@ -1658,15 +1658,15 @@ body::before{
   <!-- DASHBOARD SCREEN -->
   <div class="screen active" id="screen-dashboard">
     <div class="income-hero">
-      <div class="income-label">Monthly Income & Expenses — Tell AI, it handles the rest</div>
+      <div class="income-label">Monthly Income & Expenses — Tell ML, it handles the rest</div>
       <div class="income-tool-row">
         <select id="incomeTool" class="tool-picker">
-          <option value="manual-income">📝 Manual Income (AI Plan)</option>
+          <option value="manual-income">📝 Manual Income (ML Plan)</option>
           <option value="manual-expense">📝 Manual Expense (Quick Log)</option>
           <option value="auto">📸 Automatic (Image/OCR)</option>
           <option value="profile">👤 Edit Profile</option>
         </select>
-        <div style="margin-left:auto;"><span class="ai-badge">GEMINI</span></div>
+        <div style="margin-left:auto;"><span class="ai-badge">ML</span></div>
       </div>
 
       <!-- Manual Income Mode -->
@@ -1682,11 +1682,11 @@ body::before{
           <button class="mindset-btn" data-mindset="Spender">🛍️ Spender</button>
         </div>
         <div class="ai-checklist">
-          <div style="font-weight:600;margin-bottom:12px;">🧠 AI Autonomous Allocation (100% Sum Rule)</div>
+          <div style="font-weight:600;margin-bottom:12px;">🧠 ML Autonomous Allocation (100% Sum Rule)</div>
           <div class="checklist-section"><div class="checklist-section-title">Needs ▼</div><div id="needsChecklist" class="checklist-item"></div></div>
           <div class="checklist-section"><div class="checklist-section-title">Wants ▼</div><div id="wantsChecklist" class="checklist-item"></div></div>
-          <div id="totalWarning" class="total-warning" style="display:none;">⚠️ Total allocation must be 100% – AI will normalise.</div>
-          <div style="margin-top:12px;"><button class="btn-analyze" id="analyzeBtn"><span id="analyzeBtnContent">🤖 Let AI Plan</span></button></div>
+          <div id="totalWarning" class="total-warning" style="display:none;">⚠️ Total allocation must be 100% – ML will normalise.</div>
+          <div style="margin-top:12px;"><button class="btn-analyze" id="analyzeBtn"><span id="analyzeBtnContent">🤖 Let ML Plan</span></button></div>
           <div id="needsWantsSummary" style="margin-top:12px;font-size:0.8rem;color:var(--text2);"></div>
         </div>
       </div>
@@ -1711,7 +1711,7 @@ body::before{
       <!-- OCR Upload Block -->
       <div id="incomeImageUpload" class="income-image-upload" style="display:none;">
         <input type="file" id="incomeImage" accept="image/*" capture="environment">
-        <div class="ocr-hint">📸 Take a photo or upload a payslip / budget screenshot. AI will read all income & expenses.</div>
+        <div class="ocr-hint">📸 Take a photo or upload a payslip / budget screenshot. ML will read all income & expenses.</div>
       </div>
 
       <!-- Profile Edit Block (UPDATED) -->
@@ -1766,8 +1766,8 @@ body::before{
     </div>
 
     <div class="card ai-feed">
-      <div class="ai-feed-header"><div class="ai-pulse"></div><div class="ai-feed-title">AI Activity Feed</div><div class="ai-badge" style="margin-left:auto;">GEMINI</div></div>
-      <div id="aiFeed"><div class="empty-state"><div class="empty-state-icon">🤖</div><div class="empty-state-text">Enter your income above and click<br><strong style="color:var(--green)">Let AI Plan</strong> — Gemini will build your entire financial plan automatically.</div></div></div>
+      <div class="ai-feed-header"><div class="ai-pulse"></div><div class="ai-feed-title">ML Activity Feed</div><div class="ai-badge" style="margin-left:auto;">SMART</div></div>
+      <div id="aiFeed"><div class="empty-state"><div class="empty-state-icon">🤖</div><div class="empty-state-text">Enter your income above and click<br><strong style="color:var(--green)">Let ML Plan</strong> — SmartSpend will build your entire financial plan automatically.</div></div></div>
     </div>
 
     <!-- Show Plan Details Toggle -->
@@ -1776,7 +1776,7 @@ body::before{
     </div>
 
     <div id="financialSummaryBlock" style="display:none" class="card">
-      <div class="card-header"><span class="card-title">AI Assessment</span><span class="ai-badge">Gemini</span></div>
+      <div class="card-header"><span class="card-title">ML Assessment</span><span class="ai-badge">Gemini</span></div>
       <div class="financial-summary-text" id="financialSummaryText"></div>
       <div class="card-title" style="margin-bottom:12px;">Savings Target</div>
       <div class="savings-cards">
@@ -1788,7 +1788,7 @@ body::before{
     </div>
 
     <div id="allocationBlock" style="display:none" class="card">
-      <div class="card-header"><span class="card-title">AI Budget Allocation</span><span class="ai-badge">100% Autonomous</span></div>
+      <div class="card-header"><span class="card-title">ML Budget Allocation</span><span class="ai-badge">100% Autonomous</span></div>
       <div class="alloc-grid" id="allocGrid"></div>
     </div>
 
@@ -1799,7 +1799,7 @@ body::before{
     </div>
 
     <div id="adviceBlock" style="display:none" class="card">
-      <div class="card-header"><span class="card-title">AI Insights</span></div>
+      <div class="card-header"><span class="card-title">ML Insights</span></div>
       <div class="advice-list" id="adviceList"></div>
     </div>
 
