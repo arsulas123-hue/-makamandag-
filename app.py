@@ -1082,7 +1082,9 @@ def apply_future_expenses():
     db.session.commit()
     return jsonify({'applied': applied, 'count': len(applied)}), 200
 
-
+# ----------------------------------------------------------------------
+# Frontend (single HTML page)
+# ----------------------------------------------------------------------
 HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2380,6 +2382,13 @@ async function sendChat() {
 </html>
 """
 
+@app.route('/')
+def index():
+    return HTML_PAGE
+
+# ----------------------------------------------------------------------
+# Initialize DB
+# ----------------------------------------------------------------------
 with app.app_context():
     db.create_all()
     ensure_schema()
