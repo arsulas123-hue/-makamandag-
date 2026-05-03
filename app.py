@@ -1196,7 +1196,7 @@ def apply_future_expenses():
     return jsonify({'applied': applied, 'count': len(applied)}), 200
 
 # ----------------------------------------------------------------------
-# Frontend (single HTML page) – Profile integrated into Dashboard tool picker
+# Frontend (single HTML page) – Profile with image upload & preview
 # ----------------------------------------------------------------------
 HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="en">
@@ -1706,7 +1706,7 @@ body::before{
         <div class="ocr-hint">📸 Take a photo or upload a payslip / budget screenshot. AI will read all income & expenses.</div>
       </div>
 
-      <!-- Profile Edit Block (NEW) -->
+      <!-- Profile Edit Block (UPDATED) -->
       <div id="profileBlock" class="profile-block" style="display:none;">
         <div style="font-size:1rem;font-weight:600;margin-bottom:16px;color:var(--green);">Edit Your Profile</div>
         <div class="form-group">
@@ -1722,14 +1722,27 @@ body::before{
           <input class="form-input" id="profilePass" type="password" placeholder="●●●●●●">
         </div>
         <div class="form-group">
-          <label class="form-label">Avatar URL</label>
-          <div class="avatar-row">
-            <input class="form-input" id="profileAvatar" placeholder="https://…" style="flex:1;">
-            <div class="preset-avatars" style="display:flex; gap:8px;">
-              <div class="preset-avatar" style="background:linear-gradient(135deg,#00E5A0,#009e6a);"></div>
-              <div class="preset-avatar" style="background:linear-gradient(135deg,#3B8BFF,#9B59F5);"></div>
-              <div class="preset-avatar" style="background:linear-gradient(135deg,#FF3B5C,#F5A623);"></div>
-              <div class="preset-avatar" style="background:linear-gradient(135deg,#F5A623,#FF3B5C);"></div>
+          <label class="form-label">Profile Picture</label>
+          <div style="display:flex; gap:20px; align-items:flex-start;">
+            <!-- Left: Preview -->
+            <div style="flex:0 0 100px; height:100px; border-radius:16px; background:var(--bg3); display:flex; align-items:center; justify-content:center; overflow:hidden; border:2px dashed var(--border);">
+              <img id="profilePreviewImg" src="" style="width:100%; height:100%; object-fit:cover; display:none;">
+              <span id="profilePreviewPlaceholder" style="font-size:2rem; color:var(--muted);">👤</span>
+            </div>
+            <!-- Right: Upload + URL -->
+            <div style="flex:1; display:flex; flex-direction:column; gap:10px;">
+              <label class="btn" style="display:inline-block; width:fit-content; cursor:pointer; font-size:0.8rem; padding:6px 14px;">
+                📁 Upload Photo
+                <input type="file" id="profileFileInput" accept="image/*" style="display:none;">
+              </label>
+              <span style="font-size:0.7rem; color:var(--muted2);">or paste a URL below</span>
+              <input class="form-input" id="profileAvatar" placeholder="https://example.com/photo.jpg" style="margin-top:4px;">
+              <div class="preset-avatars" style="display:flex; gap:8px; margin-top:4px;">
+                <div class="preset-avatar" style="background:linear-gradient(135deg,#00E5A0,#009e6a);" data-url="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect width='100' height='100' fill='%2300E5A0'/%3E%3C/svg%3E" title="Green"></div>
+                <div class="preset-avatar" style="background:linear-gradient(135deg,#3B8BFF,#9B59F5);" data-url="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect width='100' height='100' fill='%233B8BFF'/%3E%3C/svg%3E" title="Blue"></div>
+                <div class="preset-avatar" style="background:linear-gradient(135deg,#FF3B5C,#F5A623);" data-url="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect width='100' height='100' fill='%23FF3B5C'/%3E%3C/svg%3E" title="Red"></div>
+                <div class="preset-avatar" style="background:linear-gradient(135deg,#F5A623,#FF3B5C);" data-url="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect width='100' height='100' fill='%23F5A623'/%3E%3C/svg%3E" title="Orange"></div>
+              </div>
             </div>
           </div>
         </div>
@@ -2205,24 +2218,6 @@ document.getElementById('saveAvatarBtn').addEventListener('click', async () => {
   document.getElementById('avatarDropdown').style.display = 'none';
 });
 
-// Preset avatar clicks
-document.querySelectorAll('.preset-avatar').forEach(el => {
-  el.addEventListener('click', () => {
-    const bg = el.style.background;
-    const color = bg.match(/#[0-9A-Fa-f]{6}/)?.[0] || '#00E5A0';
-    const canvas = document.createElement('canvas');
-    canvas.width = 100; canvas.height = 100;
-    const ctx = canvas.getContext('2d');
-    ctx.fillStyle = color;
-    ctx.fillRect(0,0,100,100);
-    const dataUrl = canvas.toDataURL('image/png');
-    document.getElementById('avatarUrlInput').value = dataUrl;
-    // also set the profile avatar input if visible
-    const profAvatar = document.getElementById('profileAvatar');
-    if (profAvatar) profAvatar.value = dataUrl;
-  });
-});
-
 // ── TOOL PICKER TOGGLES ──
 document.getElementById('incomeTool').addEventListener('change', function(){
   const val = this.value;
@@ -2237,6 +2232,15 @@ document.getElementById('incomeTool').addEventListener('change', function(){
     document.getElementById('profileEmail').value = currentUser.email || '';
     document.getElementById('profilePass').value = '';
     document.getElementById('profileAvatar').value = currentUser.avatar_url || '';
+    // Update preview
+    if (currentUser.avatar_url) {
+      document.getElementById('profilePreviewImg').src = currentUser.avatar_url;
+      document.getElementById('profilePreviewImg').style.display = 'block';
+      document.getElementById('profilePreviewPlaceholder').style.display = 'none';
+    } else {
+      document.getElementById('profilePreviewImg').style.display = 'none';
+      document.getElementById('profilePreviewPlaceholder').style.display = 'block';
+    }
   }
 });
 
@@ -2653,7 +2657,54 @@ async function deleteTransaction(id) {
   } catch(e) { toast(e.message); }
 }
 
-// ── PROFILE SAVE (integrated in dashboard) ──
+// ── PROFILE PREVIEW & UPLOAD HANDLING ──
+
+// Update preview when URL changes
+document.getElementById('profileAvatar').addEventListener('input', function() {
+  const url = this.value.trim();
+  const previewImg = document.getElementById('profilePreviewImg');
+  const placeholder = document.getElementById('profilePreviewPlaceholder');
+  if (url) {
+    previewImg.src = url;
+    previewImg.onerror = () => {
+      previewImg.style.display = 'none';
+      placeholder.style.display = 'block';
+    };
+    previewImg.onload = () => {
+      previewImg.style.display = 'block';
+      placeholder.style.display = 'none';
+    };
+    previewImg.src = url; // trigger load
+  } else {
+    previewImg.style.display = 'none';
+    placeholder.style.display = 'block';
+  }
+});
+
+// File upload handler
+document.getElementById('profileFileInput').addEventListener('change', function(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function(ev) {
+    const dataUrl = ev.target.result;
+    document.getElementById('profileAvatar').value = dataUrl;
+    // Trigger preview update
+    document.getElementById('profileAvatar').dispatchEvent(new Event('input'));
+  };
+  reader.readAsDataURL(file);
+});
+
+// Preset avatar clicks for the profile block
+document.querySelectorAll('#profileBlock .preset-avatar').forEach(el => {
+  el.addEventListener('click', () => {
+    const dataUrl = el.dataset.url;
+    document.getElementById('profileAvatar').value = dataUrl;
+    document.getElementById('profileAvatar').dispatchEvent(new Event('input'));
+  });
+});
+
+// ── PROFILE SAVE ──
 document.getElementById('saveProfileBtn').addEventListener('click', async () => {
   const name = document.getElementById('profileName').value.trim();
   const email = document.getElementById('profileEmail').value.trim();
