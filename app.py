@@ -3,6 +3,7 @@ import csv
 import io
 import os
 import requests
+import base64
 import google.generativeai as genai
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
@@ -667,35 +668,131 @@ def admin_future_expenses(user_id):
 # ----------------------------------------------------------------------
 # OCR endpoint (optional, for automatic income extraction)
 # ----------------------------------------------------------------------
+import base64
+
 @app.route('/api/ocr_income', methods=['POST'])
 @login_required
 def ocr_income():
-    """Receive an image, extract a money amount using simple OCR (stub)."""
+    """Receive a budget/payslip image and auto‑create transactions using Gemini Vision."""
+    user = get_current_user()
     if 'image' not in request.files:
-        return jsonify({'error': 'No image file provided'}), 400
+        return jsonify({'error': 'No image file'}), 400
     file = request.files['image']
     if file.filename == '':
         return jsonify({'error': 'Empty filename'}), 400
-    # For a real implementation, use pytesseract or Google Vision.
-    # This stub simulates extraction from the filename or returns a fixed amount.
-    # In production, replace with actual OCR.
-    # Example: run tesseract on the image, then regex for ₱ or numbers.
-    # For now, we return a dummy value.
-    # You can later implement a proper OCR using pytesseract (needs installation).
+
+    # Read and encode the image
+    image_bytes = file.read()
+    b64_image = base64.b64encode(image_bytes).decode('utf-8')
+
+    # Build the prompt asking for structured extraction
+    prompt = """You are an AI that reads Filipino budget or payslip images.
+Extract ALL income items and ALL expense items from the image.
+For each item, provide:
+- type: "income" or "expense"
+- amount: number (no currency symbols)
+- category: use one of these exact categories: Food & Dining, Transport, Groceries, Health, Entertainment, Debt repayment, Mortgage, Subscription, Hobbies, Salary, Savings, Other
+- note: a short description (e.g., "Rent", "Side hustle")
+
+Return ONLY a JSON array of objects, like:
+[
+  {"type":"income","amount":1150,"category":"Salary","note":"Paycheck #1"},
+  {"type":"expense","amount":1200,"category":"Mortgage","note":"Rent"}
+]
+No extra text, no markdown. Do not wrap in a JSON code block."""
+
+    # Try Gemini Vision models (flash first, then pro)
+    vision_models = ["gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"]
+    raw = None
+    for model_name in vision_models:
+        try:
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(
+                [{'mime_type': 'image/png', 'data': b64_image}, prompt]
+            )
+            if response and response.text:
+                raw = response.text.strip()
+                print(f"✅ Vision extraction with {model_name}")
+                break
+        except Exception as e:
+            print(f"Vision model {model_name} failed: {e}")
+
+    # Fallback: try OpenRouter with a vision-capable free model
+    if raw is None and OPENROUTER_API_KEY:
+        try:
+            resp = requests.post(
+                OPENROUTER_URL,
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "google/gemini-2.0-flash-001",  # Vision capable
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_image}"}}
+                            ]
+                        }
+                    ],
+                    "max_tokens": 800
+                },
+                timeout=30
+            )
+            if resp.status_code == 200:
+                raw = resp.json()["choices"][0]["message"]["content"].strip()
+                print("✅ Vision extraction via OpenRouter")
+        except Exception as e:
+            print("OpenRouter vision failed:", e)
+
+    if not raw:
+        return jsonify({'error': 'Could not extract transactions from image'}), 500
+
+    # Parse the JSON list
     try:
-        # Dummy extraction – you would replace with real OCR logic
-        # For demonstration, we look for a number in the filename
-        import re
-        numbers = re.findall(r'\d+', file.filename)
-        if numbers:
-            amount = float(numbers[0])
-        else:
-            amount = 25000.00  # fallback
-        return jsonify({'amount': amount, 'source': 'stub_ocr'})
+        if raw.startswith('```'):
+            raw = raw.split('```')[1]
+            if raw.startswith('json'):
+                raw = raw[4:]
+        items = json.loads(raw.strip())
     except Exception as e:
-        return jsonify({'error': f'OCR failed: {str(e)}'}), 500
+        return jsonify({'error': f'Failed to parse AI output: {str(e)}'}), 500
 
+    # Create transactions
+    created = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        amount = abs(float(item.get('amount', 0)))
+        tx_type = item.get('type', 'expense')
+        category = item.get('category', 'Other')
+        note = item.get('note', '')
+        # Auto‑classify need/want
+        needs = {'Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage'}
+        is_need = category in needs
+        tx = Transaction(
+            user_id=user.id,
+            amount=amount,
+            category=category,
+            tx_type=tx_type,
+            is_need=is_need,
+            priority=2 if is_need else 1,
+            note=note
+        )
+        db.session.add(tx)
+        created.append(tx.to_dict())
+    db.session.commit()
 
+    total_income = sum(t['amount'] for t in created if t['tx_type']=='income')
+    total_expense = sum(t['amount'] for t in created if t['tx_type']=='expense')
+    return jsonify({
+        'transactions': created,
+        'total_income': total_income,
+        'total_expense': total_expense,
+        'count': len(created)
+    })
 # ----------------------------------------------------------------------
 # AI routes (updated)
 # ----------------------------------------------------------------------
@@ -1975,8 +2072,12 @@ document.getElementById('incomeImage').addEventListener('change', async function
     formData.append('image', file);
     const resp = await fetch('/api/ocr_income', { method:'POST', body: formData, credentials:'include' });
     const data = await resp.json();
-    if(data.amount) document.getElementById('incomeInput').value = data.amount;
-    toast(`OCR detected: ${fmt(data.amount)}`);
+    if(data.transactions){
+      toast(`Extracted ${data.count} transactions (Income: ${fmt(data.total_income)}, Expenses: ${fmt(data.total_expense)})`);
+      loadDashboard(); // refresh everything
+    } else if(data.amount){
+      document.getElementById('incomeInput').value = data.amount; // legacy fallback
+    }
   } catch(e) { toast('OCR failed: '+e.message); }
 });
 
