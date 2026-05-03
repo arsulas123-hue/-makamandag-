@@ -668,12 +668,10 @@ def admin_future_expenses(user_id):
 # ----------------------------------------------------------------------
 # OCR endpoint (optional, for automatic income extraction)
 # ----------------------------------------------------------------------
-import base64
 
 @app.route('/api/ocr_income', methods=['POST'])
 @login_required
 def ocr_income():
-    """Receive a budget/payslip image and auto‑create transactions using Gemini Vision."""
     user = get_current_user()
     if 'image' not in request.files:
         return jsonify({'error': 'No image file'}), 400
@@ -681,44 +679,24 @@ def ocr_income():
     if file.filename == '':
         return jsonify({'error': 'Empty filename'}), 400
 
-    # Read and encode the image
     image_bytes = file.read()
     b64_image = base64.b64encode(image_bytes).decode('utf-8')
 
-    # Build the prompt asking for structured extraction
-    prompt = """You are an AI that reads Filipino budget or payslip images.
-Extract ALL income items and ALL expense items from the image.
-For each item, provide:
+    prompt = """You are a budget OCR AI. Extract all income and expense items from the image.
+Return ONLY a JSON array of objects. Each object must have:
 - type: "income" or "expense"
 - amount: number (no currency symbols)
-- category: use one of these exact categories: Food & Dining, Transport, Groceries, Health, Entertainment, Debt repayment, Mortgage, Subscription, Hobbies, Salary, Savings, Other
-- note: a short description (e.g., "Rent", "Side hustle")
+- category: one of: Food & Dining, Transport, Groceries, Health, Entertainment, Debt repayment, Mortgage, Subscription, Hobbies, Salary, Savings, Other
+- note: short description (e.g., "Paycheck #1")
 
-Return ONLY a JSON array of objects, like:
-[
-  {"type":"income","amount":1150,"category":"Salary","note":"Paycheck #1"},
-  {"type":"expense","amount":1200,"category":"Mortgage","note":"Rent"}
-]
-No extra text, no markdown. Do not wrap in a JSON code block."""
+Do NOT wrap in markdown. Do NOT add any text before or after the JSON array.
+Example:
+[{"type":"income","amount":1150,"category":"Salary","note":"Paycheck #1"}]"""
 
-    # Try Gemini Vision models (flash first, then pro)
-    vision_models = ["gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"]
     raw = None
-    for model_name in vision_models:
-        try:
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content(
-                [{'mime_type': 'image/png', 'data': b64_image}, prompt]
-            )
-            if response and response.text:
-                raw = response.text.strip()
-                print(f"✅ Vision extraction with {model_name}")
-                break
-        except Exception as e:
-            print(f"Vision model {model_name} failed: {e}")
 
-    # Fallback: try OpenRouter with a vision-capable free model
-    if raw is None and OPENROUTER_API_KEY:
+    # Try OpenRouter first (more reliable for vision)
+    if OPENROUTER_API_KEY:
         try:
             resp = requests.post(
                 OPENROUTER_URL,
@@ -727,7 +705,7 @@ No extra text, no markdown. Do not wrap in a JSON code block."""
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": "google/gemini-2.0-flash-001",  # Vision capable
+                    "model": "google/gemini-2.0-flash-001",
                     "messages": [
                         {
                             "role": "user",
@@ -737,7 +715,7 @@ No extra text, no markdown. Do not wrap in a JSON code block."""
                             ]
                         }
                     ],
-                    "max_tokens": 800
+                    "max_tokens": 1000
                 },
                 timeout=30
             )
@@ -747,18 +725,50 @@ No extra text, no markdown. Do not wrap in a JSON code block."""
         except Exception as e:
             print("OpenRouter vision failed:", e)
 
+    # Fallback to Gemini Vision (only if no raw yet)
+    if raw is None:
+        vision_models = ["gemini-2.0-flash"]
+        for model_name in vision_models:
+            try:
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(
+                    [{'mime_type': 'image/png', 'data': b64_image}, prompt]
+                )
+                if response and response.text:
+                    raw = response.text.strip()
+                    print(f"✅ Vision extraction with {model_name}")
+                    break
+            except Exception as e:
+                print(f"Vision model {model_name} failed: {e}")
+
     if not raw:
         return jsonify({'error': 'Could not extract transactions from image'}), 500
 
-    # Parse the JSON list
+    # --- Robust JSON extraction ---
+    items = None
     try:
-        if raw.startswith('```'):
-            raw = raw.split('```')[1]
-            if raw.startswith('json'):
-                raw = raw[4:]
-        items = json.loads(raw.strip())
-    except Exception as e:
-        return jsonify({'error': f'Failed to parse AI output: {str(e)}'}), 500
+        # 1. Strip markdown code fences
+        cleaned = raw.strip()
+        if cleaned.startswith('```'):
+            cleaned = cleaned.split('```')[1]
+            if cleaned.startswith('json'):
+                cleaned = cleaned[4:]
+        cleaned = cleaned.strip()
+        # 2. Try direct parse
+        items = json.loads(cleaned)
+        if not isinstance(items, list):
+            items = None
+    except Exception:
+        # 3. Try to find JSON array with regex
+        try:
+            match = re.search(r'\[.*\]', raw, re.DOTALL)
+            if match:
+                items = json.loads(match.group(0))
+        except Exception:
+            items = None
+
+    if not items:
+        return jsonify({'error': 'Failed to parse AI output', 'raw_output': raw[:200]}), 500
 
     # Create transactions
     created = []
@@ -767,9 +777,10 @@ No extra text, no markdown. Do not wrap in a JSON code block."""
             continue
         amount = abs(float(item.get('amount', 0)))
         tx_type = item.get('type', 'expense')
+        if tx_type not in ('income', 'expense'):
+            tx_type = 'expense'
         category = item.get('category', 'Other')
         note = item.get('note', '')
-        # Auto‑classify need/want
         needs = {'Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage'}
         is_need = category in needs
         tx = Transaction(
@@ -792,8 +803,7 @@ No extra text, no markdown. Do not wrap in a JSON code block."""
         'total_income': total_income,
         'total_expense': total_expense,
         'count': len(created)
-    })
-# ----------------------------------------------------------------------
+    })# ----------------------------------------------------------------------
 # AI routes (updated)
 # ----------------------------------------------------------------------
 @app.route('/api/ai/full_setup', methods=['POST'])
