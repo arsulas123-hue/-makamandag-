@@ -447,6 +447,33 @@ def update_avatar():
     db.session.commit()
     return jsonify({'avatar_url': user.avatar_url}), 200
 
+# NEW: Full profile editing
+@app.route('/api/profile', methods=['PUT'])
+@login_required
+def update_profile():
+    user = get_current_user()
+    data = request.json
+
+    if 'name' in data:
+        user.name = data['name']
+    if 'email' in data:
+        # Ensure email is not taken by another user
+        if User.query.filter(User.email == data['email'], User.id != user.id).first():
+            return jsonify({'error': 'Email already in use'}), 400
+        user.email = data['email']
+    if 'password' in data:
+        if len(data['password']) < 6:
+            return jsonify({'error': 'Password must be at least 6 characters'}), 400
+        user.set_password(data['password'])
+    if 'avatar_url' in data:
+        url = data['avatar_url'].strip()
+        if url and not (url.startswith('http://') or url.startswith('https://') or url.startswith('data:image/')):
+            return jsonify({'error': 'Invalid avatar URL'}), 400
+        user.avatar_url = url if url else None
+
+    db.session.commit()
+    return jsonify(user.to_dict()), 200
+
 # ----------------------------------------------------------------------
 # Transaction routes
 # ----------------------------------------------------------------------
@@ -1171,7 +1198,7 @@ def apply_future_expenses():
     return jsonify({'applied': applied, 'count': len(applied)}), 200
 
 # ----------------------------------------------------------------------
-# Frontend (single HTML page) – FULLY UPDATED
+# Frontend (single HTML page) – FULLY UPDATED with Profile screen
 # ----------------------------------------------------------------------
 HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="en">
@@ -1598,6 +1625,7 @@ body::before{
   <button class="nav-item" data-nav="future"><span class="nav-icon">📌</span><span class="nav-label">Future Expenses</span></button>
   <button class="nav-item" data-nav="insights"><span class="nav-icon">📈</span><span class="nav-label">Insights</span></button>
   <button class="nav-item" data-nav="history"><span class="nav-icon">📋</span><span class="nav-label">History</span></button>
+  <button class="nav-item" data-nav="profile"><span class="nav-icon">👤</span><span class="nav-label">Profile</span></button>
   <button class="nav-item" id="adminNavBtn" data-nav="admin" style="display:none;"><span class="nav-icon">👑</span><span class="nav-label">Admin Panel</span></button>
   <div class="sidebar-sep"></div>
   <button class="nav-item" id="exportBtn"><span class="nav-icon">⬇</span><span class="nav-label">Export CSV</span></button>
@@ -1708,7 +1736,7 @@ body::before{
       <div class="alloc-grid" id="allocGrid"></div>
     </div>
 
-    <!-- NEW BUDGET MANAGEMENT CARD -->
+    <!-- BUDGET MANAGEMENT CARD -->
     <div id="budgetBlock" style="display:none" class="card">
       <div class="card-header"><span class="card-title">Manage Budgets</span></div>
       <div id="budgetList"></div>
@@ -1771,14 +1799,13 @@ body::before{
     </div>
   </div>
 
-  <!-- HISTORY SCREEN (MODIFIED) -->
+  <!-- HISTORY SCREEN -->
   <div class="screen" id="screen-history">
     <div class="card">
       <div class="card-header">
         <span class="card-title">Transaction History</span>
         <button class="btn btn-primary" id="toggleHistoryViewBtn" style="font-size:0.8rem;padding:8px 14px;">🙈 Hide History</button>
       </div>
-      <!-- Container that wraps search, badge toggle, and the list – this will be shown/hidden -->
       <div id="historyContent">
         <div style="display:flex; gap:8px; margin-bottom:12px; align-items:center;">
           <input class="form-input" id="historySearch" placeholder="Search…" style="width:180px;padding:8px 12px;font-size:0.82rem;">
@@ -1788,6 +1815,30 @@ body::before{
         </div>
         <div class="tx-list" id="historyList"></div>
       </div>
+    </div>
+  </div>
+
+  <!-- PROFILE SCREEN -->
+  <div class="screen" id="screen-profile">
+    <div class="card">
+      <div class="card-header"><span class="card-title">Your Profile</span></div>
+      <div class="form-group" style="margin-bottom:12px;">
+        <label class="form-label">Name</label>
+        <input class="form-input" id="profileName" value="">
+      </div>
+      <div class="form-group" style="margin-bottom:12px;">
+        <label class="form-label">Email</label>
+        <input class="form-input" id="profileEmail" type="email" value="">
+      </div>
+      <div class="form-group" style="margin-bottom:12px;">
+        <label class="form-label">New Password (leave blank to keep current)</label>
+        <input class="form-input" id="profilePass" type="password" placeholder="●●●●●●">
+      </div>
+      <div class="form-group" style="margin-bottom:12px;">
+        <label class="form-label">Avatar URL</label>
+        <input class="form-input" id="profileAvatar" placeholder="https://…">
+      </div>
+      <button class="btn-add" id="saveProfileBtn" style="margin-top:8px;">Save Changes</button>
     </div>
   </div>
 
@@ -1941,7 +1992,7 @@ function renderChecklist() {
     checkbox.type = 'checkbox';
     checkbox.className = 'cat-checkbox';
     checkbox.dataset.cat = cat.name;
-    checkbox.checked = true; // all selected by default
+    checkbox.checked = true;
 
     const label = document.createElement('label');
     label.style.fontSize = '0.82rem';
@@ -2074,6 +2125,7 @@ document.querySelectorAll('.nav-item[data-nav]').forEach(btn => {
     else if(nav==='insights') loadInsights();
     else if(nav==='future') loadFutureExpenses();
     else if(nav==='history') loadHistory();
+    else if(nav==='profile') loadProfile();
     else if(nav==='admin') loadAdmin();
   });
 });
@@ -2576,6 +2628,43 @@ async function deleteTransaction(id) {
     if(document.getElementById('screen-history').classList.contains('active')) loadHistory();
   } catch(e) { toast(e.message); }
 }
+
+// ── PROFILE SCREEN ──
+function loadProfile() {
+  if (!currentUser) return;
+  document.getElementById('profileName').value = currentUser.name || '';
+  document.getElementById('profileEmail').value = currentUser.email || '';
+  document.getElementById('profilePass').value = '';
+  document.getElementById('profileAvatar').value = currentUser.avatar_url || '';
+}
+
+document.getElementById('saveProfileBtn').addEventListener('click', async () => {
+  const name = document.getElementById('profileName').value.trim();
+  const email = document.getElementById('profileEmail').value.trim();
+  const password = document.getElementById('profilePass').value;
+  const avatar_url = document.getElementById('profileAvatar').value.trim();
+
+  const body = { name, email, avatar_url };
+  if (password) body.password = password;
+
+  try {
+    const updatedUser = await api('/api/profile', { method: 'PUT', body: JSON.stringify(body) });
+    currentUser = updatedUser;
+    // Update topbar avatar
+    const initial = document.querySelector('.avatar-initial');
+    const img = document.querySelector('#userAvatar img');
+    if (updatedUser.avatar_url) {
+      img.src = updatedUser.avatar_url;
+      img.style.display = 'block';
+      initial.style.display = 'none';
+    } else {
+      img.style.display = 'none';
+      initial.style.display = 'block';
+      initial.textContent = updatedUser.name?.charAt(0)?.toUpperCase() || '?';
+    }
+    toast('Profile updated!');
+  } catch(e) { toast(e.message); }
+});
 
 // ── ADMIN ──
 async function loadAdmin() {
