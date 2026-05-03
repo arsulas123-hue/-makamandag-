@@ -1929,6 +1929,58 @@ async function api(url, opts={}){
   return res.json();
 }
 
+// ── RENDER CHECKLIST (MISSING FUNCTION RESTORED) ──
+function renderChecklist() {
+  const needsCont = document.getElementById('needsChecklist');
+  const wantsCont = document.getElementById('wantsChecklist');
+  needsCont.innerHTML = '';
+  wantsCont.innerHTML = '';
+
+  categoryConfig.forEach(cat => {
+    const div = document.createElement('div');
+    div.style.display = 'flex';
+    div.style.alignItems = 'center';
+    div.style.gap = '6px';
+    div.style.marginBottom = '6px';
+
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.className = 'cat-checkbox';
+    checkbox.dataset.cat = cat.name;
+    checkbox.checked = true; // all selected by default
+
+    const label = document.createElement('label');
+    label.style.fontSize = '0.82rem';
+    label.style.color = 'var(--text2)';
+    label.textContent = cat.name;
+
+    const percentSpan = document.createElement('span');
+    percentSpan.className = 'cat-percent';
+    percentSpan.id = `pct-${cat.name.replace(/\s/g,'')}`;
+    percentSpan.textContent = '';
+
+    div.appendChild(checkbox);
+    div.appendChild(label);
+    div.appendChild(percentSpan);
+
+    if (cat.type === 'need' || cat.type === 'savings') {
+      needsCont.appendChild(div);
+    } else {
+      wantsCont.appendChild(div);
+    }
+  });
+}
+
+function updateChecklistPercentages(allocation) {
+  categoryConfig.forEach(cat => {
+    const pct = allocation[cat.name];
+    const span = document.getElementById(`pct-${cat.name.replace(/\s/g,'')}`);
+    if (span) {
+      span.textContent = pct !== undefined ? `${pct.toFixed(1)}%` : '';
+    }
+  });
+}
+
 // ── AUTH ──
 const authOverlay = document.getElementById('authOverlay');
 const authBtn = document.getElementById('authBtn');
@@ -2049,7 +2101,7 @@ async function initApp() {
   }
   if(currentUser.role === 'admin') document.getElementById('adminNavBtn').style.display = 'flex';
   else document.getElementById('adminNavBtn').style.display = 'none';
-  renderChecklist();
+  renderChecklist(); // ← ensure checkboxes appear
   loadDashboard();
 }
 
@@ -2262,11 +2314,11 @@ function renderAIPlan(plan) {
     togglePlanBtn.textContent = detailsVisible ? '🔽 Hide Plan Details' : '📊 Show Plan Details';
   };
 
-  // Load budgets after AI plan (NEW)
+  // Load budgets after AI plan
   loadBudgets();
 }
 
-// ── BUDGET MANAGEMENT (NEW) ──
+// ── BUDGET MANAGEMENT ──
 async function loadBudgets() {
     if (!currentUser) return;
     try {
@@ -2301,7 +2353,7 @@ async function saveBudget(category) {
             body: JSON.stringify({ limit: newLimit })
         });
         toast('Budget updated');
-        loadBudgets();  // refresh display
+        loadBudgets();
     } catch(e) { toast(e.message); }
 }
 
@@ -2478,7 +2530,7 @@ function renderCategoryChart(categories) {
   });
 }
 
-// ── HISTORY ── (MODIFIED)
+// ── HISTORY ──
 async function loadHistory() {
   if(!currentUser) return;
   try {
@@ -2515,7 +2567,7 @@ document.getElementById('showNeedWantBadges').addEventListener('change', ()=> {
   renderHistory(allTransactions);
 });
 
-// NEW: Toggle entire history content
+// Toggle whole history content
 document.getElementById('toggleHistoryViewBtn').addEventListener('click', () => {
   const content = document.getElementById('historyContent');
   const btn = document.getElementById('toggleHistoryViewBtn');
