@@ -1946,8 +1946,8 @@ body::before{
 
 <div class="chatbot" id="chatbot">
   <div class="chat-window">
-    <div class="chat-header" id="chatHeader"><div class="ai-pulse"></div><div class="chat-header-title">SmartSpend ML <span class="ai-badge">SMART</span></div><button class="chat-toggle-btn" id="chatToggleBtn" title="Minimize">–</button></div>
-    <div class="chat-msgs" id="chatMsgs"><div class="msg bot">👋 I'm your AI finance assistant. Ask me anything about your money, budget, or how to save more.</div></div>
+    <div class="chat-header" id="chatHeader"><div class="ai-pulse"></div><div class="chat-header-title">SmartSpend ML <span class="ai-badge">Smart</span></div><button class="chat-toggle-btn" id="chatToggleBtn" title="Minimize">–</button></div>
+    <div class="chat-msgs" id="chatMsgs"><div class="msg bot">👋 I'm your ML finance assistant. Ask me anything about your money, budget, or how to save more.</div></div>
     <div class="chat-input-row"><input class="chat-inp" id="chatInp" placeholder="Ask anything…"><button class="chat-send" id="chatSend">→</button></div>
   </div>
 </div>
