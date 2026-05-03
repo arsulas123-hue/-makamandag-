@@ -20,17 +20,42 @@ from werkzeug.utils import secure_filename
 # App configuration
 # ----------------------------------------------------------------------
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-change-in-production')
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get(
-    'DATABASE_URL',
-    'postgresql://makamandag_db_user:zcDibuXdlpEpcZNGEYLc9nqpgWwuTTfO@dpg-d7od7md7vvec739acfj0-a/makamandag_db'
-)
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['UPLOAD_FOLDER'] = '/tmp'  # temporary, for OCR
 
-# Gemini key (hardcoded as per your request)
-GEMINI_API_KEY = "AIzaSyDADCUZKxOPf6NKQ7uhCcTZWqnd50HoPVY"
+# Required environment variables (set these in Render dashboard)
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY')
+if not app.config['SECRET_KEY']:
+    raise RuntimeError("SECRET_KEY environment variable is not set!")
+
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL')
+if not app.config['SQLALCHEMY_DATABASE_URI']:
+    raise RuntimeError("DATABASE_URL environment variable is not set!")
+
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['UPLOAD_FOLDER'] = '/tmp'
+
+# 🔥 Fix: Add database connection pooling for PostgreSQL
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+    'pool_size': 10,           # Keep 10 connections open
+    'max_overflow': 20,        # Allow up to 20 extra connections during spikes
+    'pool_timeout': 30,        # Wait 30 sec for a connection before timing out
+    'pool_recycle': 3600,      # Recycle connections after 1 hour (prevents stale connections)
+    'pool_pre_ping': True,     # Check connection is alive before using it
+}
+
+# GEMINI API key (uses environment variable; no fallback to hardcoded)
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    raise RuntimeError("GEMINI_API_KEY environment variable is not set!")
 genai.configure(api_key=GEMINI_API_KEY)
+
+# OpenRouter key (optional – can be empty)
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+
+# CORS for frontend-backend communication (if needed)
+from flask_cors import CORS
+CORS(app, supports_credentials=True)
+
+
 
 # ----------------------------------------------------------------------
 # Multi-AI Router (OpenRouter fallback)
