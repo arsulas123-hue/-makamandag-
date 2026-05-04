@@ -63,8 +63,33 @@ FREE_MODELS = [
     "mistralai/mistral-7b-instruct:free",
     "microsoft/phi-3-mini-128k-instruct:free",
 ]
-
 def route_ai_request(prompt, max_tokens=400):
+    # 1️⃣ Try OpenRouter first (free models)
+    if OPENROUTER_API_KEY:
+        for model in FREE_MODELS:
+            try:
+                resp = requests.post(
+                    OPENROUTER_URL,
+                    headers={
+                        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": max_tokens,
+                    },
+                    timeout=15,
+                )
+                if resp.status_code == 200:
+                    print(f"✅ Used OpenRouter model: {model}")
+                    data = resp.json()
+                    if "choices" in data and len(data["choices"]) > 0:
+                        return data["choices"][0]["message"]["content"].strip()
+            except Exception:
+                continue
+
+    # 2️⃣ Fallback to Gemini (if OpenRouter fails or no key)
     for model_name in GEMINI_MODELS:
         try:
             model = genai.GenerativeModel(model_name)
@@ -74,32 +99,8 @@ def route_ai_request(prompt, max_tokens=400):
                 return response.text.strip()
         except Exception as e:
             print(f"Gemini {model_name} failed: {e}")
-    if not OPENROUTER_API_KEY:
-        return "Sorry, all AI services are busy. Try again later."
-    for model in FREE_MODELS:
-        try:
-            resp = requests.post(
-                OPENROUTER_URL,
-                headers={
-                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": max_tokens,
-                },
-                timeout=15,
-            )
-            if resp.status_code == 200:
-                print(f"✅ Used OpenRouter model: {model}")
-                data = resp.json()
-                if "choices" in data and len(data["choices"]) > 0:
-                    return data["choices"][0]["message"]["content"].strip()
-        except Exception:
-            continue
-    return "⚠️ All AI services unavailable."
 
+    return "⚠️ All AI services unavailable."
 db = SQLAlchemy(app)
 bcrypt = Bcrypt(app)
 
