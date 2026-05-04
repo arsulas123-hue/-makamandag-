@@ -2319,7 +2319,6 @@ function addFeedEvent(icon, text) {
 
 // ── AI PLAN ──
 document.getElementById('analyzeBtn').addEventListener('click', runAIPlan);
-
 async function runAIPlan() {
   const income = parseFloat(document.getElementById('incomeInput').value);
   if(!income || income <= 0){ toast('Enter a valid monthly income first'); return; }
@@ -2336,6 +2335,10 @@ async function runAIPlan() {
       method:'POST',
       body: JSON.stringify({ monthly_income: income, mindset: currentMindset, selected_categories: selectedCategories })
     });
+    console.log('AI Plan result:', result);
+    if (!result.allocation) {
+      throw new Error('No allocation returned from AI');
+    }
     aiPlan = result;
     if(result.allocation) updateChecklistPercentages(result.allocation);
     addFeedEvent('✅',`Budget allocated across ${Object.keys(result.allocation).length} categories`);
@@ -2345,20 +2348,21 @@ async function runAIPlan() {
     renderAIPlan(result);
     toast('ML plan complete! 🎉', 'var(--green)');
   } catch(e){
+    console.error('AI plan error:', e);
     toast('ML error: '+e.message);
     addFeedEvent('❌','ML error: '+e.message);
   }
   btn.disabled = false;
   btnContent.innerHTML = '🔄 Re‑Analyze';
-}
-
-function renderAIPlan(plan) {
+}function renderAIPlan(plan) {
+  // Update financial summary and savings
   document.getElementById('financialSummaryText').textContent = plan.financial_summary;
   document.getElementById('saveDaily').textContent = fmt(plan.savings_plan.daily);
   document.getElementById('saveWeekly').textContent = fmt(plan.savings_plan.weekly);
   document.getElementById('saveMonthly').textContent = fmt(plan.savings_plan.monthly);
   document.getElementById('savingsTip').textContent = '💡 ' + (plan.savings_plan.tip || '');
 
+  // Build allocation grid
   const grid = document.getElementById('allocGrid');
   const needs = new Set(['Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage']);
   const savings = new Set(['Savings']);
@@ -2374,6 +2378,7 @@ function renderAIPlan(plan) {
     </div>`;
   }).join('');
 
+  // Render advice
   const adviceIcons = { info:'ℹ️', warning:'⚠️', success:'✅' };
   document.getElementById('adviceList').innerHTML = plan.advice.map(a=>
     `<div class="advice-card ${esc(a.type)}">
@@ -2381,16 +2386,20 @@ function renderAIPlan(plan) {
       <div><div class="advice-title">${esc(a.title)}</div><div class="advice-body">${esc(a.body)}</div></div>
     </div>`).join('');
 
-  const blocks = ['financialSummaryBlock', 'allocationBlock', 'adviceBlock'];
-  blocks.forEach(id => {
-    document.getElementById(id).style.display = 'none';
-  });
-
+  // Show the toggle button and automatically expand the details
   const toggleBtn = document.getElementById('showPlanToggle');
   const togglePlanBtn = document.getElementById('togglePlanBtn');
   toggleBtn.style.display = 'block';
-  let detailsVisible = false;
-
+  
+  // Force the details to be visible immediately (no need to click)
+  const blocks = ['financialSummaryBlock', 'allocationBlock', 'adviceBlock'];
+  blocks.forEach(id => {
+    document.getElementById(id).style.display = 'block';
+  });
+  togglePlanBtn.textContent = '🔽 Hide Plan Details';
+  
+  // Set the toggle functionality
+  let detailsVisible = true;
   togglePlanBtn.onclick = () => {
     detailsVisible = !detailsVisible;
     blocks.forEach(id => {
@@ -2399,9 +2408,9 @@ function renderAIPlan(plan) {
     togglePlanBtn.textContent = detailsVisible ? '🔽 Hide Plan Details' : '📊 Show Plan Details';
   };
 
+  // Load budgets
   loadBudgets();
 }
-
 // ── BUDGET MANAGEMENT (FIXED) ──
 async function loadBudgets() {
     if (!currentUser) return;
@@ -2914,3 +2923,4 @@ def index():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
+    
