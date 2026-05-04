@@ -2563,19 +2563,77 @@ document.getElementById('incomeTool').addEventListener('change', function(){
 });
 
 // ── ADD INCOME BUTTON ──
+// Helper: fetch current month’s total income and run ML plan
+async function autoRunPlanAndUpdateDashboard() {
+  if (!currentUser) return;
+  try {
+    // Get current month income
+    const summary = await api(`/api/summary/${currentUser.id}`);
+    const totalIncome = summary.income || 0;
+    
+    // Update the income input field so the plan uses the correct total
+    document.getElementById('incomeInput').value = totalIncome;
+
+    if (totalIncome <= 0) {
+      // No income yet – don't run plan, just refresh
+      loadDashboard();
+      return;
+    }
+
+    // Collect selected categories
+    const selectedCategories = [];
+    document.querySelectorAll('.cat-checkbox:checked').forEach(chk =>
+      selectedCategories.push(chk.dataset.cat)
+    );
+    // If no categories selected, use defaults
+    if (selectedCategories.length === 0) {
+      ['Food & Dining', 'Transport', 'Groceries', 'Health', 'Entertainment', 'Debt repayment', 'Savings']
+        .forEach(c => selectedCategories.push(c));
+    }
+
+    // Run the ML plan automatically (same as clicking “Let ML Plan”)
+    const result = await api('/api/ai/full_setup', {
+      method: 'POST',
+      body: JSON.stringify({
+        monthly_income: totalIncome,
+        mindset: currentMindset,
+        selected_categories: selectedCategories
+      })
+    });
+
+    aiPlan = result;
+    if (result.allocation) {
+      updateChecklistPercentages(result.allocation);
+      addFeedEvent('✅', `Budget allocated across ${Object.keys(result.allocation).length} categories`);
+      addFeedEvent('💰', `Savings target set: ${fmt(result.savings_plan.monthly)}/month`);
+      addFeedEvent('🧠', `Financial summary: "${result.financial_summary.substring(0,60)}…"`);
+      addFeedEvent('📋', `${result.advice.length} personalized insights ready`);
+      renderAIPlan(result);
+    }
+  } catch (e) {
+    console.error('Auto plan error:', e);
+    // Optional toast: toast('Auto plan failed: '+e.message);
+  }
+  // Always refresh the dashboard stats/charts
+  loadDashboard();
+}
+
+// Updated ADD INCOME BUTTON
 document.getElementById('addIncomeBtn').addEventListener('click', async ()=>{
   const amount = parseFloat(document.getElementById('incomeInput').value);
   if(!amount || amount < 1) { toast('Enter a valid amount (min 1)'); return; }
   try {
+    // 1. Add the income transaction (backend automatically deducts one‑time future expenses)
     await api('/api/transactions', { method:'POST', body: JSON.stringify({
       amount, category:'Salary', tx_type:'income', is_need:true, note:'Manual income'
     })});
     toast('Income added!');
-    document.getElementById('incomeInput').value = '';
-    loadDashboard();
+    
+    // 2. Merge with existing monthly income, run AI plan, show analytics
+    await autoRunPlanAndUpdateDashboard();
+    
   } catch(e) { toast(e.message); }
 });
-
 // ── MANUAL EXPENSE LOGIC ──
 document.getElementById('addExpenseBtn').addEventListener('click', async ()=>{
   const amount = parseFloat(document.getElementById('expenseAmount').value);
@@ -2608,8 +2666,12 @@ async function loadDashboard() {
     document.getElementById('chartBlock').style.display = Object.keys(summary.monthly).length ? 'block' : 'none';
     document.getElementById('forecastBlock').style.display = Object.keys(predict.predictions?.weekly||{}).length ? 'block' : 'none';
   } catch(e) { toast(e.message); }
-}
 
+  // ✨ NEW: automatically run ML plan after Dashboard loads (if income exists and no plan yet)
+  if (currentUser.monthly_budget_limit > 0 && !aiPlan) {
+    autoRunPlanAndUpdateDashboard();
+  }
+}
 function renderStats(summary, score, longevity) {
   document.getElementById('sBalance').textContent = fmt(summary.balance);
   document.getElementById('sExpense').textContent = fmt(summary.expense);
