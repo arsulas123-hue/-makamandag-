@@ -905,6 +905,37 @@ def admin_stats():
         'total_expense': total_expense,
         'avg_health_score': round(avg_health, 1)
     })
+@app.route('/api/admin/users/<int:user_id>/full', methods=['PUT'])
+@admin_required
+def admin_update_user_full(user_id):
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+
+    data = request.json
+    if 'name' in data:
+        user.name = data['name']
+    if 'email' in data:
+        # Check uniqueness
+        if User.query.filter(User.email == data['email'], User.id != user.id).first():
+            return jsonify({'error': 'Email already in use'}), 400
+        user.email = data['email']
+    if 'password' in data and data['password'].strip():
+        if len(data['password']) < 6:
+            return jsonify({'error': 'Password must be at least 6 characters'}), 400
+        user.set_password(data['password'])
+    if 'monthly_budget_limit' in data:
+        user.monthly_budget_limit = data['monthly_budget_limit']
+    if 'role' in data:
+        user.role = data['role']
+    if 'avatar_url' in data:
+        url = data['avatar_url'].strip()
+        if url and not (url.startswith('http://') or url.startswith('https://') or url.startswith('data:image/')):
+            return jsonify({'error': 'Invalid avatar URL'}), 400
+        user.avatar_url = url if url else None
+
+    db.session.commit()
+    return jsonify(user.to_dict()), 200
 
 @app.route('/api/admin/users', methods=['GET'])
 @admin_required
@@ -2177,8 +2208,44 @@ body::before{
         <button class="tab" data-tab="transactions">💰 All Transactions</button>
       </div>
       <div id="adminUsersPanel">
+<tr class="admin-edit-row" id="adminEditRowTemplate" style="display:none;">
+  <td colspan="6">
+    <div class="admin-edit-panel" style="background:var(--bg3); padding:16px; border-radius:10px;">
+      <div class="tx-form" style="grid-template-columns:repeat(3,1fr);">
+        <div class="form-group">
+          <label class="form-label">Name</label>
+          <input class="form-input" id="adminEditName">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Email</label>
+          <input class="form-input" id="adminEditEmail" type="email">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Password (leave blank)</label>
+          <input class="form-input" id="adminEditPass" type="password" placeholder="●●●●●●">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Monthly Budget</label>
+          <input class="form-input" id="adminEditBudget" type="number" step="0.01">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Role</label>
+          <select class="form-select" id="adminEditRole">
+            <option value="user">User</option>
+            <option value="admin">Admin</option>
+          </select>
+        </div>
+        <div class="form-group" style="justify-content:end;">
+          <button class="btn-add" id="adminSaveUserBtn">Save User</button>
+        </div>
+      </div>
+    </div>
+  </td>
+</tr>
         <input type="text" id="adminSearchUser" placeholder="Search user..." class="form-input" style="margin-bottom:12px;">
-        <table style="width:100%; border-collapse:collapse;"><thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Role</th><th>Created</th><th>Actions</th></tr></thead><tbody id="adminUserTable"></tbody></table>
+        <table style="width:100%; border-collapse:collapse;"><thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Role</th><th>Created</th><th>Actions</th></tr></thead><tbody id="adminUserTable">
+  <!-- rows will be dynamically inserted here -->
+</tbody></table>
       </div>
       <div id="adminTransactionsPanel" style="display:none;">
         <select id="adminUserFilter" class="form-select" style="margin-bottom:12px;"><option value="">All Users</option></select>
@@ -3160,26 +3227,89 @@ document.querySelectorAll('#adminTabs .tab').forEach(tab=>{
     }
   });
 });
-async function loadAdminUsers(){
+async function loadAdminUsers() {
   try {
     const users = await api('/api/admin/users');
     const search = document.getElementById('adminSearchUser').value.toLowerCase();
-    const filtered = users.filter(u=> u.name.toLowerCase().includes(search) || u.email.toLowerCase().includes(search));
-    document.getElementById('adminUserTable').innerHTML = filtered.map(u=>`
-      <tr>
-        <td>${u.id}</td><td>${esc(u.name)}</td><td>${esc(u.email)}</td><td>${esc(u.role)}</td>
+    const filtered = users.filter(u => u.name.toLowerCase().includes(search) || u.email.toLowerCase().includes(search));
+    const tbody = document.getElementById('adminUserTable');
+    tbody.innerHTML = filtered.map(u => `
+      <tr id="userRow-${u.id}">
+        <td>${u.id}</td>
+        <td>${esc(u.name)}</td>
+        <td>${esc(u.email)}</td>
+        <td>${esc(u.role)}</td>
         <td>${fmtDate(u.created_at)}</td>
         <td>
-          <button onclick="adminUpdateRole(${u.id},'${u.role==='admin'?'user':'admin'}')" class="btn" style="padding:4px 8px;font-size:0.7rem;">Make ${u.role==='admin'?'User':'Admin'}</button>
+          <button onclick="toggleAdminEdit(${u.id})" class="btn" style="padding:4px 8px;font-size:0.7rem;">Edit</button>
           <button onclick="adminDeleteUser(${u.id})" class="btn btn-danger" style="padding:4px 8px;font-size:0.7rem;">Del</button>
         </td>
-      </tr>`).join('');
+      </tr>
+    `).join('');
   } catch(e) { toast(e.message); }
 }
-async function adminUpdateRole(id, newRole){
+
+let currentEditingUserId = null;
+
+function toggleAdminEdit(userId) {
+  // Remove any existing edit row
+  const oldRow = document.querySelector('.admin-edit-row.active');
+  if (oldRow) oldRow.remove();
+
+  // If same user clicked again, just remove (toggle off)
+  if (currentEditingUserId === userId) {
+    currentEditingUserId = null;
+    return;
+  }
+
+  // Fetch full user data
+  api(`/api/admin/users`)
+    .then(users => {
+      const user = users.find(u => u.id === userId);
+      if (!user) return;
+
+      // Clone the template row
+      const template = document.getElementById('adminEditRowTemplate');
+      const row = template.cloneNode(true);
+      row.style.display = '';
+      row.classList.add('active');
+      row.id = 'editRow-' + userId;
+
+      // Pre‑fill fields
+      row.querySelector('#adminEditName').value = user.name;
+      row.querySelector('#adminEditEmail').value = user.email;
+      row.querySelector('#adminEditPass').value = '';
+      row.querySelector('#adminEditBudget').value = user.monthly_budget_limit || 0;
+      row.querySelector('#adminEditRole').value = user.role;
+
+      // Attach save event
+      row.querySelector('#adminSaveUserBtn').onclick = () => saveAdminUser(userId, row);
+
+      // Insert the row after the user’s row
+      const userRow = document.getElementById('userRow-' + userId);
+      userRow.parentNode.insertBefore(row, userRow.nextSibling);
+      currentEditingUserId = userId;
+    });
+}
+
+async function saveAdminUser(userId, row) {
+  const name = row.querySelector('#adminEditName').value.trim();
+  const email = row.querySelector('#adminEditEmail').value.trim();
+  const password = row.querySelector('#adminEditPass').value;
+  const monthly_budget_limit = parseFloat(row.querySelector('#adminEditBudget').value) || 0;
+  const role = row.querySelector('#adminEditRole').value;
+
+  const body = { name, email, monthly_budget_limit, role };
+  if (password) body.password = password;
+
   try {
-    await api(`/api/admin/users/${id}`, { method:'PUT', body: JSON.stringify({ role: newRole }) });
-    toast(`Role updated to ${newRole}`); loadAdminUsers();
+    await api(`/api/admin/users/${userId}/full`, { method: 'PUT', body: JSON.stringify(body) });
+    toast('User updated');
+    loadAdminUsers();
+    // Remove edit row
+    const editRow = document.getElementById('editRow-' + userId);
+    if (editRow) editRow.remove();
+    currentEditingUserId = null;
   } catch(e) { toast(e.message); }
 }
 async function adminDeleteUser(id){
