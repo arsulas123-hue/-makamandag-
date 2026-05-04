@@ -998,95 +998,177 @@ Example:
 @app.route('/api/ai/full_setup', methods=['POST'])
 @login_required
 def ai_full_setup():
-    # ... (unchanged, no changes needed)
-    pass  # Keeping the same code as before, omitted for brevity
-
-# ----------------------------------------------------------------------
-# Helper for safe datetime
-# ----------------------------------------------------------------------
-def get_today_date():
-    try:
-        return datetime.now(ZoneInfo("Asia/Manila")).date()
-    except Exception as e:
-        warnings.warn(f"ZoneInfo fallback to UTC: {e}")
-        return datetime.now(timezone.utc).date()
-
-# ----------------------------------------------------------------------
-# Apply future expenses (updated with validation)
-# ----------------------------------------------------------------------
-@app.route('/api/apply_future_expenses', methods=['POST'])
-@login_required
-def apply_future_expenses():
     user = get_current_user()
-    today = get_today_date()
-    applied = []
-    errors = []
+    data = request.json or {}
+    monthly_income = data.get('monthly_income', user.monthly_budget_limit or 0)
+    mindset = data.get('mindset', user.spending_mindset)
+    social_status = data.get('social_status', user.social_status)
+    selected_categories = data.get('selected_categories', [])
 
-    onetime = FutureExpense.query.filter(
-        FutureExpense.user_id == user.id,
-        FutureExpense.expense_date <= today,
-        FutureExpense.cycle == 'One-time'
-    ).all()
-    for exp in onetime:
-        try:
-            validate_transaction(user.id, exp.amount, 'expense')
-            tx = Transaction(
-                user_id=user.id,
-                amount=exp.amount,
-                category=exp.category,
-                tx_type='expense',
-                is_need=(exp.category in needs_set),
-                priority=1,
-                note=f"Auto-deducted future expense: {exp.description}"
-            )
-            db.session.add(tx)
-            applied.append(exp.description)
-            db.session.delete(exp)
-        except ValueError as e:
-            errors.append(f"{exp.description}: {str(e)}")
-            continue
+    if not selected_categories:
+        selected_categories = ['Food & Dining', 'Transport', 'Groceries', 'Health',
+                               'Entertainment', 'Debt repayment', 'Savings']
 
-    recurring = FutureExpense.query.filter(
-        FutureExpense.user_id == user.id,
-        FutureExpense.expense_date <= today,
-        FutureExpense.cycle.in_(['Weekly', 'Monthly'])
-    ).all()
-    for exp in recurring:
-        try:
-            validate_transaction(user.id, exp.amount, 'expense')
-            tx = Transaction(
-                user_id=user.id,
-                amount=exp.amount,
-                category=exp.category,
-                tx_type='expense',
-                is_need=(exp.category in needs_set),
-                priority=1,
-                note=f"Auto-deducted recurring: {exp.description} ({exp.cycle})"
-            )
-            db.session.add(tx)
-            applied.append(f"{exp.description} (recurring)")
+    # Update user profile
+    user.monthly_budget_limit = monthly_income
+    user.spending_mindset = mindset
+    user.social_status = social_status
+    db.session.commit()
 
-            if exp.cycle == 'Weekly':
-                next_date = exp.expense_date + timedelta(weeks=1)
+    # Get recent spending (last 30 days)
+    recent_spending = defaultdict(float)
+    for t in Transaction.query.filter_by(user_id=user.id, tx_type='expense').order_by(Transaction.tx_date.desc()).limit(30).all():
+        recent_spending[t.category] += t.amount
+
+    # Build allocation using AI
+    categories_str = ', '.join(selected_categories)
+    prompt = f"""
+You are an expert financial planner AI for a Filipino user.
+
+User profile:
+- Monthly income: ₱{monthly_income:,.2f}
+- Spending mindset: {mindset}
+- Social status: {social_status}
+- Recent category spending (last 30 days): {dict(recent_spending)}
+
+Selected categories: {categories_str}
+
+Rules:
+- Saver mindset: give higher weight to needs and savings.
+- Spender mindset: allow more wants.
+- All categories sum to exactly 100%.
+- Return ONLY a valid JSON object with category names as keys and numeric percentages as values, summing to 100.
+- No extra text, no markdown.
+
+Example output: {{"Food & Dining": 45.0, "Transport": 15.0, "Savings": 40.0}}
+"""
+    raw = route_ai_request(prompt, max_tokens=600)
+
+    # Parse AI response or use fallback
+    try:
+        if raw.startswith('```'):
+            raw = raw.split('```')[1]
+            if raw.startswith('json'):
+                raw = raw[4:]
+        allocation = json.loads(raw.strip())
+    except Exception as e:
+        print(f"AI full_setup parse error: {e}")
+        needs_count = sum(1 for c in selected_categories if c in {'Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage'})
+        wants_count = sum(1 for c in selected_categories if c in {'Entertainment','Hobbies','Subscription'})
+        savings_count = sum(1 for c in selected_categories if c == 'Savings')
+
+        if needs_count == 0 and wants_count == 0 and savings_count == 0:
+            allocation = {cat: 100.0 / len(selected_categories) for cat in selected_categories}
+        else:
+            if mindset.lower() == 'saver':
+                need_weight, want_weight, saving_weight = 1.5, 0.5, 1.2
+            elif mindset.lower() == 'spender':
+                need_weight, want_weight, saving_weight = 1.0, 1.5, 0.7
             else:
-                next_date = exp.expense_date + timedelta(days=30)
+                need_weight, want_weight, saving_weight = 1.0, 1.0, 1.0
 
-            while next_date <= today:
-                if exp.cycle == 'Weekly':
-                    next_date += timedelta(weeks=1)
+            total_weight = needs_count * need_weight + wants_count * want_weight + savings_count * saving_weight
+            allocation = {}
+            for cat in selected_categories:
+                if cat in {'Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage'}:
+                    allocation[cat] = round((need_weight / total_weight) * 100, 1)
+                elif cat in {'Entertainment','Hobbies','Subscription'}:
+                    allocation[cat] = round((want_weight / total_weight) * 100, 1)
+                elif cat == 'Savings':
+                    allocation[cat] = round((saving_weight / total_weight) * 100, 1)
                 else:
-                    next_date += timedelta(days=30)
+                    allocation[cat] = round((1.0 / total_weight) * 100, 1)
 
-            exp.expense_date = next_date
-        except ValueError as e:
-            errors.append(f"{exp.description}: {str(e)}")
-            continue
+            diff = 100.0 - sum(allocation.values())
+            if abs(diff) > 0.1:
+                max_cat = max(allocation, key=allocation.get)
+                allocation[max_cat] = round(allocation[max_cat] + diff, 1)
+
+    # Filter and normalize
+    allocation = {k: v for k, v in allocation.items() if k in selected_categories}
+    total = sum(allocation.values())
+    if total > 0 and abs(total - 100) > 0.1:
+        factor = 100 / total
+        allocation = {k: round(v * factor, 1) for k, v in allocation.items()}
+
+    # Generate savings plan
+    savings_prompt = f"""
+User monthly income: ₱{monthly_income:.2f}, monthly expenses: ₱{sum(recent_spending.values()):.2f}, current balance: ₱{get_monthly_summary(user.id)['balance']:.2f}.
+Spending mindset: {mindset}.
+Recommend how much they should save per day, per week, and per month.
+Return JSON: {{"daily": float, "weekly": float, "monthly": float, "tip": "string"}}.
+"""
+    try:
+        raw_savings = route_ai_request(savings_prompt, max_tokens=200)
+        if raw_savings.startswith('```'):
+            raw_savings = raw_savings.split('```')[1]
+            if raw_savings.startswith('json'):
+                raw_savings = raw_savings[4:]
+        savings_plan = json.loads(raw_savings.strip())
+    except Exception:
+        monthly_save = monthly_income * 0.2
+        savings_plan = {
+            "daily": round(monthly_save / 30, 2),
+            "weekly": round(monthly_save / 4, 2),
+            "monthly": round(monthly_save, 2),
+            "tip": "Automate your savings on payday."
+        }
+
+    # Generate advice
+    advice_prompt = f"""
+User has budget allocations: {allocation}. Recent spending: {dict(recent_spending)}.
+Provide 3 short pieces of financial advice as JSON array:
+[{{"title":"...","body":"...","type":"info|warning|success"}}]
+"""
+    try:
+        raw_advice = route_ai_request(advice_prompt, max_tokens=300)
+        if raw_advice.startswith('```'):
+            raw_advice = raw_advice.split('```')[1]
+            if raw_advice.startswith('json'):
+                raw_advice = raw_advice[4:]
+        advice = json.loads(raw_advice.strip())
+        if not isinstance(advice, list):
+            advice = []
+    except Exception:
+        advice = [
+            {"title": "Stay Consistent", "body": "Track every expense to improve your score.", "type": "info"},
+            {"title": "Savings First", "body": "Transfer savings immediately after receiving income.", "type": "success"},
+            {"title": "Review Wants", "body": "Audit subscriptions and entertainment monthly.", "type": "warning"}
+        ]
+
+    # Financial summary
+    summary_prompt = f"Based on monthly income ₱{monthly_income}, mindset {mindset}, and allocations {allocation}, give a one‑sentence overall financial health assessment."
+    try:
+        raw_summary = route_ai_request(summary_prompt, max_tokens=100)
+        financial_summary = raw_summary.strip()
+    except Exception:
+        financial_summary = "Your AI plan is ready. Start by logging your expenses to get personalized insights."
+
+    # Save allocations and budgets to database
+    UserAllocation.query.filter_by(user_id=user.id).delete()
+    needs = {'Food & Dining', 'Transport', 'Groceries', 'Health', 'Debt repayment', 'Mortgage'}
+    savings_cats = {'Savings'}
+    for cat, pct in allocation.items():
+        t = 'need' if cat in needs else ('savings' if cat in savings_cats else 'want')
+        db.session.add(UserAllocation(user_id=user.id, category_name=cat, type=t, percentage=pct))
+
+    Budget.query.filter_by(user_id=user.id).delete()
+    for cat, pct in allocation.items():
+        db.session.add(Budget(user_id=user.id, category=cat, limit_amount=round(monthly_income * pct / 100, 2)))
 
     db.session.commit()
-    if errors:
-        # Still return success but list skipped items
-        return jsonify({'applied': applied, 'count': len(applied), 'skipped': errors}), 200
-    return jsonify({'applied': applied, 'count': len(applied)}), 200
+
+    # Prepare response
+    result = {
+        'allocation': allocation,
+        'allocation_amounts': {cat: round(monthly_income * pct / 100, 2) for cat, pct in allocation.items()},
+        'savings_plan': savings_plan,
+        'advice': advice,
+        'financial_summary': financial_summary,
+        'monthly_income': monthly_income
+    }
+    return jsonify(result), 200
+
 HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
