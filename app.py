@@ -566,7 +566,7 @@ def update_profile():
     return jsonify(user.to_dict()), 200
 
 # ----------------------------------------------------------------------
-# Transaction routes (updated with validation)
+# Transaction routes (updated to accept tx_date)
 # ----------------------------------------------------------------------
 @app.route('/api/transactions', methods=['GET'])
 @login_required
@@ -594,6 +594,13 @@ def create_transaction():
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
 
+    # Allow client to set the transaction date (otherwise use current time)
+    tx_date_str = data.get('tx_date')
+    if tx_date_str:
+        tx_date = datetime.fromisoformat(tx_date_str)
+    else:
+        tx_date = datetime.now(timezone.utc)
+
     tx = Transaction(
         user_id=user.id,
         amount=amount,
@@ -601,13 +608,15 @@ def create_transaction():
         tx_type=tx_type,
         is_need=is_need,
         priority=priority,
-        note=note
+        note=note,
+        tx_date=tx_date
     )
     db.session.add(tx)
     db.session.commit()
 
+    # Auto‑process future expenses when salary is added (use the transaction's date)
     if tx.tx_type == 'income' and tx.category.lower() == 'salary':
-        today = datetime.now(ZoneInfo("Asia/Manila")).date()
+        today = tx_date.date()
         for exp in FutureExpense.query.filter(
             FutureExpense.user_id == user.id,
             FutureExpense.expense_date <= today,
@@ -618,7 +627,8 @@ def create_transaction():
                 db.session.add(Transaction(
                     user_id=user.id, amount=exp.amount, category=exp.category,
                     tx_type='expense', is_need=(exp.category in needs_set),
-                    priority=1, note=f"Auto: {exp.description}"
+                    priority=1, note=f"Auto: {exp.description}",
+                    tx_date=tx_date
                 ))
                 db.session.delete(exp)
             except ValueError as ve:
@@ -1034,7 +1044,7 @@ def detect_anomalies(user_id):
     return jsonify({'anomalies': anomalies})
 
 # ----------------------------------------------------------------------
-# OCR endpoint
+# OCR endpoints
 # ----------------------------------------------------------------------
 @app.route('/api/ocr_income', methods=['POST'])
 @login_required
@@ -1513,6 +1523,10 @@ def apply_future_expenses():
 
     db.session.commit()
     return jsonify({'applied': applied, 'count': len(applied)}), 200
+
+# ----------------------------------------------------------------------
+# Frontend HTML – FINAL MERGED VERSION (all features included)
+# ----------------------------------------------------------------------
 HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1970,71 +1984,89 @@ body::before{
       <div class="income-label">Monthly Income & Expenses — Tell ML, it handles the rest</div>
       <div class="income-tool-row">
         <select id="incomeTool" class="tool-picker">
-          <option value="manual-income">📝 Manual Income (ML Plan)</option>
-          <option value="manual-income-add">💰 Add Income</option>
-          <option value="manual-expense">📝 Manual Expense (Quick Log)</option>
+          <option value="manual">📝 Manual Income & Expense</option>
           <option value="auto">📸 Automatic (Image/OCR)</option>
           <option value="profile">👤 Edit Profile</option>
         </select>
         <div style="margin-left:auto;"><span class="ai-badge">ML</span></div>
       </div>
 
-      <!-- Manual Income Block (for ML Plan) -->
-      <div id="manualIncomeBlock">
-        <div class="income-input-row">
-          <div class="income-peso">₱</div>
-          <input class="income-input" id="incomeInput" type="number" placeholder="0.00" step="100" min="0">
-          <button class="btn-add" id="addIncomeBtn" style="background:var(--green-dim); color:var(--green); border:1px solid var(--border);">+ Add Income</button>
+      <!-- Manual Block (Income / Expense switch) -->
+      <div id="manualBlock">
+        <div class="income-input-row" style="align-items:center; gap:16px; margin-bottom:16px;">
+          <span style="font-size:0.9rem; color:var(--muted2);">Transaction type:</span>
+          <label style="cursor:pointer; display:flex; align-items:center; gap:6px;">
+            <input type="radio" name="txMode" value="income" checked onchange="switchTxMode()"> Income
+          </label>
+          <label style="cursor:pointer; display:flex; align-items:center; gap:6px;">
+            <input type="radio" name="txMode" value="expense" onchange="switchTxMode()"> Expense
+          </label>
         </div>
-        <div class="mindset-row">
+
+        <!-- Income fields -->
+        <div id="incomeFields">
+          <div class="income-input-row" style="margin-bottom:12px;">
+            <label style="font-size:0.8rem; color:var(--muted2);">Date</label>
+            <input type="date" id="incomeDate" class="form-input" style="width:160px;">
+          </div>
+          <div style="display:flex; gap:12px; align-items:stretch; flex-wrap:wrap;">
+            <div class="income-peso">₱</div>
+            <input class="income-input" id="incomeInput" type="number" placeholder="0.00" step="100" min="0">
+            <button class="btn-add" id="addIncomeBtn" style="background:var(--green-dim); color:var(--green); border:1px solid var(--border);">
+              Add Income
+            </button>
+          </div>
+          <div id="incomeDateWarning" style="display:none; color:var(--red); font-size:0.75rem; margin-top:8px;">
+            Cannot add past income
+          </div>
+        </div>
+
+        <!-- Expense fields (hidden initially) -->
+        <div id="expenseFields" style="display:none;">
+          <div class="tx-form">
+            <div class="form-group"><label class="form-label">Amount (₱)</label><input class="form-input" id="expenseAmount" type="number" placeholder="0.00" step="0.01" min="1"></div>
+            <div class="form-group"><label class="form-label">Category</label>
+              <select class="form-select" id="expenseCategory">
+                <option>Food & Dining</option><option>Transport</option><option>Groceries</option>
+                <option>Entertainment</option><option>Health</option><option>Debt repayment</option>
+                <option>Mortgage</option><option>Subscription</option><option>Hobbies</option><option>Other</option>
+              </select>
+            </div>
+            <div class="form-group"><label class="form-label">Note</label><input class="form-input" id="expenseNote" placeholder="Short description"></div>
+            <div class="form-group" style="justify-content:flex-end;">
+              <div class="needwant-group">
+                <label><input type="radio" name="needwant" value="need" checked> Need</label>
+                <label><input type="radio" name="needwant" value="want"> Want</label>
+              </div>
+              <button class="btn-add" id="addExpenseBtn">Add Expense →</button>
+            </div>
+          </div>
+          <div id="expenseClassifyResult" style="display:none;margin-top:8px;"></div>
+        </div>
+
+        <!-- Spending style (only visible when Income mode) -->
+        <div class="mindset-row" id="mindsetRow" style="margin-top:20px;">
           <span style="font-size:0.78rem;color:var(--muted);align-self:center;">Spending style:</span>
           <button class="mindset-btn" data-mindset="Saver">🏦 Saver</button>
           <button class="mindset-btn active" data-mindset="Neutral">⚖️ Balanced</button>
           <button class="mindset-btn" data-mindset="Spender">🛍️ Spender</button>
         </div>
+
+        <!-- AI Checklist -->
         <div class="ai-checklist">
           <div style="font-weight:600;margin-bottom:12px;">🧠 ML Autonomous Allocation (100% Sum Rule)</div>
           <div class="checklist-section">
             <div class="checklist-section-title" style="display:flex; align-items:center; gap:10px;">
-              Needs ▼
-              <button class="add-cat-btn" data-type="need" title="Add custom Need category" style="background:var(--green-dim); border:1px solid var(--border); color:var(--green); border-radius:6px; width:26px; height:26px; display:flex; align-items:center; justify-content:center; cursor:pointer; font-size:1.2rem;">+</button>
+              Custom ▼
+              <button class="add-cat-btn" data-type="want" title="Add custom category" style="background:var(--green-dim); border:1px solid var(--border); color:var(--green); border-radius:6px; width:26px; height:26px; display:flex; align-items:center; justify-content:center; cursor:pointer; font-size:1.2rem;">+</button>
             </div>
             <div id="needsChecklist" class="checklist-item"></div>
-          </div>
-          <div class="checklist-section">
-            <div class="checklist-section-title" style="display:flex; align-items:center; gap:10px;">
-              Wants ▼
-              <button class="add-cat-btn" data-type="want" title="Add custom Want category" style="background:var(--green-dim); border:1px solid var(--border); color:var(--green); border-radius:6px; width:26px; height:26px; display:flex; align-items:center; justify-content:center; cursor:pointer; font-size:1.2rem;">+</button>
-            </div>
             <div id="wantsChecklist" class="checklist-item"></div>
           </div>
           <div id="totalWarning" class="total-warning" style="display:none;">⚠️ Total allocation must be 100% – ML will normalise.</div>
           <div style="margin-top:12px;"><button class="btn-analyze" id="analyzeBtn"><span id="analyzeBtnContent">🤖 Let ML Plan</span></button></div>
           <div id="needsWantsSummary" style="margin-top:12px;font-size:0.8rem;color:var(--text2);"></div>
         </div>
-      </div>
-
-      <!-- Manual Expense Block (with Need/Want override) -->
-      <div id="manualExpenseBlock" style="display:none;">
-        <div class="tx-form">
-          <div class="form-group"><label class="form-label">Amount (₱)</label><input class="form-input" id="expenseAmount" type="number" placeholder="0.00" step="0.01" min="1"></div>
-          <div class="form-group"><label class="form-label">Category</label>
-            <select class="form-select" id="expenseCategory">
-              <option>Food & Dining</option><option>Transport</option><option>Groceries</option>
-              <option>Entertainment</option><option>Health</option><option>Debt repayment</option>
-              <option>Mortgage</option><option>Subscription</option><option>Hobbies</option><option>Other</option>
-            </select>
-          </div>
-          <div class="form-group"><label class="form-label">Note</label><input class="form-input" id="expenseNote" placeholder="Short description"></div>
-          <div class="form-group" style="justify-content:flex-end;">
-            <div class="needwant-group">
-              <label><input type="radio" name="needwant" value="need" checked> Need</label>
-              <label><input type="radio" name="needwant" value="want"> Want</label>
-            </div>
-            <button class="btn-add" id="addExpenseBtn">Add Expense →</button>
-          </div>
-        </div>
-        <div id="expenseClassifyResult" style="display:none;margin-top:8px;"></div>
       </div>
 
       <!-- OCR Upload Block -->
@@ -2432,6 +2464,72 @@ function updateChecklistPercentages(allocation) {
   });
 }
 
+// ── TX MODE SWITCH ──
+function switchTxMode() {
+  const mode = document.querySelector('input[name="txMode"]:checked').value;
+  document.getElementById('incomeFields').style.display = mode === 'income' ? 'block' : 'none';
+  document.getElementById('expenseFields').style.display = mode === 'expense' ? 'block' : 'none';
+  document.getElementById('mindsetRow').style.display = mode === 'income' ? 'flex' : 'none';
+}
+
+// ── DATE & INCOME VALIDATION ──
+function updateAddIncomeButtonState() {
+  const dateInput = document.getElementById('incomeDate');
+  const amountInput = document.getElementById('incomeInput');
+  const addBtn = document.getElementById('addIncomeBtn');
+  const warning = document.getElementById('incomeDateWarning');
+
+  const today = new Date().toISOString().slice(0,10);
+  const isPast = dateInput.value < today;
+  const amount = parseFloat(amountInput.value) || 0;
+
+  if (isPast && dateInput.value !== '') {
+    addBtn.disabled = true;
+    addBtn.style.opacity = '0.5';
+    addBtn.style.cursor = 'not-allowed';
+    warning.style.display = 'inline';
+  } else {
+    addBtn.disabled = false;
+    addBtn.style.opacity = '1';
+    addBtn.style.cursor = 'pointer';
+    warning.style.display = 'none';
+  }
+
+  if (amount <= 0) {
+    addBtn.disabled = true;
+  }
+}
+
+document.getElementById('incomeDate').addEventListener('change', updateAddIncomeButtonState);
+document.getElementById('incomeInput').addEventListener('input', function() {
+  updateAddIncomeButtonState();
+  // Auto‑suggest spending style based on income level
+  const income = parseFloat(this.value) || 0;
+  if (income <= 10000) {
+    setActiveMindset('Saver');
+  } else if (income <= 50000) {
+    setActiveMindset('Neutral');
+  } else {
+    setActiveMindset('Spender');
+  }
+});
+
+function setActiveMindset(mindset) {
+  document.querySelectorAll('.mindset-btn').forEach(b => b.classList.remove('active'));
+  const btn = document.querySelector(`.mindset-btn[data-mindset="${mindset}"]`);
+  if (btn) btn.classList.add('active');
+  currentMindset = mindset;
+}
+
+// Restore user override when clicking mindset buttons
+document.querySelectorAll('.mindset-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.mindset-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentMindset = btn.dataset.mindset;
+  });
+});
+
 // ── AUTH ──
 const authOverlay = document.getElementById('authOverlay');
 const authBtn = document.getElementById('authBtn');
@@ -2552,6 +2650,7 @@ async function initApp() {
   }
   if(currentUser.role === 'admin') document.getElementById('adminNavBtn').style.display = 'flex';
   else document.getElementById('adminNavBtn').style.display = 'none';
+  document.getElementById('incomeDate').value = new Date().toISOString().slice(0,10);
   renderChecklist();
   loadDashboard();
 }
@@ -2602,29 +2701,9 @@ document.getElementById('saveAvatarBtn').addEventListener('click', async () => {
 // ── TOOL PICKER TOGGLES ──
 document.getElementById('incomeTool').addEventListener('change', function(){
   const val = this.value;
-  document.getElementById('manualIncomeBlock').style.display = (val === 'manual-income' || val === 'manual-income-add') ? 'block' : 'none';
-  document.getElementById('manualExpenseBlock').style.display = (val === 'manual-expense') ? 'block' : 'none';
+  document.getElementById('manualBlock').style.display = (val === 'manual') ? 'block' : 'none';
   document.getElementById('incomeImageUpload').style.display = (val === 'auto') ? 'block' : 'none';
   document.getElementById('profileBlock').style.display = (val === 'profile') ? 'block' : 'none';
-
-  const addIncomeBtn = document.getElementById('addIncomeBtn');
-  const analyzeBtn = document.getElementById('analyzeBtn');
-  const checklist = document.querySelector('.ai-checklist');
-  const mindsetRow = document.querySelector('.mindset-row');
-  if (val === 'manual-income-add') {
-    addIncomeBtn.style.display = 'inline-flex';
-    analyzeBtn.style.display = 'none';
-    checklist.style.display = 'none';
-    mindsetRow.style.display = 'none';
-  } else if (val === 'manual-income') {
-    addIncomeBtn.style.display = 'inline-flex';
-    analyzeBtn.style.display = 'flex';
-    checklist.style.display = 'block';
-    mindsetRow.style.display = 'flex';
-  } else {
-    addIncomeBtn.style.display = 'none';
-    analyzeBtn.style.display = 'flex';
-  }
 
   if (val === 'profile' && currentUser) {
     document.getElementById('profileName').value = currentUser.name || '';
@@ -2662,22 +2741,26 @@ async function autoRunPlanAndUpdateDashboard() {
     });
     aiPlan = result;
     if (result.allocation) {
-      addFeedEvent('✅', `Budget allocated across ${Object.keys(result.allocation).length} categories`);
+      addFeedEvent('✅', `AI categorised ${Object.keys(result.allocation).length} categories into needs & wants`);
       addFeedEvent('💰', `Savings target set: ${fmt(result.savings_plan.monthly)}/month`);
       addFeedEvent('🧠', `Financial summary: "${result.financial_summary.substring(0,60)}…"`);
-      addFeedEvent('📋', `${result.advice.length} personalized insights ready`);
+      addFeedEvent('📋', `${result.advice.length} personalised insights ready`);
       renderAIPlan(result);
     }
   } catch(e) { console.error('Auto plan error:', e); }
   loadDashboard();
 }
 
+// ── ADD INCOME BUTTON ──
 document.getElementById('addIncomeBtn').addEventListener('click', async ()=>{
   const amount = parseFloat(document.getElementById('incomeInput').value);
   if(!amount || amount < 1) { toast('Enter a valid amount (min 1)'); return; }
+  const date = document.getElementById('incomeDate').value;
+  if (!date) { toast('Please select a date'); return; }
   try {
     await api('/api/transactions', { method:'POST', body: JSON.stringify({
-      amount, category:'Salary', tx_type:'income', is_need:true, note:'Manual income'
+      amount, category:'Salary', tx_type:'income', is_need:true, note:'Manual income',
+      tx_date: date
     })});
     toast('Income added!');
     await autoRunPlanAndUpdateDashboard();
@@ -2763,11 +2846,10 @@ async function runAIPlan() {
       throw new Error('No allocation returned from ML');
     }
     aiPlan = result;
-    updateChecklistPercentages(result.allocation);
-    addFeedEvent('✅',`Budget allocated across ${Object.keys(result.allocation).length} categories`);
+    addFeedEvent('✅',`AI categorised ${Object.keys(result.allocation).length} categories into needs & wants`);
     addFeedEvent('💰',`Savings target set: ${fmt(result.savings_plan.monthly)}/month`);
     addFeedEvent('🧠',`Financial summary: "${result.financial_summary.substring(0,60)}…"`);
-    addFeedEvent('📋',`${result.advice.length} personalized insights ready`);
+    addFeedEvent('📋',`${result.advice.length} personalised insights ready`);
     renderAIPlan(result);
     toast('ML plan complete! 🎉', 'var(--green)');
   } catch(e){
@@ -2787,10 +2869,10 @@ function renderAIPlan(plan) {
   document.getElementById('savingsTip').textContent = '💡 ' + (plan.savings_plan.tip || '');
 
   const grid = document.getElementById('allocGrid');
-  const needs = new Set(['Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage']);
-  const savings = new Set(['Savings']);
+  const needsSet = new Set(['Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage']);
+  const savingsSet = new Set(['Savings']);
   grid.innerHTML = Object.entries(plan.allocation).map(([cat, pct])=>{
-    const type = savings.has(cat) ? 'savings' : (needs.has(cat) ? 'need' : 'want');
+    const type = savingsSet.has(cat) ? 'savings' : (needsSet.has(cat) ? 'need' : 'want');
     const amt = plan.allocation_amounts?.[cat] || (plan.monthly_income * pct / 100);
     return `<div class="alloc-item">
       <div class="alloc-cat">${esc(cat)}</div>
@@ -2807,6 +2889,57 @@ function renderAIPlan(plan) {
       <span class="advice-icon">${adviceIcons[a.type]||'💡'}</span>
       <div><div class="advice-title">${esc(a.title)}</div><div class="advice-body">${esc(a.body)}</div></div>
     </div>`).join('');
+
+  // ── REBUILD CHECKLIST WITH AI‑PRIORITISED NEEDS/WANTS ──
+  const categories = Object.keys(plan.allocation);
+  const needs = [];
+  const wants = [];
+  const savings = [];
+  categories.forEach(cat => {
+    if (savingsSet.has(cat)) savings.push(cat);
+    else if (needsSet.has(cat)) needs.push(cat);
+    else wants.push(cat);
+  });
+
+  const needsCont = document.getElementById('needsChecklist');
+  const wantsCont = document.getElementById('wantsChecklist');
+  needsCont.innerHTML = '<div class="checklist-section-title">NEEDS (High Priority)</div>';
+  wantsCont.innerHTML = '<div class="checklist-section-title">WANTS (Lower Priority)</div>';
+
+  let idx = 1;
+  [...needs, ...savings].forEach(cat => {
+    const pct = plan.allocation[cat] || 0;
+    const item = document.createElement('div');
+    item.className = 'checklist-item';
+    item.style.display = 'flex';
+    item.style.alignItems = 'center';
+    item.style.justifyContent = 'space-between';
+    item.innerHTML = `
+      <div style="display:flex; gap:8px; align-items:center;">
+        <span style="color:var(--green); font-weight:700;">${idx++}</span>
+        <label style="font-size:0.82rem; color:var(--text2);">${esc(cat)}</label>
+      </div>
+      <span style="font-family:var(--font-mono); font-size:0.85rem; color:var(--green);">${pct.toFixed(1)}%</span>
+    `;
+    needsCont.appendChild(item);
+  });
+
+  wants.forEach(cat => {
+    const pct = plan.allocation[cat] || 0;
+    const item = document.createElement('div');
+    item.className = 'checklist-item';
+    item.style.display = 'flex';
+    item.style.alignItems = 'center';
+    item.style.justifyContent = 'space-between';
+    item.innerHTML = `
+      <div style="display:flex; gap:8px; align-items:center;">
+        <span style="color:var(--amber); font-weight:700;">${idx++}</span>
+        <label style="font-size:0.82rem; color:var(--text2);">${esc(cat)}</label>
+      </div>
+      <span style="font-family:var(--font-mono); font-size:0.85rem; color:var(--amber);">${pct.toFixed(1)}%</span>
+    `;
+    wantsCont.appendChild(item);
+  });
 
   const blocks = ['financialSummaryBlock', 'allocationBlock', 'adviceBlock'];
   blocks.forEach(id => {
@@ -2927,15 +3060,6 @@ document.getElementById('incomeImage').addEventListener('change', async function
       loadDashboard();
     }
   } catch(e) { toast('OCR failed: '+e.message); }
-});
-
-// Mindset buttons
-document.querySelectorAll('.mindset-btn').forEach(btn => {
-  btn.addEventListener('click', ()=>{
-    document.querySelectorAll('.mindset-btn').forEach(b=>b.classList.remove('active'));
-    btn.classList.add('active');
-    currentMindset = btn.dataset.mindset;
-  });
 });
 
 // ── FUTURE EXPENSES ──
