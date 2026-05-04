@@ -2119,21 +2119,77 @@ function renderTrendChart(monthly) {
   });
 }
 
-// ── OCR IMAGE UPLOAD ──
+// ── OCR IMAGE UPLOAD (with confirmation modal) ──
 document.getElementById('incomeImage').addEventListener('change', async function(){
   const file = this.files[0];
   if(!file) return;
+  const formData = new FormData();
+  formData.append('image', file);
+  formData.append('save', 'false');   // ask backend to only extract, not save
   try {
-    const formData = new FormData();
-    formData.append('image', file);
     const resp = await fetch('/api/ocr_income', { method:'POST', body: formData, credentials:'include' });
     const data = await resp.json();
-    if(data.transactions){
-      toast(`Extracted ${data.count} transactions`);
-      loadDashboard();
+    if (data.transactions && data.transactions.length > 0) {
+      showOCRModal(data.transactions.map(t => ({ ...t, id: Math.random().toString(36) })));
+    } else {
+      toast('No transactions found in the image');
     }
-  } catch(e) { toast('OCR failed: '+e.message); }
+  } catch(e) {
+    toast('OCR failed: '+e.message);
+  }
 });
+
+function showOCRModal(items) {
+  const modal = document.getElementById('ocrModal');
+  const list = document.getElementById('ocrItemsList');
+  list.innerHTML = '';
+
+  items.forEach((item, idx) => {
+    const row = document.createElement('div');
+    row.className = 'budget-item';
+    row.innerHTML = `
+      <span style="flex:1;">${esc(item.category)} – ₱${item.amount.toFixed(2)} – ${esc(item.note)}</span>
+      <select class="form-select" style="width:100px;" onchange="updateOCRItemType(${idx}, this.value)">
+        <option value="income" ${item.type === 'income' ? 'selected' : ''}>Income</option>
+        <option value="expense" ${item.type === 'expense' ? 'selected' : ''}>Expense</option>
+      </select>
+      <button class="btn-del" onclick="removeOCRItem(${idx})">🗑</button>
+    `;
+    list.appendChild(row);
+  });
+
+  window.ocrItems = items;
+  document.getElementById('ocrSaveBtn').onclick = async () => {
+    for (const item of window.ocrItems) {
+      if (item._deleted) continue;
+      await api('/api/transactions', {
+        method: 'POST',
+        body: JSON.stringify({
+          amount: Math.abs(item.amount),
+          category: item.category,
+          tx_type: item.type,
+          is_need: item.category in {'Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage'},
+          note: item.note
+        })
+      });
+    }
+    toast('Transactions saved!');
+    modal.style.display = 'none';
+    loadDashboard();
+  };
+  document.getElementById('ocrCancelBtn').onclick = () => {
+    modal.style.display = 'none';
+  };
+  modal.style.display = 'flex';
+}
+
+function updateOCRItemType(idx, newType) {
+  window.ocrItems[idx].type = newType;
+}
+function removeOCRItem(idx) {
+  window.ocrItems[idx]._deleted = true;
+  document.getElementById('ocrItemsList').children[idx].style.display = 'none';
+}
 
 // ── FUTURE EXPENSES ──
 async function loadFutureExpenses() {
