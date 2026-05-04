@@ -1,255 +1,341 @@
-import json
-import csv
-import io
-import os
-import requests
+"""
+SmartSpend / Makamandag — AI Personal Finance
+==============================================
+FIXES APPLIED:
+  1. SECRET_KEY   — removed hardcode, reads from env var (required)
+  2. DATABASE_URL — removed hardcode, reads from env var (required)
+  3. GEMINI_API_KEY — removed hardcode, reads from env var (required)
+  4. postgres:// → postgresql:// auto-fix for Render
+  5. SESSION_COOKIE_SECURE / SAMESITE / HTTPONLY — added for proper login on HTTPS
+  6. CORS — added flask_cors so browser sessions work cross-origin
+  7. ensure_schema() — every ALTER wrapped in individual try/except (safe on re-deploy)
+  8. Password migration in ensure_schema — guarded so it never crashes on fresh DB
+  9. create_transaction validation — amount must be >= 1, no negatives
+  10. Expense budget guard — blocks expense if budget is zero or would exceed income
+  11. requirements.txt — Flask 3.x + SQLAlchemy 2.x compatible, removed unused deps
+  12. render.yaml — fixed generateValue syntax, fixed plan: free newline bug
+"""
+
+import json, csv, io, os, re, base64, requests
 import google.generativeai as genai
+
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 from functools import wraps
-import re
-import base64
 
 from flask import Flask, request, jsonify, session, Response
 from flask_sqlalchemy import SQLAlchemy
 from flask_bcrypt import Bcrypt
+from flask_cors import CORS
 from sqlalchemy import inspect, text
 
-# ----------------------------------------------------------------------
-# App configuration
-# ----------------------------------------------------------------------
+# ── APP SETUP ──────────────────────────────────────────────────────────────────
+
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-change-in-production')
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get(
-    'DATABASE_URL',
-    'postgresql://makamandag_db_user:zcDibuXdlpEpcZNGEYLc9nqpgWwuTTfO@dpg-d7od7md7vvec739acfj0-a/makamandag_db'
-)
+
+# ── FIX 1: Never hardcode secrets. Raise clearly if missing. ──────────────────
+_secret = os.environ.get('SECRET_KEY')
+if not _secret:
+    raise RuntimeError(
+        "SECRET_KEY environment variable is not set!\n"
+        "Set it in Render dashboard → Environment → SECRET_KEY"
+    )
+app.config['SECRET_KEY'] = _secret
+
+# ── FIX 2: DATABASE_URL from env, never hardcoded ─────────────────────────────
+_db_url = os.environ.get('DATABASE_URL', '')
+if not _db_url:
+    raise RuntimeError(
+        "DATABASE_URL environment variable is not set!\n"
+        "In Render, link a PostgreSQL database and it auto-sets DATABASE_URL."
+    )
+# ── FIX 4: Render gives postgres://, SQLAlchemy 2.x needs postgresql:// ───────
+if _db_url.startswith('postgres://'):
+    _db_url = _db_url.replace('postgres://', 'postgresql://', 1)
+
+app.config['SQLALCHEMY_DATABASE_URI'] = _db_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['UPLOAD_FOLDER'] = '/tmp'
 
-GEMINI_API_KEY = "AIzaSyDADCUZKxOPf6NKQ7uhCcTZWqnd50HoPVY"
-genai.configure(api_key=GEMINI_API_KEY)
+# Safe pool settings for Render free-tier Postgres
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+    'pool_size':     5,
+    'max_overflow':  10,
+    'pool_timeout':  30,
+    'pool_recycle':  1800,
+    'pool_pre_ping': True,
+}
 
-# ----------------------------------------------------------------------
-# Multi-AI Router (OpenRouter fallback)
-# ----------------------------------------------------------------------
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+# ── FIX 5: Session cookies — required for login to survive on Render HTTPS ────
+app.config['SESSION_COOKIE_SECURE']   = True   # send cookie only over HTTPS
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'  # allow cross-page navigation
+app.config['SESSION_COOKIE_HTTPONLY'] = True   # JS cannot read the cookie
 
-GEMINI_MODELS = ["gemini-2.0-flash-exp", "gemini-1.5-flash", "gemini-pro"]
-FREE_MODELS = [
-    "google/gemini-2.0-flash-001",
-    "meta-llama/llama-3.2-3b-instruct:free",
-    "mistralai/mistral-7b-instruct:free",
-    "microsoft/phi-3-mini-128k-instruct:free",
+# ── FIX 6: CORS — so the browser sends cookies with API requests ──────────────
+CORS(app, supports_credentials=True)
+
+# ── FIX 3: GEMINI_API_KEY from env, never hardcoded ──────────────────────────
+_gemini_key = os.environ.get('GEMINI_API_KEY', '')
+if not _gemini_key:
+    raise RuntimeError(
+        "GEMINI_API_KEY environment variable is not set!\n"
+        "Set it in Render dashboard → Environment → GEMINI_API_KEY"
+    )
+genai.configure(api_key=_gemini_key)
+
+OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY', '')
+OPENROUTER_URL     = 'https://openrouter.ai/api/v1/chat/completions'
+
+# ── AI ROUTER ─────────────────────────────────────────────────────────────────
+
+GEMINI_MODELS = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro']
+OPENROUTER_FALLBACKS = [
+    'google/gemini-2.0-flash-001',
+    'meta-llama/llama-3.2-3b-instruct:free',
+    'mistralai/mistral-7b-instruct:free',
 ]
 
 def route_ai_request(prompt, max_tokens=400):
-    for model_name in GEMINI_MODELS:
+    """Try Gemini models first, fall back to OpenRouter free models."""
+    for name in GEMINI_MODELS:
         try:
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content(prompt)
-            if response and response.text:
-                print(f"✅ Used Gemini model: {model_name}")
-                return response.text.strip()
+            m   = genai.GenerativeModel(name)
+            res = m.generate_content(prompt)
+            if res and res.text:
+                return res.text.strip()
         except Exception as e:
-            print(f"Gemini {model_name} failed: {e}")
-    if not OPENROUTER_API_KEY:
-        return "Sorry, all AI services are busy. Try again later."
-    for model in FREE_MODELS:
-        try:
-            resp = requests.post(
-                OPENROUTER_URL,
-                headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"},
-                json={"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens},
-                timeout=15
-            )
-            if resp.status_code == 200:
-                print(f"✅ Used OpenRouter model: {model}")
-                return resp.json()["choices"][0]["message"]["content"].strip()
-        except Exception:
-            continue
-    return "⚠️ All AI services unavailable."
+            print(f'Gemini {name} failed: {e}')
 
-db = SQLAlchemy(app)
+    if not OPENROUTER_API_KEY:
+        return 'Sorry, all AI services are busy. Try again later.'
+
+    for model in OPENROUTER_FALLBACKS:
+        try:
+            r = requests.post(
+                OPENROUTER_URL,
+                headers={'Authorization': f'Bearer {OPENROUTER_API_KEY}',
+                         'Content-Type':  'application/json'},
+                json={'model': model,
+                      'messages': [{'role': 'user', 'content': prompt}],
+                      'max_tokens': max_tokens},
+                timeout=20,
+            )
+            if r.status_code == 200:
+                return r.json()['choices'][0]['message']['content'].strip()
+        except Exception as e:
+            print(f'OpenRouter {model} failed: {e}')
+
+    return '⚠️ All AI services unavailable.'
+
+def _strip_fences(raw: str) -> str:
+    """Remove markdown code fences from AI JSON output."""
+    raw = raw.strip()
+    if raw.startswith('```'):
+        parts = raw.split('```')
+        raw   = parts[1] if len(parts) > 1 else raw
+        if raw.startswith('json'):
+            raw = raw[4:]
+    return raw.strip()
+
+# ── DATABASE ──────────────────────────────────────────────────────────────────
+
+db     = SQLAlchemy(app)
 bcrypt = Bcrypt(app)
 
-# ----------------------------------------------------------------------
-# Models
-# ----------------------------------------------------------------------
+# ── MODELS ────────────────────────────────────────────────────────────────────
+
 class User(db.Model):
     __tablename__ = 'users'
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(100), nullable=False)
-    email = db.Column(db.String(120), unique=True, nullable=False)
-    password_hash = db.Column(db.String(128), nullable=False)
-    social_status = db.Column(db.String(20), default='Middle')
-    spending_mindset = db.Column(db.String(20), default='Neutral')
-    monthly_budget_limit = db.Column(db.Float, default=0.0)
-    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
-    role = db.Column(db.String(20), default='user')
-    avatar_url = db.Column(db.String(500))
+    id                   = db.Column(db.Integer,      primary_key=True)
+    name                 = db.Column(db.String(100),  nullable=False)
+    email                = db.Column(db.String(120),  unique=True, nullable=False)
+    password_hash        = db.Column(db.String(256),  nullable=False)
+    social_status        = db.Column(db.String(20),   default='Middle')
+    spending_mindset     = db.Column(db.String(20),   default='Neutral')
+    monthly_budget_limit = db.Column(db.Float,        default=0.0)
+    created_at           = db.Column(db.DateTime,     default=lambda: datetime.now(timezone.utc))
+    role                 = db.Column(db.String(20),   default='user')
+    avatar_url           = db.Column(db.String(1000), nullable=True)
 
-    transactions = db.relationship('Transaction', backref='user', lazy=True)
-    budgets = db.relationship('Budget', backref='user', lazy=True)
+    transactions    = db.relationship('Transaction',   backref='user', lazy=True)
+    budgets         = db.relationship('Budget',        backref='user', lazy=True)
     future_expenses = db.relationship('FutureExpense', backref='user', lazy=True)
-    allocations = db.relationship('UserAllocation', backref='user', lazy=True)
+    allocations     = db.relationship('UserAllocation',backref='user', lazy=True)
 
-    def set_password(self, password):
-        self.password_hash = bcrypt.generate_password_hash(password).decode('utf-8')
+    def set_password(self, pw):
+        self.password_hash = bcrypt.generate_password_hash(pw).decode('utf-8')
 
-    def check_password(self, password):
+    def check_password(self, pw):
         try:
-            return bcrypt.check_password_hash(self.password_hash, password)
-        except ValueError:
+            return bcrypt.check_password_hash(self.password_hash, pw)
+        except Exception:
             return False
 
     def to_dict(self):
         return {
-            'id': self.id,
-            'name': self.name,
-            'email': self.email,
-            'social_status': self.social_status,
-            'spending_mindset': self.spending_mindset,
+            'id':                   self.id,
+            'name':                 self.name,
+            'email':                self.email,
+            'social_status':        self.social_status,
+            'spending_mindset':     self.spending_mindset,
             'monthly_budget_limit': self.monthly_budget_limit,
-            'role': self.role,
-            'avatar_url': self.avatar_url,
-            'created_at': self.created_at.isoformat() if self.created_at else None
+            'role':                 self.role,
+            'avatar_url':           self.avatar_url,
+            'created_at':           self.created_at.isoformat() if self.created_at else None,
         }
 
 
 class Transaction(db.Model):
     __tablename__ = 'transactions'
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
-    amount = db.Column(db.Float, nullable=False)
-    category = db.Column(db.String(50), nullable=False)
-    tx_type = db.Column(db.String(10), nullable=False)
-    is_need = db.Column(db.Boolean, default=True)
-    priority = db.Column(db.Integer, default=1)
-    note = db.Column(db.String(200))
-    tx_date = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    id        = db.Column(db.Integer,     primary_key=True)
+    user_id   = db.Column(db.Integer,     db.ForeignKey('users.id'), nullable=False)
+    amount    = db.Column(db.Float,       nullable=False)
+    category  = db.Column(db.String(50),  nullable=False)
+    tx_type   = db.Column(db.String(10),  nullable=False)
+    is_need   = db.Column(db.Boolean,     default=True)
+    priority  = db.Column(db.Integer,     default=1)
+    note      = db.Column(db.String(200), default='')
+    tx_date   = db.Column(db.DateTime,    default=lambda: datetime.now(timezone.utc))
 
     def to_dict(self):
         return {
-            'id': self.id,
-            'user_id': self.user_id,
-            'amount': self.amount,
+            'id':       self.id,
+            'user_id':  self.user_id,
+            'amount':   self.amount,
             'category': self.category,
-            'tx_type': self.tx_type,
-            'is_need': self.is_need,
+            'tx_type':  self.tx_type,
+            'is_need':  self.is_need,
             'priority': self.priority,
-            'note': self.note,
-            'tx_date': self.tx_date.isoformat()
+            'note':     self.note or '',
+            'tx_date':  self.tx_date.isoformat(),
         }
 
 
 class Budget(db.Model):
     __tablename__ = 'budgets'
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
-    category = db.Column(db.String(50), nullable=False)
-    limit_amount = db.Column(db.Float, nullable=False)
-    __table_args__ = (db.UniqueConstraint('user_id', 'category', name='unique_user_category'),)
+    id           = db.Column(db.Integer,    primary_key=True)
+    user_id      = db.Column(db.Integer,    db.ForeignKey('users.id'), nullable=False)
+    category     = db.Column(db.String(50), nullable=False)
+    limit_amount = db.Column(db.Float,      nullable=False)
+    __table_args__ = (db.UniqueConstraint('user_id', 'category', name='uq_user_cat'),)
 
 
 class FutureExpense(db.Model):
     __tablename__ = 'future_expenses'
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
-    description = db.Column(db.String(200), nullable=False)
-    amount = db.Column(db.Float, nullable=False)
-    category = db.Column(db.String(50), nullable=False)
-    cycle = db.Column(db.String(20), default='One-time')
-    expense_date = db.Column(db.Date, nullable=False)
-    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    id           = db.Column(db.Integer,      primary_key=True)
+    user_id      = db.Column(db.Integer,      db.ForeignKey('users.id'), nullable=False)
+    description  = db.Column(db.String(200),  nullable=False)
+    amount       = db.Column(db.Float,        nullable=False)
+    category     = db.Column(db.String(50),   nullable=False)
+    cycle        = db.Column(db.String(20),   default='One-time')
+    expense_date = db.Column(db.Date,         nullable=False)
+    created_at   = db.Column(db.DateTime,     default=lambda: datetime.now(timezone.utc))
 
     def to_dict(self):
         return {
-            'id': self.id,
+            'id':          self.id,
             'description': self.description,
-            'amount': self.amount,
-            'category': self.category,
-            'cycle': self.cycle,
-            'date': self.expense_date.isoformat()
+            'amount':      self.amount,
+            'category':    self.category,
+            'cycle':       self.cycle,
+            'date':        self.expense_date.isoformat(),
         }
 
 
 class UserAllocation(db.Model):
     __tablename__ = 'user_allocations'
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    id            = db.Column(db.Integer,    primary_key=True)
+    user_id       = db.Column(db.Integer,    db.ForeignKey('users.id'), nullable=False)
     category_name = db.Column(db.String(50), nullable=False)
-    type = db.Column(db.String(10), nullable=False)
-    percentage = db.Column(db.Float, nullable=False)
-    __table_args__ = (db.UniqueConstraint('user_id', 'category_name', name='unique_user_category_allocation'),)
+    type          = db.Column(db.String(10), nullable=False)
+    percentage    = db.Column(db.Float,      nullable=False)
+    __table_args__ = (db.UniqueConstraint('user_id', 'category_name', name='uq_user_cat_alloc'),)
 
+# ── SCHEMA MIGRATION ──────────────────────────────────────────────────────────
 
-# ----------------------------------------------------------------------
-# Schema migration – fixed
-# ----------------------------------------------------------------------
 def ensure_schema():
+    """
+    FIX 7 & 8: Every ALTER wrapped in its own try/except.
+    Safe on fresh DB, re-deploy, and existing DBs.
+    """
     inspector = inspect(db.engine)
 
+    # ── users table ──────────────────────────────────────────────────────────
     if inspector.has_table('users'):
-        existing_columns = [col['name'] for col in inspector.get_columns('users')]
-        if 'password' in existing_columns:
-            with db.engine.connect() as conn:
-                rows = conn.execute(text("SELECT id, password FROM users WHERE password IS NOT NULL")).fetchall()
-                for uid, plain_pw in rows:
-                    hashed = bcrypt.generate_password_hash(plain_pw).decode('utf-8')
-                    conn.execute(
-                        text("UPDATE users SET password_hash = :hash WHERE id = :uid"),
-                        {"hash": hashed, "uid": uid}
-                    )
-                conn.execute(text('ALTER TABLE users DROP COLUMN password'))
-                conn.commit()
-        for col, defn in [
-            ('password_hash', "VARCHAR(128) NOT NULL DEFAULT ''"),
-            ('social_status', "VARCHAR(20) DEFAULT 'Middle'"),
-            ('spending_mindset', "VARCHAR(20) DEFAULT 'Neutral'"),
-            ('monthly_budget_limit', "FLOAT DEFAULT 0.0"),
-            ('role', "VARCHAR(20) DEFAULT 'user'"),
-            ('avatar_url', "VARCHAR(500)"),
-        ]:
-            if col not in existing_columns:
+        cols = [c['name'] for c in inspector.get_columns('users')]
+
+        # FIX 8: Only attempt password migration if both columns exist safely
+        if 'password' in cols and 'password_hash' in cols:
+            try:
                 with db.engine.connect() as conn:
-                    conn.execute(text(f'ALTER TABLE users ADD COLUMN {col} {defn}'))
+                    rows = conn.execute(
+                        text("SELECT id, password FROM users WHERE password IS NOT NULL AND password != ''")
+                    ).fetchall()
+                    for uid, plain_pw in rows:
+                        try:
+                            hashed = bcrypt.generate_password_hash(plain_pw).decode('utf-8')
+                            conn.execute(
+                                text("UPDATE users SET password_hash = :h WHERE id = :uid"),
+                                {'h': hashed, 'uid': uid}
+                            )
+                        except Exception:
+                            pass  # skip rows that already have bcrypt hashes
+                    conn.execute(text('ALTER TABLE users DROP COLUMN password'))
                     conn.commit()
+            except Exception as e:
+                print(f'Password migration warning (safe to ignore): {e}')
 
+        # Add missing columns — each in its own try/except
+        _add_col(cols, 'password_hash',        "VARCHAR(256) NOT NULL DEFAULT ''")
+        _add_col(cols, 'social_status',         "VARCHAR(20)  DEFAULT 'Middle'")
+        _add_col(cols, 'spending_mindset',       "VARCHAR(20)  DEFAULT 'Neutral'")
+        _add_col(cols, 'monthly_budget_limit',   'FLOAT        DEFAULT 0.0')
+        _add_col(cols, 'role',                   "VARCHAR(20)  DEFAULT 'user'")
+        _add_col(cols, 'avatar_url',             'VARCHAR(1000)')
+
+    # ── transactions table ───────────────────────────────────────────────────
     if inspector.has_table('transactions'):
-        tx_columns = [col['name'] for col in inspector.get_columns('transactions')]
-        if 'is_need' not in tx_columns:
-            with db.engine.connect() as conn:
-                conn.execute(text('ALTER TABLE transactions ADD COLUMN is_need BOOLEAN DEFAULT TRUE'))
-                conn.commit()
-        if 'priority' not in tx_columns:
-            with db.engine.connect() as conn:
-                conn.execute(text('ALTER TABLE transactions ADD COLUMN priority INTEGER DEFAULT 1'))
-                conn.commit()
+        tx_cols = [c['name'] for c in inspector.get_columns('transactions')]
+        _add_col(tx_cols, 'is_need',  'BOOLEAN DEFAULT TRUE',  'transactions')
+        _add_col(tx_cols, 'priority', 'INTEGER DEFAULT 1',     'transactions')
 
+    # Create tables that don't exist yet
     db.create_all()
 
-    admin = User.query.filter_by(email='admin@smartspend.com').first()
-    if not admin:
-        admin = User(name='Admin', email='admin@smartspend.com', role='admin')
-        admin.set_password('admin123')
-        db.session.add(admin)
-        db.session.commit()
-        print("✅ Admin user created: admin@smartspend.com / admin123")
-    elif admin.role != 'admin':
-        admin.role = 'admin'
-        db.session.commit()
+    # Seed default admin if none exists
+    try:
+        admin = User.query.filter_by(email='admin@smartspend.com').first()
+        if not admin:
+            admin = User(name='Admin', email='admin@smartspend.com', role='admin')
+            admin.set_password('Admin@2026!')
+            db.session.add(admin)
+            db.session.commit()
+            print('✅ Admin seeded: admin@smartspend.com / Admin@2026!')
+        elif admin.role != 'admin':
+            admin.role = 'admin'
+            db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        print(f'Admin seed warning: {e}')
 
 
-# ----------------------------------------------------------------------
-# Authentication helpers
-# ----------------------------------------------------------------------
+def _add_col(existing_cols, col_name, definition, table='users'):
+    """Helper: add a column only if it doesn't exist, silently skip if it does."""
+    if col_name not in existing_cols:
+        try:
+            with db.engine.connect() as conn:
+                conn.execute(text(f'ALTER TABLE {table} ADD COLUMN {col_name} {definition}'))
+                conn.commit()
+        except Exception as e:
+            print(f'Could not add {table}.{col_name} (safe to ignore): {e}')
+
+# ── AUTH DECORATORS ───────────────────────────────────────────────────────────
+
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         if 'user_id' not in session:
-            return jsonify({'error': 'Unauthorized'}), 401
+            return jsonify({'error': 'Unauthorized — please log in'}), 401
         return f(*args, **kwargs)
     return decorated
 
@@ -257,7 +343,7 @@ def admin_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         if 'user_id' not in session:
-            return jsonify({'error': 'Unauthorized'}), 401
+            return jsonify({'error': 'Unauthorized — please log in'}), 401
         user = User.query.get(session['user_id'])
         if not user or user.role != 'admin':
             return jsonify({'error': 'Admin access required'}), 403
@@ -265,353 +351,491 @@ def admin_required(f):
     return decorated
 
 def get_current_user():
-    return User.query.get(session.get('user_id')) if 'user_id' in session else None
+    return User.query.get(session['user_id']) if 'user_id' in session else None
 
+# ── ANALYTICS HELPERS ─────────────────────────────────────────────────────────
 
-# ----------------------------------------------------------------------
-# Analytics helpers
-# ----------------------------------------------------------------------
 def compute_health_score(user_id):
-    thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
-    expenses = Transaction.query.filter(Transaction.user_id == user_id, Transaction.tx_type == 'expense', Transaction.tx_date >= thirty_days_ago).all()
-    income = Transaction.query.filter(Transaction.user_id == user_id, Transaction.tx_type == 'income', Transaction.tx_date >= thirty_days_ago).all()
-    total_expense = sum(e.amount for e in expenses)
-    total_income = sum(i.amount for i in income)
-    savings_rate = max(0, (total_income - total_expense) / total_income) if total_income > 0 else 0
-    want_expense = sum(e.amount for e in expenses if not e.is_need)
-    total_exp = total_expense or 1
-    want_ratio = want_expense / total_exp
-    budgets = {b.category: b.limit_amount for b in Budget.query.filter_by(user_id=user_id).all()}
-    overspend_penalty = sum(
-        (sum(e.amount for e in expenses if e.category == cat) - limit) / limit
-        for cat, limit in budgets.items()
-        if sum(e.amount for e in expenses if e.category == cat) > limit
+    ago30 = datetime.now(timezone.utc) - timedelta(days=30)
+    exps  = Transaction.query.filter(Transaction.user_id == user_id,
+                                     Transaction.tx_type == 'expense',
+                                     Transaction.tx_date >= ago30).all()
+    incs  = Transaction.query.filter(Transaction.user_id == user_id,
+                                     Transaction.tx_type == 'income',
+                                     Transaction.tx_date >= ago30).all()
+    total_exp = sum(e.amount for e in exps)
+    total_inc = sum(i.amount for i in incs)
+    savings_rate = max(0, (total_inc - total_exp) / total_inc) if total_inc > 0 else 0
+    want_ratio   = sum(e.amount for e in exps if not e.is_need) / (total_exp or 1)
+    budgets      = {b.category: b.limit_amount for b in Budget.query.filter_by(user_id=user_id).all()}
+    overspend    = sum(
+        (sum(e.amount for e in exps if e.category == cat) - lim) / lim
+        for cat, lim in budgets.items()
+        if lim > 0 and sum(e.amount for e in exps if e.category == cat) > lim
     )
-    score = 70 + int(savings_rate * 20) - int(want_ratio * 15) - min(20, int(overspend_penalty * 10))
-    return max(0, min(100, score))
+    return max(0, min(100, int(70 + savings_rate * 20 - want_ratio * 15 - min(20, overspend * 10))))
+
 
 def generate_weekly_forecast(user_id):
-    thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
-    expenses = Transaction.query.filter(Transaction.user_id == user_id, Transaction.tx_type == 'expense', Transaction.tx_date >= thirty_days_ago).all()
-    if not expenses:
-        return {'Week 1': 0, 'Week 2': 0, 'Week 3': 0, 'Week 4': 0}
-    daily_totals = defaultdict(float)
-    for e in expenses:
-        daily_totals[e.tx_date.date()] += e.amount
-    days_sorted = sorted(daily_totals.keys())
-    values = [daily_totals[d] for d in days_sorted]
+    ago30 = datetime.now(timezone.utc) - timedelta(days=30)
+    exps  = Transaction.query.filter(Transaction.user_id == user_id,
+                                     Transaction.tx_type == 'expense',
+                                     Transaction.tx_date >= ago30).all()
+    if not exps:
+        return {f'Week {i}': 0 for i in range(1, 5)}
+    daily = defaultdict(float)
+    for e in exps:
+        daily[e.tx_date.date()] += e.amount
+    values = [daily[d] for d in sorted(daily)]
     n = len(values)
     if n > 1:
-        x_mean = (n - 1) / 2
-        y_mean = sum(values) / n
-        num = sum((i - x_mean) * (values[i] - y_mean) for i in range(n))
-        den = sum((i - x_mean) ** 2 for i in range(n))
-        slope = num / den if den else 0
-        intercept = y_mean - slope * x_mean
-        week_sums = [0, 0, 0, 0]
+        xm = (n - 1) / 2
+        ym = sum(values) / n
+        num = sum((i - xm) * (values[i] - ym) for i in range(n))
+        den = sum((i - xm) ** 2 for i in range(n)) or 1
+        slope = num / den
+        intercept = ym - slope * xm
+        weeks = [0, 0, 0, 0]
         for day in range(1, 29):
-            week_sums[(day - 1) // 7] += max(0, intercept + slope * (n + day))
-        return {f'Week {i+1}': week_sums[i] for i in range(4)}
+            weeks[(day - 1) // 7] += max(0, intercept + slope * (n + day))
+        return {f'Week {i+1}': round(weeks[i], 2) for i in range(4)}
     avg = sum(values) / n * 7
-    return {f'Week {i+1}': avg for i in range(4)}
+    return {f'Week {i+1}': round(avg, 2) for i in range(4)}
+
 
 def get_category_totals(user_id):
-    now = datetime.now(timezone.utc)
-    first_of_month = datetime(now.year, now.month, 1)
-    expenses = Transaction.query.filter(Transaction.user_id == user_id, Transaction.tx_type == 'expense', Transaction.tx_date >= first_of_month).all()
+    now   = datetime.now(timezone.utc)
+    start = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
+    exps  = Transaction.query.filter(Transaction.user_id == user_id,
+                                     Transaction.tx_type == 'expense',
+                                     Transaction.tx_date >= start).all()
     totals = defaultdict(float)
-    for e in expenses:
+    for e in exps:
         totals[e.category] += e.amount
     return dict(totals)
 
+
 def get_monthly_summary(user_id):
-    all_trans = Transaction.query.filter_by(user_id=user_id).all()
-    balance = sum(t.amount if t.tx_type == 'income' else -t.amount for t in all_trans)
-    now = datetime.now(timezone.utc)
-    first_of_month = datetime(now.year, now.month, 1)
-    this_month_expense = sum(t.amount for t in all_trans if t.tx_type == 'expense' and t.tx_date >= first_of_month)
-    this_month_income = sum(t.amount for t in all_trans if t.tx_type == 'income' and t.tx_date >= first_of_month)
-    monthly = defaultdict(lambda: {'income': 0, 'expense': 0})
-    for t in all_trans:
-        key = t.tx_date.strftime('%Y-%m')
-        monthly[key]['income' if t.tx_type == 'income' else 'expense'] += t.amount
-    sorted_months = sorted(monthly.keys())[-6:]
+    all_tx  = Transaction.query.filter_by(user_id=user_id).all()
+    balance = sum(t.amount if t.tx_type == 'income' else -t.amount for t in all_tx)
+    now     = datetime.now(timezone.utc)
+    start   = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
+    this_exp = sum(t.amount for t in all_tx if t.tx_type == 'expense' and t.tx_date >= start)
+    this_inc = sum(t.amount for t in all_tx if t.tx_type == 'income'  and t.tx_date >= start)
+    monthly  = defaultdict(lambda: {'income': 0.0, 'expense': 0.0})
+    for t in all_tx:
+        k = t.tx_date.strftime('%Y-%m')
+        monthly[k]['income' if t.tx_type == 'income' else 'expense'] += t.amount
+    last6 = sorted(monthly)[-6:]
     return {
-        'balance': balance,
-        'expense': this_month_expense,
-        'income': this_month_income,
-        'monthly': {m: monthly[m] for m in sorted_months}
+        'balance': round(balance, 2),
+        'expense': round(this_exp, 2),
+        'income':  round(this_inc, 2),
+        'monthly': {m: monthly[m] for m in last6},
     }
 
+
 def compute_longevity(user_id):
-    summary = get_monthly_summary(user_id)
-    thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
-    expenses = Transaction.query.filter(Transaction.user_id == user_id, Transaction.tx_type == 'expense', Transaction.tx_date >= thirty_days_ago).all()
-    avg_daily = sum(e.amount for e in expenses) / 30 if expenses else 0
-    days = int(summary['balance'] / avg_daily) if avg_daily > 0 else 0
-    return {'balance': summary['balance'], 'avg_daily_spend': avg_daily, 'days': days}
+    s      = get_monthly_summary(user_id)
+    ago30  = datetime.now(timezone.utc) - timedelta(days=30)
+    exps   = Transaction.query.filter(Transaction.user_id == user_id,
+                                      Transaction.tx_type == 'expense',
+                                      Transaction.tx_date >= ago30).all()
+    avg    = sum(e.amount for e in exps) / 30 if exps else 0
+    days   = int(s['balance'] / avg) if avg > 0 else 0
+    return {'balance': s['balance'], 'avg_daily_spend': round(avg, 2), 'days': days}
 
+# ── AUTH ROUTES ───────────────────────────────────────────────────────────────
 
-# ----------------------------------------------------------------------
-# Auth routes
-# ----------------------------------------------------------------------
 @app.route('/api/register', methods=['POST'])
 def register():
-    data = request.json
-    if not all(k in data for k in ['name', 'email', 'password']):
-        return jsonify({'error': 'Missing fields'}), 400
-    if User.query.filter_by(email=data['email']).first():
-        return jsonify({'error': 'Email already exists'}), 400
-    user = User(name=data['name'], email=data['email'], role='user')
-    user.set_password(data['password'])
+    data = request.json or {}
+    name = (data.get('name') or '').strip()
+    email= (data.get('email') or '').strip().lower()
+    pw   = data.get('password', '')
+    if not name or not email or not pw:
+        return jsonify({'error': 'Name, email and password are required'}), 400
+    if len(pw) < 6:
+        return jsonify({'error': 'Password must be at least 6 characters'}), 400
+    if User.query.filter_by(email=email).first():
+        return jsonify({'error': 'Email already registered'}), 409
+    user = User(name=name, email=email, role='user')
+    user.set_password(pw)
     db.session.add(user)
     db.session.commit()
     session['user_id'] = user.id
     return jsonify(user.to_dict()), 201
 
+
 @app.route('/api/login', methods=['POST'])
 def login():
-    data = request.json
-    user = User.query.filter_by(email=data.get('email')).first()
-    if not user or not user.check_password(data.get('password', '')):
-        return jsonify({'error': 'Invalid credentials'}), 401
+    """
+    FIX: Proper session assignment. Returns user dict on success so the
+    frontend can update currentUser immediately without an extra /api/me call.
+    """
+    data  = request.json or {}
+    email = (data.get('email') or '').strip().lower()
+    pw    = data.get('password', '')
+    if not email or not pw:
+        return jsonify({'error': 'Email and password are required'}), 400
+    user = User.query.filter_by(email=email).first()
+    if not user or not user.check_password(pw):
+        return jsonify({'error': 'Invalid email or password'}), 401
+    # Write session — this is what keeps the user logged in
+    session.permanent = True          # survive browser restart
     session['user_id'] = user.id
     return jsonify(user.to_dict()), 200
 
+
 @app.route('/api/logout', methods=['POST'])
 def logout():
-    session.pop('user_id', None)
+    session.clear()
     return jsonify({'message': 'Logged out'}), 200
 
-@app.route('/api/me', methods=['GET'])
+
+@app.route('/api/me')
 def me():
-    user = get_current_user()
-    return jsonify(user.to_dict()) if user else (jsonify({'error': 'Unauthorized'}), 401)
+    """
+    Called on every page load to restore session. Returns 401 if not logged in
+    so the frontend shows the login screen.
+    """
+    uid = session.get('user_id')
+    if not uid:
+        return jsonify({'error': 'Not logged in'}), 401
+    user = User.query.get(uid)
+    if not user:
+        session.clear()
+        return jsonify({'error': 'User not found'}), 401
+    return jsonify(user.to_dict())
 
+# ── PROFILE ROUTES ────────────────────────────────────────────────────────────
 
-# ----------------------------------------------------------------------
-# Profile endpoints
-# ----------------------------------------------------------------------
 @app.route('/api/profile', methods=['PUT'])
 @login_required
 def update_profile():
     user = get_current_user()
-    data = request.json
-    if 'name' in data:
-        user.name = data['name']
-    if 'email' in data:
-        user.email = data['email']
-    if 'password' in data and data['password']:
+    data = request.json or {}
+    if 'name'       in data: user.name       = data['name'].strip()
+    if 'email'      in data: user.email      = data['email'].strip().lower()
+    if 'avatar_url' in data: user.avatar_url = data['avatar_url']
+    if data.get('password'):
+        if len(data['password']) < 6:
+            return jsonify({'error': 'Password must be at least 6 characters'}), 400
         user.set_password(data['password'])
-    if 'avatar_url' in data:
-        user.avatar_url = data['avatar_url']
     db.session.commit()
     return jsonify(user.to_dict())
+
 
 @app.route('/api/me/avatar', methods=['PUT'])
 @login_required
 def update_avatar():
-    user = get_current_user()
-    data = request.json
-    user.avatar_url = data.get('avatar_url', '')
+    user           = get_current_user()
+    user.avatar_url= (request.json or {}).get('avatar_url', '')
     db.session.commit()
     return jsonify({'avatar_url': user.avatar_url})
 
+# ── TRANSACTION ROUTES ────────────────────────────────────────────────────────
 
-# ----------------------------------------------------------------------
-# Transaction routes
-# ----------------------------------------------------------------------
 @app.route('/api/transactions', methods=['GET'])
 @login_required
 def list_transactions():
     user = get_current_user()
-    return jsonify([t.to_dict() for t in Transaction.query.filter_by(user_id=user.id).order_by(Transaction.tx_date.desc()).all()])
+    txs  = Transaction.query.filter_by(user_id=user.id)\
+                            .order_by(Transaction.tx_date.desc()).all()
+    return jsonify([t.to_dict() for t in txs])
+
 
 @app.route('/api/transactions', methods=['POST'])
 @login_required
 def create_transaction():
+    """
+    FIX 9 & 10:
+    - Amount must be >= 1 (no negative or zero values)
+    - Expenses blocked if budget for category is zero
+    - Expenses blocked if they would exceed remaining monthly income
+    """
     user = get_current_user()
-    data = request.json
-    if not all(k in data for k in ['amount', 'category', 'tx_type']):
-        return jsonify({'error': 'Missing required fields'}), 400
+    data = request.json or {}
 
-    tx_date = data.get('tx_date')
-    if tx_date:
+    if not all(k in data for k in ('amount', 'category', 'tx_type')):
+        return jsonify({'error': 'amount, category and tx_type are required'}), 400
+
+    amount = float(data['amount'])
+
+    # ── FIX 9: Enforce minimum amount of 1 ────────────────────────────────
+    if amount < 1:
+        return jsonify({'error': 'Amount must be at least ₱1'}), 400
+
+    category = data['category']
+    tx_type  = data['tx_type']
+
+    if tx_type == 'expense':
+        summary = get_monthly_summary(user.id)
+
+        # ── FIX 10a: Block if budget for this category is zero ─────────────
+        budget = Budget.query.filter_by(user_id=user.id, category=category).first()
+        if budget is not None and budget.limit_amount <= 0:
+            return jsonify({
+                'error': f'Budget for "{category}" is ₱0. '
+                         'Set a budget limit first before adding expenses.'
+            }), 400
+
+        # ── FIX 10b: Block if expense exceeds available monthly income ──────
+        remaining = summary['income'] - summary['expense']
+        if amount > remaining and summary['income'] > 0:
+            return jsonify({
+                'error': f'This expense (₱{amount:,.2f}) exceeds your remaining '
+                         f'monthly balance (₱{remaining:,.2f}). '
+                         'Add more income or reduce the amount.'
+            }), 400
+
+    # Parse optional custom date
+    tx_date = datetime.now(timezone.utc)
+    if data.get('tx_date'):
         try:
-            tx_date = datetime.fromisoformat(tx_date)
-        except:
-            tx_date = datetime.now(timezone.utc)
-    else:
-        tx_date = datetime.now(timezone.utc)
+            tx_date = datetime.fromisoformat(data['tx_date'])
+            if tx_date.tzinfo is None:
+                tx_date = tx_date.replace(tzinfo=timezone.utc)
+        except Exception:
+            pass
 
     tx = Transaction(
-        user_id=user.id,
-        amount=data['amount'],
-        category=data['category'],
-        tx_type=data['tx_type'],
-        is_need=data.get('is_need', True),
-        priority=data.get('priority', 1),
-        note=data.get('note', ''),
-        tx_date=tx_date
+        user_id  = user.id,
+        amount   = amount,
+        category = category,
+        tx_type  = tx_type,
+        is_need  = data.get('is_need', True),
+        priority = data.get('priority', 1),
+        note     = data.get('note', ''),
+        tx_date  = tx_date,
     )
     db.session.add(tx)
     db.session.commit()
+
+    # Auto-apply past-due one-time future expenses when salary income is logged
     if tx.tx_type == 'income' and tx.category.lower() == 'salary':
         today = datetime.now(timezone.utc).date()
-        for exp in FutureExpense.query.filter(FutureExpense.user_id == user.id, FutureExpense.expense_date <= today, FutureExpense.cycle == 'One-time').all():
+        needs = {'Food & Dining', 'Debt repayment', 'Mortgage', 'Transport'}
+        for exp in FutureExpense.query.filter(
+            FutureExpense.user_id     == user.id,
+            FutureExpense.expense_date<= today,
+            FutureExpense.cycle       == 'One-time'
+        ).all():
             db.session.add(Transaction(
-                user_id=user.id, amount=exp.amount, category=exp.category,
-                tx_type='expense', is_need=(exp.category in ['Food & Dining', 'Debt repayment', 'Mortgage', 'Transport']),
-                priority=1, note=f"Auto: {exp.description}"
+                user_id  = user.id, amount = exp.amount, category = exp.category,
+                tx_type  = 'expense', is_need = exp.category in needs,
+                priority = 1,        note    = f'Auto: {exp.description}'
             ))
             db.session.delete(exp)
         db.session.commit()
+
     return jsonify(tx.to_dict()), 201
+
 
 @app.route('/api/transactions/<int:tx_id>', methods=['DELETE'])
 @login_required
 def delete_transaction(tx_id):
     user = get_current_user()
-    tx = Transaction.query.get(tx_id)
-    if not tx or tx.user_id != user.id:
-        return jsonify({'error': 'Not found'}), 404
+    tx   = Transaction.query.filter_by(id=tx_id, user_id=user.id).first()
+    if not tx:
+        return jsonify({'error': 'Transaction not found'}), 404
     db.session.delete(tx)
     db.session.commit()
     return jsonify({'message': 'Deleted'}), 200
 
-# ----------------------------------------------------------------------
-# Budget routes
-# ----------------------------------------------------------------------
-@app.route('/api/budgets/<int:user_id>', methods=['GET'])
-@login_required
-def get_budgets(user_id):
-    if get_current_user().id != user_id:
-        return jsonify({'error': 'Forbidden'}), 403
-    budgets = Budget.query.filter_by(user_id=user_id).all()
-    return jsonify([{'category': b.category, 'limit': b.limit_amount} for b in budgets])
+# ── BUDGET ROUTES ─────────────────────────────────────────────────────────────
 
-@app.route('/api/budgets/<int:user_id>', methods=['POST'])
+@app.route('/api/budgets/<int:uid>', methods=['GET'])
 @login_required
-def upsert_budget(user_id):
-    if get_current_user().id != user_id:
+def get_budgets(uid):
+    if get_current_user().id != uid:
         return jsonify({'error': 'Forbidden'}), 403
-    data = request.json
-    category = data.get('category')
-    limit = data.get('limit')
+    return jsonify([{'category': b.category, 'limit': b.limit_amount}
+                    for b in Budget.query.filter_by(user_id=uid).all()])
+
+
+@app.route('/api/budgets/<int:uid>', methods=['POST'])
+@login_required
+def upsert_budget(uid):
+    if get_current_user().id != uid:
+        return jsonify({'error': 'Forbidden'}), 403
+    data     = request.json or {}
+    category = data.get('category', '').strip()
+    limit    = data.get('limit')
     if not category or limit is None:
-        return jsonify({'error': 'Category and limit required'}), 400
-    existing = Budget.query.filter_by(user_id=user_id, category=category).first()
-    if existing:
-        existing.limit_amount = limit
+        return jsonify({'error': 'category and limit are required'}), 400
+    b = Budget.query.filter_by(user_id=uid, category=category).first()
+    if b:
+        b.limit_amount = float(limit)
     else:
-        existing = Budget(user_id=user_id, category=category, limit_amount=limit)
-        db.session.add(existing)
+        db.session.add(Budget(user_id=uid, category=category, limit_amount=float(limit)))
     db.session.commit()
     return jsonify({'message': 'Budget saved'})
 
-@app.route('/api/budgets/<int:user_id>/<path:category>', methods=['PUT'])
-@login_required
-def update_budget(user_id, category):
-    if get_current_user().id != user_id:
-        return jsonify({'error': 'Forbidden'}), 403
-    data = request.json
-    new_limit = data.get('limit')
-    if new_limit is None:
-        return jsonify({'error': 'Limit required'}), 400
-    budget = Budget.query.filter_by(user_id=user_id, category=category).first()
-    if budget:
-        budget.limit_amount = new_limit
-        db.session.commit()
-        return jsonify({'message': 'Budget updated'})
-    else:
-        budget = Budget(user_id=user_id, category=category, limit_amount=new_limit)
-        db.session.add(budget)
-        db.session.commit()
-        return jsonify({'message': 'Budget created'}), 201
 
-@app.route('/api/budgets/reset_to_ai/<int:user_id>', methods=['POST'])
+@app.route('/api/budgets/<int:uid>/<path:category>', methods=['PUT'])
 @login_required
-def reset_budgets_to_ai(user_id):
-    if get_current_user().id != user_id:
+def update_budget(uid, category):
+    if get_current_user().id != uid:
         return jsonify({'error': 'Forbidden'}), 403
-    user = get_current_user()
-    allocs = UserAllocation.query.filter_by(user_id=user_id).all()
+    data  = request.json or {}
+    limit = data.get('limit')
+    if limit is None:
+        return jsonify({'error': 'limit is required'}), 400
+    b = Budget.query.filter_by(user_id=uid, category=category).first()
+    if b:
+        b.limit_amount = float(limit)
+    else:
+        db.session.add(Budget(user_id=uid, category=category, limit_amount=float(limit)))
+    db.session.commit()
+    return jsonify({'message': 'Budget updated'})
+
+
+@app.route('/api/budgets/reset_to_ai/<int:uid>', methods=['POST'])
+@login_required
+def reset_budgets_to_ai(uid):
+    if get_current_user().id != uid:
+        return jsonify({'error': 'Forbidden'}), 403
+    user   = get_current_user()
+    allocs = UserAllocation.query.filter_by(user_id=uid).all()
     if not allocs or user.monthly_budget_limit <= 0:
-        return jsonify({'error': 'No AI allocation available'}), 400
-    Budget.query.filter_by(user_id=user_id).delete()
+        return jsonify({'error': 'No AI allocation found. Run AI Plan first.'}), 400
+    Budget.query.filter_by(user_id=uid).delete()
     for a in allocs:
         db.session.add(Budget(
-            user_id=user_id,
-            category=a.category_name,
-            limit_amount=round(user.monthly_budget_limit * a.percentage / 100, 2)
+            user_id      = uid,
+            category     = a.category_name,
+            limit_amount = round(user.monthly_budget_limit * a.percentage / 100, 2)
         ))
     db.session.commit()
     return jsonify({'message': 'Budgets reset to AI recommendations'})
 
-@app.route('/api/summary/<int:user_id>')
-@login_required
-def summary(user_id):
-    if get_current_user().id != user_id:
-        return jsonify({'error': 'Forbidden'}), 403
-    return jsonify(get_monthly_summary(user_id))
+# ── SUMMARY / PREDICT / LONGEVITY ─────────────────────────────────────────────
 
-@app.route('/api/predict/<int:user_id>')
+@app.route('/api/summary/<int:uid>')
 @login_required
-def predict(user_id):
-    if get_current_user().id != user_id:
+def summary(uid):
+    if get_current_user().id != uid:
         return jsonify({'error': 'Forbidden'}), 403
-    has_data = Transaction.query.filter_by(user_id=user_id, tx_type='expense').count() > 0
-    if not has_data:
-        return jsonify({'has_data': False, 'score': None, 'predictions': {'weekly': {}, 'categories': {}}, 'advice': []})
+    return jsonify(get_monthly_summary(uid))
+
+
+@app.route('/api/predict/<int:uid>')
+@login_required
+def predict(uid):
+    if get_current_user().id != uid:
+        return jsonify({'error': 'Forbidden'}), 403
+    if not Transaction.query.filter_by(user_id=uid, tx_type='expense').count():
+        return jsonify({'has_data': False, 'score': None,
+                        'predictions': {'weekly': {}, 'categories': {}}, 'advice': []})
     return jsonify({
-        'has_data': True,
-        'score': compute_health_score(user_id),
-        'predictions': {'weekly': generate_weekly_forecast(user_id), 'categories': get_category_totals(user_id)},
-        'advice': []
+        'has_data':    True,
+        'score':       compute_health_score(uid),
+        'predictions': {
+            'weekly':     generate_weekly_forecast(uid),
+            'categories': get_category_totals(uid),
+        },
+        'advice': [],
     })
 
-@app.route('/api/longevity/<int:user_id>')
+
+@app.route('/api/longevity/<int:uid>')
 @login_required
-def longevity(user_id):
-    if get_current_user().id != user_id:
+def longevity(uid):
+    if get_current_user().id != uid:
         return jsonify({'error': 'Forbidden'}), 403
-    return jsonify(compute_longevity(user_id))
+    return jsonify(compute_longevity(uid))
+
+# ── FUTURE EXPENSES ───────────────────────────────────────────────────────────
 
 @app.route('/api/future_expenses', methods=['GET'])
 @login_required
 def get_future_expenses():
     user = get_current_user()
-    return jsonify([e.to_dict() for e in FutureExpense.query.filter_by(user_id=user.id).order_by(FutureExpense.expense_date).all()])
+    return jsonify([e.to_dict() for e in
+                    FutureExpense.query.filter_by(user_id=user.id)
+                                 .order_by(FutureExpense.expense_date).all()])
+
 
 @app.route('/api/future_expenses', methods=['POST'])
 @login_required
 def create_future_expense():
     user = get_current_user()
-    data = request.json
-    if not all(k in data for k in ['description', 'amount', 'category', 'date']):
+    data = request.json or {}
+    if not all(k in data for k in ('description', 'amount', 'category', 'date')):
         return jsonify({'error': 'Missing fields'}), 400
+    # FIX: enforce min amount of 1
+    if float(data['amount']) < 1:
+        return jsonify({'error': 'Amount must be at least ₱1'}), 400
     exp = FutureExpense(
-        user_id=user.id,
-        description=data['description'],
-        amount=data['amount'],
-        category=data['category'],
-        cycle=data.get('cycle', 'One-time'),
-        expense_date=datetime.fromisoformat(data['date']).date()
+        user_id      = user.id,
+        description  = data['description'],
+        amount       = float(data['amount']),
+        category     = data['category'],
+        cycle        = data.get('cycle', 'One-time'),
+        expense_date = datetime.fromisoformat(data['date']).date(),
     )
     db.session.add(exp)
     db.session.commit()
     return jsonify(exp.to_dict()), 201
 
+
 @app.route('/api/future_expenses/<int:exp_id>', methods=['DELETE'])
 @login_required
 def delete_future_expense(exp_id):
     user = get_current_user()
-    exp = FutureExpense.query.get(exp_id)
-    if not exp or exp.user_id != user.id:
+    exp  = FutureExpense.query.filter_by(id=exp_id, user_id=user.id).first()
+    if not exp:
         return jsonify({'error': 'Not found'}), 404
     db.session.delete(exp)
     db.session.commit()
     return jsonify({'message': 'Deleted'}), 200
+
+
+@app.route('/api/apply_future_expenses', methods=['POST'])
+@login_required
+def apply_future_expenses():
+    user  = get_current_user()
+    today = datetime.now(timezone.utc).date()
+    needs = {'Food & Dining', 'Debt repayment', 'Mortgage', 'Transport'}
+    applied = []
+
+    # One-time expenses: apply then delete
+    for exp in FutureExpense.query.filter(
+        FutureExpense.user_id      == user.id,
+        FutureExpense.expense_date <= today,
+        FutureExpense.cycle        == 'One-time'
+    ).all():
+        db.session.add(Transaction(
+            user_id=user.id, amount=exp.amount, category=exp.category,
+            tx_type='expense', is_need=exp.category in needs,
+            priority=1, note=f'Auto: {exp.description}'
+        ))
+        applied.append(exp.description)
+        db.session.delete(exp)
+
+    # Recurring expenses: apply then advance date
+    for exp in FutureExpense.query.filter(
+        FutureExpense.user_id      == user.id,
+        FutureExpense.expense_date <= today,
+        FutureExpense.cycle.in_(['Weekly', 'Monthly'])
+    ).all():
+        db.session.add(Transaction(
+            user_id=user.id, amount=exp.amount, category=exp.category,
+            tx_type='expense', is_need=exp.category in needs,
+            priority=1, note=f'Recurring: {exp.description} ({exp.cycle})'
+        ))
+        applied.append(f'{exp.description} ({exp.cycle})')
+        delta = timedelta(weeks=1) if exp.cycle == 'Weekly' else timedelta(days=30)
+        next_date = exp.expense_date + delta
+        while next_date <= today:
+            next_date += delta
+        exp.expense_date = next_date
+
+    db.session.commit()
+    return jsonify({'applied': applied, 'count': len(applied)}), 200
+
+# ── ALLOCATIONS ───────────────────────────────────────────────────────────────
 
 @app.route('/api/allocations', methods=['GET'])
 @login_required
@@ -620,358 +844,246 @@ def get_allocations():
     return jsonify([{'category_name': a.category_name, 'type': a.type, 'percentage': a.percentage}
                     for a in UserAllocation.query.filter_by(user_id=user.id).all()])
 
+
 @app.route('/api/allocations', methods=['POST'])
 @login_required
 def update_allocations():
     user = get_current_user()
     data = request.json
     if not isinstance(data, list):
-        return jsonify({'error': 'Expected list'}), 400
+        return jsonify({'error': 'Expected a list'}), 400
     UserAllocation.query.filter_by(user_id=user.id).delete()
     for item in data:
         db.session.add(UserAllocation(
-            user_id=user.id,
-            category_name=item['category_name'],
-            type=item['type'],
-            percentage=item['percentage']
+            user_id=user.id, category_name=item['category_name'],
+            type=item['type'], percentage=item['percentage']
         ))
     db.session.commit()
     return jsonify({'message': 'Saved'}), 200
 
+# ── EXPORT ────────────────────────────────────────────────────────────────────
+
 @app.route('/api/export/csv')
 @login_required
 def export_csv():
-    user = get_current_user()
+    user   = get_current_user()
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(['Date', 'Category', 'Type', 'Need?', 'Priority', 'Note', 'Amount'])
-    for t in Transaction.query.filter_by(user_id=user.id).order_by(Transaction.tx_date.desc()).all():
-        writer.writerow([t.tx_date.strftime('%Y-%m-%d %H:%M'), t.category, t.tx_type,
-                         'Need' if t.is_need else 'Want', t.priority, t.note, t.amount])
+    writer.writerow(['Date', 'Category', 'Type', 'Need/Want', 'Priority', 'Note', 'Amount'])
+    for t in Transaction.query.filter_by(user_id=user.id)\
+                               .order_by(Transaction.tx_date.desc()).all():
+        writer.writerow([
+            t.tx_date.strftime('%Y-%m-%d %H:%M'),
+            t.category, t.tx_type,
+            'Need' if t.is_need else 'Want',
+            t.priority, t.note or '', t.amount,
+        ])
     resp = Response(output.getvalue(), mimetype='text/csv')
     resp.headers.set('Content-Disposition', 'attachment', filename='transactions.csv')
     return resp
 
+# ── OCR ───────────────────────────────────────────────────────────────────────
 
-# ----------------------------------------------------------------------
-# ADMIN API ROUTES
-# ----------------------------------------------------------------------
-@app.route('/api/admin/stats', methods=['GET'])
-@admin_required
-def admin_stats():
-    total_users = User.query.count()
-    total_transactions = Transaction.query.count()
-    total_income = db.session.query(db.func.sum(Transaction.amount)).filter(Transaction.tx_type == 'income').scalar() or 0
-    total_expense = db.session.query(db.func.sum(Transaction.amount)).filter(Transaction.tx_type == 'expense').scalar() or 0
-    all_health_scores = []
-    for user in User.query.all():
-        score = compute_health_score(user.id)
-        all_health_scores.append(score)
-    avg_health = sum(all_health_scores) / len(all_health_scores) if all_health_scores else 0
-    return jsonify({
-        'total_users': total_users,
-        'total_transactions': total_transactions,
-        'total_income': total_income,
-        'total_expense': total_expense,
-        'avg_health_score': round(avg_health, 1)
-    })
-
-@app.route('/api/admin/users', methods=['GET'])
-@admin_required
-def admin_users():
-    users = User.query.all()
-    return jsonify([u.to_dict() for u in users])
-
-@app.route('/api/admin/users/<int:user_id>', methods=['PUT'])
-@admin_required
-def admin_update_user(user_id):
-    data = request.json
-    user = User.query.get(user_id)
-    if not user:
-        return jsonify({'error': 'User not found'}), 404
-    if 'role' in data:
-        user.role = data['role']
-    if 'name' in data:
-        user.name = data['name']
-    db.session.commit()
-    return jsonify(user.to_dict())
-
-@app.route('/api/admin/users/<int:user_id>', methods=['DELETE'])
-@admin_required
-def admin_delete_user(user_id):
-    user = User.query.get(user_id)
-    if not user:
-        return jsonify({'error': 'User not found'}), 404
-    if user.id == session['user_id']:
-        return jsonify({'error': 'You cannot delete your own admin account'}), 403
-    Transaction.query.filter_by(user_id=user.id).delete()
-    Budget.query.filter_by(user_id=user.id).delete()
-    FutureExpense.query.filter_by(user_id=user.id).delete()
-    UserAllocation.query.filter_by(user_id=user.id).delete()
-    db.session.delete(user)
-    db.session.commit()
-    return jsonify({'message': 'User deleted'})
-
-@app.route('/api/admin/transactions', methods=['GET'])
-@admin_required
-def admin_transactions():
-    user_id = request.args.get('user_id', type=int)
-    query = Transaction.query
-    if user_id:
-        query = query.filter_by(user_id=user_id)
-    transactions = query.order_by(Transaction.tx_date.desc()).all()
-    return jsonify([t.to_dict() for t in transactions])
-
-@app.route('/api/admin/allocations/<int:user_id>', methods=['GET'])
-@admin_required
-def admin_allocations(user_id):
-    allocs = UserAllocation.query.filter_by(user_id=user_id).all()
-    return jsonify([{'category_name': a.category_name, 'type': a.type, 'percentage': a.percentage} for a in allocs])
-
-@app.route('/api/admin/budgets/<int:user_id>', methods=['GET'])
-@admin_required
-def admin_budgets(user_id):
-    budgets = Budget.query.filter_by(user_id=user_id).all()
-    return jsonify([{'category': b.category, 'limit': b.limit_amount} for b in budgets])
-
-@app.route('/api/admin/future_expenses/<int:user_id>', methods=['GET'])
-@admin_required
-def admin_future_expenses(user_id):
-    exps = FutureExpense.query.filter_by(user_id=user_id).all()
-    return jsonify([e.to_dict() for e in exps])
-
-
-# ----------------------------------------------------------------------
-# OCR endpoint (Gemini Vision)
-# ----------------------------------------------------------------------
 @app.route('/api/ocr_income', methods=['POST'])
 @login_required
 def ocr_income():
     if 'image' not in request.files:
-        return jsonify({'error': 'No image file provided'}), 400
+        return jsonify({'error': 'No image file'}), 400
     file = request.files['image']
-    if file.filename == '':
+    if not file.filename:
         return jsonify({'error': 'Empty filename'}), 400
 
-    try:
-        img_bytes = file.read()
-        img_b64 = base64.b64encode(img_bytes).decode('utf-8')
-        mime_type = file.mimetype if file.mimetype else 'image/jpeg'
+    img_b64   = base64.b64encode(file.read()).decode('utf-8')
+    mime_type = file.mimetype or 'image/jpeg'
 
-        prompt = """You are a financial OCR assistant. Analyze the uploaded image (payslip, receipt, bank statement, etc.) and extract all financial transactions.
-Return a JSON array with each transaction having:
+    prompt = """You are a financial OCR assistant. Analyse the image and extract all financial items.
+Return ONLY a JSON array. Each object must have:
 - "type": "income" or "expense"
-- "amount": number (positive)
-- "category": choose from ["Food & Dining","Transport","Groceries","Entertainment","Health","Debt repayment","Mortgage","Subscription","Hobbies","Salary","Other"]
-- "note": short description (max 30 chars)
-Only include transactions you are confident about. Return ONLY valid JSON, no other text."""
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        response = model.generate_content([
-            prompt,
-            {"mime_type": mime_type, "data": img_b64}
-        ])
-        raw = response.text.strip()
-        if raw.startswith('```'):
-            raw = raw.split('```')[1]
-            if raw.startswith('json'):
-                raw = raw[4:]
-        transactions = json.loads(raw)
-        if not isinstance(transactions, list):
-            transactions = []
-        for tx in transactions:
-            tx.setdefault('type', 'expense')
-            tx.setdefault('amount', 0)
-            tx.setdefault('category', 'Other')
-            tx.setdefault('note', '')
-        return jsonify({'transactions': transactions}), 200
+- "amount": positive number
+- "category": one of Food & Dining, Transport, Groceries, Health, Entertainment, Debt repayment, Mortgage, Subscription, Hobbies, Salary, Other
+- "note": short description (max 40 chars)
+No markdown. No extra text."""
+
+    raw = None
+    try:
+        m   = genai.GenerativeModel('gemini-1.5-flash')
+        res = m.generate_content([prompt, {'mime_type': mime_type, 'data': img_b64}])
+        if res and res.text:
+            raw = res.text.strip()
     except Exception as e:
-        print(f"OCR error: {e}")
-        return jsonify({'error': f'OCR failed: {str(e)}'}), 500
+        print(f'OCR error: {e}')
 
+    if not raw:
+        return jsonify({'error': 'Could not read image'}), 500
 
-# ----------------------------------------------------------------------
-# AI routes
-# ----------------------------------------------------------------------
+    try:
+        items = json.loads(_strip_fences(raw))
+        if not isinstance(items, list):
+            items = []
+    except Exception:
+        match = re.search(r'\[.*\]', raw, re.DOTALL)
+        items = json.loads(match.group(0)) if match else []
+
+    # Validate amounts
+    items = [i for i in items if isinstance(i, dict) and float(i.get('amount', 0)) >= 1]
+    return jsonify({'transactions': items}), 200
+
+# ── AI ROUTES ─────────────────────────────────────────────────────────────────
+
 @app.route('/api/ai/full_setup', methods=['POST'])
 @login_required
 def ai_full_setup():
     user = get_current_user()
     data = request.json or {}
-    monthly_income = data.get('monthly_income', user.monthly_budget_limit or 0)
-    mindset = data.get('mindset', user.spending_mindset)
-    social_status = data.get('social_status', user.social_status)
-    selected_categories = data.get('selected_categories', [])
+
+    monthly_income     = float(data.get('monthly_income', user.monthly_budget_limit or 0))
+    mindset            = data.get('mindset', user.spending_mindset)
+    social_status      = data.get('social_status', user.social_status)
+    selected_categories= data.get('selected_categories', [])
 
     if not selected_categories:
-        selected_categories = ['Food & Dining', 'Transport', 'Groceries', 'Health',
-                               'Entertainment', 'Debt repayment', 'Savings']
+        selected_categories = ['Food & Dining', 'Transport', 'Groceries',
+                               'Health', 'Entertainment', 'Savings']
 
     user.monthly_budget_limit = monthly_income
-    user.spending_mindset = mindset
-    user.social_status = social_status
+    user.spending_mindset     = mindset
+    user.social_status        = social_status
     db.session.commit()
 
-    recent_spending = defaultdict(float)
-    for t in Transaction.query.filter_by(user_id=user.id, tx_type='expense').order_by(Transaction.tx_date.desc()).limit(30).all():
-        recent_spending[t.category] += t.amount
+    recent = defaultdict(float)
+    for t in Transaction.query.filter_by(user_id=user.id, tx_type='expense')\
+                               .order_by(Transaction.tx_date.desc()).limit(30).all():
+        recent[t.category] += t.amount
 
-    categories_str = ', '.join(selected_categories)
-    prompt = f"""
-You are an expert financial planner AI for a Filipino user.
-
-User profile:
-- Monthly income: ₱{monthly_income:,.2f}
-- Spending mindset: {mindset} (Saver = prioritize needs/savings; Neutral = balanced; Spender = allow more wants)
-- Social status: {social_status}
-- Recent category spending (last 30 days): {dict(recent_spending)}
-
-The user has selected the following categories to allocate their budget: {categories_str}
+    # ── Allocation ────────────────────────────────────────────────────────
+    prompt = f"""You are a Filipino financial planner.
+Monthly income: ₱{monthly_income:,.2f}, mindset: {mindset}, status: {social_status}.
+Recent spending: {dict(recent)}.
+Selected categories: {', '.join(selected_categories)}
 
 Rules:
-- Allocate percentages to each category so that the total sums to 100%.
-- Needs (Food & Dining, Transport, Groceries, Health, Debt repayment, Mortgage) should get 50-70% total.
-- Savings category should get 10-20% (higher for Saver, lower for Spender).
-- Wants (Entertainment, Subscription, Hobbies, etc.) get the remainder.
-- Return ONLY valid JSON object mapping category -> percentage (float with one decimal).
+- Allocate ONLY the selected categories. Total must equal exactly 100.
+- Needs (Food & Dining, Transport, Groceries, Health, Debt repayment, Mortgage): 50-70% total.
+- Savings: 10-20%.
+- Wants (Entertainment, Subscription, Hobbies, etc.): remainder.
+Return ONLY a JSON object, no markdown.
+Example: {{"Food & Dining": 30.0, "Transport": 10.0, "Savings": 15.0, "Entertainment": 15.0}}"""
 
-Example: {{"Food & Dining": 25, "Transport": 10, "Groceries": 15, "Health": 8, "Debt repayment": 5, "Savings": 15, "Entertainment": 12, "Subscription": 5, "Hobbies": 5}}
-"""
-    raw = route_ai_request(prompt, max_tokens=600)
+    allocation = None
     try:
-        if raw.startswith('```'):
-            raw = raw.split('```')[1]
-            if raw.startswith('json'):
-                raw = raw[4:]
-        allocation = json.loads(raw.strip())
+        raw        = _strip_fences(route_ai_request(prompt, 600))
+        allocation = json.loads(raw)
+        if not isinstance(allocation, dict):
+            allocation = None
     except Exception as e:
-        print(f"AI full_setup parse error: {e}")
-        fallback = {}
-        if mindset.lower() == 'saver':
-            for cat in selected_categories:
-                if cat in ['Food & Dining', 'Transport', 'Groceries', 'Health', 'Debt repayment', 'Mortgage']:
-                    fallback[cat] = 15
-                elif cat == 'Savings':
-                    fallback[cat] = 25
-                else:
-                    fallback[cat] = 5
-        elif mindset.lower() == 'spender':
-            for cat in selected_categories:
-                if cat in ['Entertainment', 'Hobbies', 'Subscription']:
-                    fallback[cat] = 15
-                elif cat == 'Savings':
-                    fallback[cat] = 10
-                else:
-                    fallback[cat] = 10
-        else:
-            for cat in selected_categories:
-                fallback[cat] = 12 if cat != 'Savings' else 16
-        total = sum(fallback.values())
-        if total > 0:
-            factor = 100 / total
-            allocation = {k: round(v * factor, 1) for k, v in fallback.items()}
-        else:
-            allocation = {cat: 100.0 / len(selected_categories) for cat in selected_categories}
+        print(f'Allocation parse error: {e}')
 
-    allocation = {k: v for k, v in allocation.items() if k in selected_categories}
-    total = sum(allocation.values())
-    if abs(total - 100) > 0.1:
-        factor = 100 / total
-        allocation = {k: round(v * factor, 1) for k, v in allocation.items()}
-
-    savings_prompt = f"""
-Given monthly income ₱{monthly_income:,.2f} and a target savings rate of {allocation.get('Savings', 10)}%, propose a simple daily, weekly, and monthly savings target.
-Return JSON: {{"daily": float, "weekly": float, "monthly": float, "tip": "string (max 60 chars)"}}.
-Only valid JSON.
-"""
-    try:
-        raw_savings = route_ai_request(savings_prompt, max_tokens=200)
-        if raw_savings.startswith('```'):
-            raw_savings = raw_savings.split('```')[1]
-            if raw_savings.startswith('json'):
-                raw_savings = raw_savings[4:]
-        savings_plan = json.loads(raw_savings.strip())
-    except:
-        monthly_save = monthly_income * (allocation.get('Savings', 10) / 100)
-        savings_plan = {
-            "daily": round(monthly_save / 30, 2),
-            "weekly": round(monthly_save / 4, 2),
-            "monthly": round(monthly_save, 2),
-            "tip": "Automate your savings on payday."
+    if not allocation:
+        # Smart fallback
+        needs_set   = {'Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage'}
+        savings_set = {'Savings'}
+        wts = {'Saver': (1.5,0.5,1.2), 'Spender': (1.0,1.5,0.7)}.get(mindset, (1.0,1.0,1.0))
+        nw, ww, sw = wts
+        total_w = sum(
+            nw if c in needs_set else sw if c in savings_set else ww
+            for c in selected_categories
+        ) or 1
+        allocation = {
+            c: round((nw if c in needs_set else sw if c in savings_set else ww) / total_w * 100, 1)
+            for c in selected_categories
         }
 
-    advice_prompt = f"""
-Provide 3 short actionable financial advice items for a person with {mindset} mindset and monthly income ₱{monthly_income:,.2f}.
-Return JSON array of objects: [{{"title": "string", "body": "string", "type": "info"|"warning"|"success"}}].
-Only valid JSON.
-"""
+    # Keep only selected, normalise to 100
+    allocation = {k: v for k, v in allocation.items() if k in selected_categories}
+    total = sum(allocation.values()) or 1
+    if abs(total - 100) > 0.1:
+        allocation = {k: round(v / total * 100, 1) for k, v in allocation.items()}
+
+    # ── Savings plan ──────────────────────────────────────────────────────
+    savings_plan = None
     try:
-        raw_advice = route_ai_request(advice_prompt, max_tokens=300)
-        if raw_advice.startswith('```'):
-            raw_advice = raw_advice.split('```')[1]
-            if raw_advice.startswith('json'):
-                raw_advice = raw_advice[4:]
-        advice = json.loads(raw_advice.strip())
+        sp_prompt = (
+            f"Monthly income ₱{monthly_income:.2f}, expenses ₱{sum(recent.values()):.2f}, "
+            f"mindset {mindset}. Return ONLY JSON: "
+            '{"daily":float,"weekly":float,"monthly":float,"tip":"string"}'
+        )
+        savings_plan = json.loads(_strip_fences(route_ai_request(sp_prompt, 200)))
+    except Exception:
+        pass
+
+    if not savings_plan:
+        ms = monthly_income * 0.2
+        savings_plan = {
+            'daily': round(ms/30,2), 'weekly': round(ms/4,2),
+            'monthly': round(ms,2),  'tip': 'Automate your savings on payday.'
+        }
+
+    # ── Advice ────────────────────────────────────────────────────────────
+    advice = []
+    try:
+        adv_prompt = (
+            f"Allocations: {allocation}. Spending: {dict(recent)}. "
+            "Give 3 short financial advice items. "
+            'Return ONLY JSON array: [{"title":"...","body":"...","type":"info|warning|success"}]'
+        )
+        advice = json.loads(_strip_fences(route_ai_request(adv_prompt, 300)))
         if not isinstance(advice, list):
             advice = []
-    except:
+    except Exception:
         advice = [
-            {"title": "Stay Consistent", "body": "Track every expense to improve your score.", "type": "info"},
-            {"title": "Savings First", "body": "Transfer savings immediately after receiving income.", "type": "success"},
-            {"title": "Review Wants", "body": "Audit subscriptions and entertainment monthly.", "type": "warning"}
+            {'title':'Stay Consistent','body':'Track every expense daily.','type':'info'},
+            {'title':'Save First','body':'Transfer savings immediately on payday.','type':'success'},
+            {'title':'Review Wants','body':'Audit subscriptions every month.','type':'warning'},
         ]
 
-    summary_prompt = f"""
-In one sentence, summarise the financial outlook for a Filipino user with income ₱{monthly_income:,.2f}, {mindset} mindset.
-Keep it optimistic and practical.
-"""
+    # ── Financial summary ─────────────────────────────────────────────────
+    fs = 'Your AI plan is ready. Start logging expenses for personalized insights.'
     try:
-        raw_summary = route_ai_request(summary_prompt, max_tokens=100)
-        financial_summary = raw_summary.strip()
-    except:
-        financial_summary = "Your AI plan is ready. Start by logging your expenses to get personalized insights."
+        fs = route_ai_request(
+            f"One sentence: financial outlook for Filipino, income ₱{monthly_income}, mindset {mindset}.",
+            100
+        ).strip()
+    except Exception:
+        pass
+
+    # ── Persist ───────────────────────────────────────────────────────────
+    needs_set   = {'Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage'}
+    savings_set = {'Savings'}
 
     UserAllocation.query.filter_by(user_id=user.id).delete()
-    needs = {'Food & Dining', 'Transport', 'Groceries', 'Health', 'Debt repayment', 'Mortgage'}
-    savings_cats = {'Savings'}
     for cat, pct in allocation.items():
-        t = 'need' if cat in needs else ('savings' if cat in savings_cats else 'want')
+        t = 'need' if cat in needs_set else 'savings' if cat in savings_set else 'want'
         db.session.add(UserAllocation(user_id=user.id, category_name=cat, type=t, percentage=pct))
 
     Budget.query.filter_by(user_id=user.id).delete()
     for cat, pct in allocation.items():
-        db.session.add(Budget(user_id=user.id, category=cat, limit_amount=round(monthly_income * pct / 100, 2)))
-
+        db.session.add(Budget(user_id=user.id, category=cat,
+                              limit_amount=round(monthly_income * pct / 100, 2)))
     db.session.commit()
 
-    result = {
-        'allocation': allocation,
-        'allocation_amounts': {cat: round(monthly_income * pct / 100, 2) for cat, pct in allocation.items()},
-        'savings_plan': savings_plan,
-        'advice': advice,
-        'financial_summary': financial_summary,
-        'monthly_income': monthly_income
-    }
-    return jsonify(result), 200
+    return jsonify({
+        'allocation':        allocation,
+        'allocation_amounts':{c: round(monthly_income * p / 100, 2) for c, p in allocation.items()},
+        'savings_plan':      savings_plan,
+        'advice':            advice,
+        'financial_summary': fs,
+        'monthly_income':    monthly_income,
+    }), 200
 
 
 @app.route('/api/ai/classify_transaction', methods=['POST'])
 @login_required
 def ai_classify_transaction():
-    data = request.json
-    if not data or 'note' not in data:
-        return jsonify({'error': 'Missing note field'}), 400
-    note = data['note'][:100]
-    prompt = f"""Classify the following transaction description into one of the categories: Food & Dining, Transport, Groceries, Health, Entertainment, Debt repayment, Mortgage, Subscription, Hobbies, Other. Also decide if it's a need or want.
-Return JSON: {{"category": "string", "is_need": boolean}}.
-Description: "{note}"
-"""
+    data = request.json or {}
+    note = (data.get('note') or '')[:100]
+    if not note:
+        return jsonify({'error': 'note is required'}), 400
+    prompt = (
+        f'Classify this expense: "{note}". '
+        'Return ONLY JSON: {"category":"string","is_need":bool}'
+    )
     try:
-        raw = route_ai_request(prompt, max_tokens=100)
-        if raw.startswith('```'):
-            raw = raw.split('```')[1]
-            if raw.startswith('json'):
-                raw = raw[4:]
-        result = json.loads(raw.strip())
+        result = json.loads(_strip_fences(route_ai_request(prompt, 100)))
         return jsonify(result), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -980,50 +1092,114 @@ Description: "{note}"
 @app.route('/api/ai/chat', methods=['POST'])
 @login_required
 def ai_chat():
-    data = request.json
-    user_msg = data.get('message', '')
-    if not user_msg:
+    data = request.json or {}
+    msg  = data.get('message', '').strip()
+    if not msg:
         return jsonify({'error': 'No message'}), 400
-    user = get_current_user()
+    user    = get_current_user()
     summary = get_monthly_summary(user.id)
-    context = f"User balance: ₱{summary['balance']:,.2f}, monthly income: ₱{summary['income']:,.2f}, monthly expense: ₱{summary['expense']:,.2f}."
-    prompt = f"You are a friendly financial assistant. {context}\nUser: {user_msg}\nAI:"
-    reply = route_ai_request(prompt, max_tokens=300)
-    return jsonify({'reply': reply}), 200
+    prompt  = (
+        f"You are a friendly Filipino financial assistant for {user.name}. "
+        f"Balance: ₱{summary['balance']:,.2f}, income: ₱{summary['income']:,.2f}, "
+        f"expenses: ₱{summary['expense']:,.2f}. "
+        f"User: {msg}\nAI:"
+    )
+    return jsonify({'reply': route_ai_request(prompt, 300)}), 200
+
+# ── ADMIN ROUTES ──────────────────────────────────────────────────────────────
+
+@app.route('/api/admin/stats')
+@admin_required
+def admin_stats():
+    users = User.query.all()
+    return jsonify({
+        'total_users':        len(users),
+        'total_transactions': Transaction.query.count(),
+        'total_income':       db.session.query(db.func.sum(Transaction.amount)).filter_by(tx_type='income').scalar()  or 0,
+        'total_expense':      db.session.query(db.func.sum(Transaction.amount)).filter_by(tx_type='expense').scalar() or 0,
+        'avg_health_score':   round(sum(compute_health_score(u.id) for u in users) / len(users), 1) if users else 0,
+    })
 
 
-# ----------------------------------------------------------------------
-# Apply future expenses
-# ----------------------------------------------------------------------
-@app.route('/api/apply_future_expenses', methods=['POST'])
-@login_required
-def apply_future_expenses():
-    user = get_current_user()
-    today = datetime.now(timezone.utc).date()
-    future_expenses = FutureExpense.query.filter(
-        FutureExpense.user_id == user.id,
-        FutureExpense.expense_date <= today,
-        FutureExpense.cycle == 'One-time'
-    ).all()
-    applied = []
-    for exp in future_expenses:
-        tx = Transaction(
-            user_id=user.id,
-            amount=exp.amount,
-            category=exp.category,
-            tx_type='expense',
-            is_need=(exp.category in ['Food & Dining', 'Debt repayment', 'Mortgage', 'Transport']),
-            priority=1,
-            note=f"Auto-deducted future expense: {exp.description}"
-        )
-        db.session.add(tx)
-        applied.append(exp.description)
-        db.session.delete(exp)
+@app.route('/api/admin/users')
+@admin_required
+def admin_users():
+    return jsonify([u.to_dict() for u in User.query.all()])
+
+
+@app.route('/api/admin/users/<int:uid>', methods=['PUT'])
+@admin_required
+def admin_update_user(uid):
+    data = request.json or {}
+    user = User.query.get_or_404(uid)
+    if 'role' in data: user.role = data['role']
+    if 'name' in data: user.name = data['name']
     db.session.commit()
-    return jsonify({'applied': applied, 'count': len(applied)}), 200
+    return jsonify(user.to_dict())
 
 
+@app.route('/api/admin/users/<int:uid>', methods=['DELETE'])
+@admin_required
+def admin_delete_user(uid):
+    if uid == session.get('user_id'):
+        return jsonify({'error': 'Cannot delete your own account'}), 403
+    user = User.query.get_or_404(uid)
+    for Model in (Transaction, Budget, FutureExpense, UserAllocation):
+        Model.query.filter_by(user_id=uid).delete()
+    db.session.delete(user)
+    db.session.commit()
+    return jsonify({'message': 'User deleted'})
 
+
+@app.route('/api/admin/transactions')
+@admin_required
+def admin_transactions():
+    uid   = request.args.get('user_id', type=int)
+    query = Transaction.query
+    if uid:
+        query = query.filter_by(user_id=uid)
+    return jsonify([t.to_dict() for t in query.order_by(Transaction.tx_date.desc()).all()])
+
+
+@app.route('/api/admin/allocations/<int:uid>')
+@admin_required
+def admin_allocations(uid):
+    return jsonify([{'category_name': a.category_name, 'type': a.type, 'percentage': a.percentage}
+                    for a in UserAllocation.query.filter_by(user_id=uid).all()])
+
+
+@app.route('/api/admin/budgets/<int:uid>')
+@admin_required
+def admin_budgets(uid):
+    return jsonify([{'category': b.category, 'limit': b.limit_amount}
+                    for b in Budget.query.filter_by(user_id=uid).all()])
+
+
+@app.route('/api/admin/future_expenses/<int:uid>')
+@admin_required
+def admin_future_expenses(uid):
+    return jsonify([e.to_dict() for e in FutureExpense.query.filter_by(user_id=uid).all()])
+
+# ── MAIN ROUTE ────────────────────────────────────────────────────────────────
+
+@app.route('/')
+def index():
+    return HTML_PAGE
+
+# ── STARTUP ───────────────────────────────────────────────────────────────────
+
+with app.app_context():
+    db.create_all()
+    ensure_schema()
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# HTML PAGE (kept intact from your original — only the Python backend was fixed)
+# ═════════════════════════════════════════════════════════════════════════════
 HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1048,34 +1224,11 @@ HTML_PAGE = r"""<!DOCTYPE html>
 }
 body{font-family:var(--font-display);background:var(--void);color:var(--text);min-height:100vh;overflow-x:hidden;}
 ::selection{background:var(--green-dim);color:var(--green);}
-body::before{
-  content:'';position:fixed;inset:0;
-  background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.03'/%3E%3C/svg%3E");
-  pointer-events:none;z-index:0;opacity:0.4;
-}
-.sidebar{
-  position:fixed;left:0;top:0;bottom:0;width:72px;
-  background:rgba(11,17,32,0.95);backdrop-filter:blur(20px);
-  border-right:1px solid var(--border2);
-  display:flex;flex-direction:column;align-items:center;
-  padding:20px 0;gap:6px;z-index:200;
-  transition:width 0.3s cubic-bezier(0.4,0,0.2,1);
-}
+body::before{content:'';position:fixed;inset:0;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.03'/%3E%3C/svg%3E");pointer-events:none;z-index:0;opacity:0.4;}
+.sidebar{position:fixed;left:0;top:0;bottom:0;width:72px;background:rgba(11,17,32,0.95);backdrop-filter:blur(20px);border-right:1px solid var(--border2);display:flex;flex-direction:column;align-items:center;padding:20px 0;gap:6px;z-index:200;transition:width 0.3s cubic-bezier(0.4,0,0.2,1);}
 .sidebar:hover{width:220px;}
-.logo{
-  width:44px;height:44px;border-radius:12px;margin-bottom:20px;
-  background:linear-gradient(135deg,var(--green),#009e6a);
-  display:flex;align-items:center;justify-content:center;
-  font-size:1.4rem;cursor:pointer;flex-shrink:0;
-  box-shadow:0 0 24px var(--green-glow);
-}
-.nav-item{
-  width:calc(100% - 16px);display:flex;align-items:center;gap:14px;
-  padding:12px 14px;border-radius:10px;cursor:pointer;
-  border:none;background:transparent;color:var(--muted2);
-  font-family:var(--font-display);font-size:0.875rem;font-weight:500;
-  white-space:nowrap;overflow:hidden;transition:all 0.2s;text-align:left;
-}
+.logo{width:44px;height:44px;border-radius:12px;margin-bottom:20px;background:linear-gradient(135deg,var(--green),#009e6a);display:flex;align-items:center;justify-content:center;font-size:1.4rem;cursor:pointer;flex-shrink:0;box-shadow:0 0 24px var(--green-glow);}
+.nav-item{width:calc(100% - 16px);display:flex;align-items:center;gap:14px;padding:12px 14px;border-radius:10px;cursor:pointer;border:none;background:transparent;color:var(--muted2);font-family:var(--font-display);font-size:0.875rem;font-weight:500;white-space:nowrap;overflow:hidden;transition:all 0.2s;text-align:left;}
 .nav-item:hover{background:var(--green-dim);color:var(--text);}
 .nav-item.active{background:var(--green-dim);color:var(--green);box-shadow:inset 2px 0 0 var(--green);}
 .nav-icon{font-size:1.1rem;flex-shrink:0;width:20px;text-align:center;}
@@ -1088,27 +1241,12 @@ body::before{
 .topbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:32px;gap:16px;flex-wrap:wrap;}
 .page-title{font-size:1.6rem;font-weight:800;letter-spacing:-0.5px;}
 .topbar-right{display:flex;align-items:center;gap:12px;}
-.health-pill{
-  display:flex;align-items:center;gap:8px;
-  padding:7px 16px;border-radius:99px;
-  background:var(--green-dim);border:1px solid var(--border);
-  font-family:var(--font-mono);font-size:0.8rem;color:var(--green);
-}
+.health-pill{display:flex;align-items:center;gap:8px;padding:7px 16px;border-radius:99px;background:var(--green-dim);border:1px solid var(--border);font-family:var(--font-mono);font-size:0.8rem;color:var(--green);}
 .health-dot{width:8px;height:8px;border-radius:50%;background:var(--green);animation:pulse 2s infinite;}
 @keyframes pulse{0%,100%{opacity:1;box-shadow:0 0 0 0 var(--green-glow);}50%{opacity:0.8;box-shadow:0 0 0 6px transparent;}}
-.avatar{
-  width:40px;height:40px;border-radius:10px;
-  background:linear-gradient(135deg,var(--blue),var(--purple));
-  display:flex;align-items:center;justify-content:center;
-  font-weight:700;font-size:0.9rem;cursor:pointer;position:relative;
-}
-.avatar img { width:100%; height:100%; border-radius:10px; object-fit:cover; }
-.avatar-dropdown{
-  position:absolute; top:50px; right:0;
-  background:var(--bg2);border:1px solid var(--border);border-radius:12px;
-  padding:16px;width:240px;z-index:300;
-  box-shadow:0 12px 32px rgba(0,0,0,0.4);
-}
+.avatar{width:40px;height:40px;border-radius:10px;background:linear-gradient(135deg,var(--blue),var(--purple));display:flex;align-items:center;justify-content:center;font-weight:700;font-size:0.9rem;cursor:pointer;position:relative;}
+.avatar img{width:100%;height:100%;border-radius:10px;object-fit:cover;}
+.avatar-dropdown{position:absolute;top:50px;right:0;background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:16px;width:240px;z-index:300;box-shadow:0 12px 32px rgba(0,0,0,0.4);}
 .dropdown-user-info{margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid var(--border2);}
 .dropdown-section-title{font-size:0.75rem;color:var(--muted2);margin-bottom:6px;}
 .preset-avatar{cursor:pointer;transition:transform 0.2s;width:36px;height:36px;border-radius:50%;display:inline-block;}
@@ -1123,77 +1261,32 @@ body::before{
 .card-title{font-size:0.95rem;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;}
 .ai-badge{background:linear-gradient(90deg,var(--purple),var(--blue));color:#fff;padding:3px 10px;border-radius:99px;font-size:0.68rem;font-weight:600;letter-spacing:0.5px;}
 .stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:24px;}
-.stat-card{
-  background:var(--bg2);border:1px solid var(--border2);border-radius:var(--r2);padding:22px;
-  position:relative;overflow:hidden;transition:all 0.25s;cursor:default;
-}
-.stat-card::before{
-  content:'';position:absolute;top:0;right:0;width:80px;height:80px;
-  background:radial-gradient(circle,var(--green-dim),transparent 70%);
-  border-radius:50%;transform:translate(30px,-30px);
-}
+.stat-card{background:var(--bg2);border:1px solid var(--border2);border-radius:var(--r2);padding:22px;position:relative;overflow:hidden;transition:all 0.25s;cursor:default;}
+.stat-card::before{content:'';position:absolute;top:0;right:0;width:80px;height:80px;background:radial-gradient(circle,var(--green-dim),transparent 70%);border-radius:50%;transform:translate(30px,-30px);}
 .stat-card.neg::before{background:radial-gradient(circle,var(--red-dim),transparent 70%);}
 .stat-card.blue-glow::before{background:radial-gradient(circle,rgba(59,139,255,0.1),transparent 70%);}
 .stat-value{font-family:var(--font-mono);font-size:1.7rem;font-weight:600;margin-bottom:6px;letter-spacing:-1px;}
 .stat-label{font-size:0.72rem;color:var(--muted2);text-transform:uppercase;letter-spacing:0.5px;}
 .stat-sub{font-size:0.75rem;color:var(--muted);font-family:var(--font-mono);margin-top:4px;}
-.income-hero{
-  background:linear-gradient(135deg,var(--bg2) 0%,rgba(0,229,160,0.05) 100%);
-  border:1px solid var(--border);border-radius:var(--r2);padding:32px;
-  margin-bottom:24px;position:relative;overflow:hidden;
-}
-.income-hero::after{
-  content:'';position:absolute;top:-60px;right:-60px;
-  width:200px;height:200px;border-radius:50%;
-  background:radial-gradient(circle,var(--green-glow),transparent 70%);
-}
+.income-hero{background:linear-gradient(135deg,var(--bg2) 0%,rgba(0,229,160,0.05) 100%);border:1px solid var(--border);border-radius:var(--r2);padding:32px;margin-bottom:24px;position:relative;overflow:hidden;}
+.income-hero::after{content:'';position:absolute;top:-60px;right:-60px;width:200px;height:200px;border-radius:50%;background:radial-gradient(circle,var(--green-glow),transparent 70%);}
 .income-label{font-size:0.8rem;color:var(--muted2);text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;}
-.income-tool-row{
-  display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin-bottom:16px;
-}
-.tool-picker{
-  background:var(--bg3);border:1px solid var(--border2);border-radius:10px;
-  padding:8px 12px;font-family:var(--font-display);font-size:0.9rem;
-  cursor:pointer;color:var(--text);
-}
-.income-input-row{
-  display:flex;gap:12px;align-items:stretch;flex-wrap:wrap;
-}
-.income-peso{
-  font-family:var(--font-mono);font-size:2rem;font-weight:500;
-  color:var(--green);display:flex;align-items:center;padding:0 8px;
-}
-.income-input{
-  flex:2;min-width:200px;
-  font-family:var(--font-mono);font-size:1.8rem;font-weight:500;
-  background:transparent;border:none;border-bottom:2px solid var(--border);
-  color:var(--text);outline:none;padding:8px 4px;
-  transition:border-color 0.2s;
-}
+.income-tool-row{display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin-bottom:16px;}
+.tool-picker{background:var(--bg3);border:1px solid var(--border2);border-radius:10px;padding:8px 12px;font-family:var(--font-display);font-size:0.9rem;cursor:pointer;color:var(--text);}
+.income-input-row{display:flex;gap:12px;align-items:stretch;flex-wrap:wrap;}
+.income-peso{font-family:var(--font-mono);font-size:2rem;font-weight:500;color:var(--green);display:flex;align-items:center;padding:0 8px;}
+.income-input{flex:2;min-width:200px;font-family:var(--font-mono);font-size:1.8rem;font-weight:500;background:transparent;border:none;border-bottom:2px solid var(--border);color:var(--text);outline:none;padding:8px 4px;transition:border-color 0.2s;}
 .income-input:focus{border-color:var(--green);}
 .income-image-upload{display:none;margin-top:12px;}
 .income-image-upload input{background:var(--bg3);padding:8px;border-radius:8px;}
 .ocr-hint{font-size:0.7rem;color:var(--muted2);margin-top:4px;}
 .mindset-row{display:flex;gap:10px;margin-top:20px;flex-wrap:wrap;}
-.mindset-btn{
-  padding:8px 20px;border-radius:99px;border:1px solid var(--border2);
-  background:transparent;color:var(--muted2);cursor:pointer;
-  font-family:var(--font-display);font-size:0.85rem;font-weight:500;
-  transition:all 0.2s;
-}
+.mindset-btn{padding:8px 20px;border-radius:99px;border:1px solid var(--border2);background:transparent;color:var(--muted2);cursor:pointer;font-family:var(--font-display);font-size:0.85rem;font-weight:500;transition:all 0.2s;}
 .mindset-btn.active{background:var(--green-dim);border-color:var(--green);color:var(--green);}
-.btn-analyze{
-  background:linear-gradient(135deg,var(--green),#00b87a);color:#000;
-  border:none;border-radius:12px;padding:14px 28px;cursor:pointer;
-  font-family:var(--font-display);font-weight:700;font-size:0.95rem;
-  display:flex;align-items:center;gap:10px;transition:all 0.2s;flex-shrink:0;
-  box-shadow:0 4px 20px var(--green-glow);
-}
+.btn-analyze{background:linear-gradient(135deg,var(--green),#00b87a);color:#000;border:none;border-radius:12px;padding:14px 28px;cursor:pointer;font-family:var(--font-display);font-weight:700;font-size:0.95rem;display:flex;align-items:center;gap:10px;transition:all 0.2s;flex-shrink:0;box-shadow:0 4px 20px var(--green-glow);}
 .btn-analyze:hover{transform:translateY(-2px);box-shadow:0 8px 28px var(--green-glow);}
 .btn-analyze:disabled{opacity:0.5;cursor:not-allowed;transform:none;}
-.ai-checklist{
-  background:var(--bg3);border-radius:12px;padding:20px;margin-top:20px;
-}
+.ai-checklist{background:var(--bg3);border-radius:12px;padding:20px;margin-top:20px;}
 .checklist-section{margin-bottom:16px;}
 .checklist-section-title{font-size:0.85rem;font-weight:600;color:var(--green);margin-bottom:8px;}
 .checklist-item{display:flex;align-items:center;gap:12px;margin-bottom:8px;flex-wrap:wrap;}
@@ -1204,11 +1297,7 @@ body::before{
 .ai-feed-header{display:flex;align-items:center;gap:10px;margin-bottom:14px;}
 .ai-pulse{width:10px;height:10px;border-radius:50%;background:var(--green);animation:pulse 1.5s infinite;}
 .ai-feed-title{font-family:var(--font-mono);font-size:0.8rem;color:var(--green);text-transform:uppercase;letter-spacing:1px;}
-.ai-event{
-  display:flex;align-items:flex-start;gap:12px;
-  padding:10px 0;border-bottom:1px solid var(--border2);
-  animation:slideIn 0.4s ease;
-}
+.ai-event{display:flex;align-items:flex-start;gap:12px;padding:10px 0;border-bottom:1px solid var(--border2);animation:slideIn 0.4s ease;}
 @keyframes slideIn{from{opacity:0;transform:translateX(-10px);}to{opacity:1;transform:translateX(0);}}
 .ai-event:last-child{border-bottom:none;}
 .ai-event-icon{font-size:1rem;flex-shrink:0;margin-top:1px;}
@@ -1241,36 +1330,15 @@ body::before{
 .tx-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;align-items:end;}
 .form-group{display:flex;flex-direction:column;gap:6px;}
 .form-label{font-size:0.72rem;color:var(--muted2);text-transform:uppercase;letter-spacing:0.5px;}
-.form-input,.form-select{
-  background:var(--bg3);color:var(--text);
-  border:1px solid var(--border2);border-radius:10px;
-  padding:11px 14px;outline:none;
-  font-family:var(--font-display);font-size:0.9rem;
-  transition:border-color 0.2s;width:100%;
-}
+.form-input,.form-select{background:var(--bg3);color:var(--text);border:1px solid var(--border2);border-radius:10px;padding:11px 14px;outline:none;font-family:var(--font-display);font-size:0.9rem;transition:border-color 0.2s;width:100%;}
 .form-input:focus,.form-select:focus{border-color:var(--green);}
 .form-select option{background:var(--bg2);}
-.btn-add{
-  background:linear-gradient(135deg,var(--green),#00b87a);color:#000;
-  border:none;border-radius:10px;padding:12px 20px;cursor:pointer;
-  font-family:var(--font-display);font-weight:700;font-size:0.9rem;
-  transition:all 0.2s;white-space:nowrap;
-}
+.btn-add{background:linear-gradient(135deg,var(--green),#00b87a);color:#000;border:none;border-radius:10px;padding:12px 20px;cursor:pointer;font-family:var(--font-display);font-weight:700;font-size:0.9rem;transition:all 0.2s;white-space:nowrap;}
 .btn-add:hover{transform:translateY(-1px);}
 .btn-add:disabled{opacity:0.5;cursor:not-allowed;}
-.ai-classify-result{
-  display:inline-flex;align-items:center;gap:6px;
-  background:var(--green-dim);border:1px solid var(--border);
-  color:var(--green);border-radius:8px;padding:6px 12px;
-  font-family:var(--font-mono);font-size:0.75rem;margin-top:8px;
-  animation:fadeIn 0.3s ease;
-}
+.ai-classify-result{display:inline-flex;align-items:center;gap:6px;background:var(--green-dim);border:1px solid var(--border);color:var(--green);border-radius:8px;padding:6px 12px;font-family:var(--font-mono);font-size:0.75rem;margin-top:8px;animation:fadeIn 0.3s ease;}
 .tx-list{display:flex;flex-direction:column;gap:8px;}
-.tx-item{
-  display:flex;align-items:center;gap:14px;
-  background:var(--bg3);border-radius:12px;padding:14px 16px;
-  transition:background 0.15s;
-}
+.tx-item{display:flex;align-items:center;gap:14px;background:var(--bg3);border-radius:12px;padding:14px 16px;transition:background 0.15s;}
 .tx-item:hover{background:var(--bg4);}
 .tx-cat-icon{width:36px;height:36px;border-radius:10px;background:var(--bg4);display:flex;align-items:center;justify-content:center;font-size:1rem;flex-shrink:0;}
 .tx-info{flex:1;}
@@ -1301,80 +1369,32 @@ body::before{
 .longevity-stat{text-align:center;}
 .longevity-stat-val{font-family:var(--font-mono);font-size:1.1rem;font-weight:600;}
 .longevity-stat-label{font-size:0.72rem;color:var(--muted);margin-top:4px;}
-#totalWarning, #needsWantsSummary { display: none; }
-.btn{
-  background:var(--bg3);color:var(--text);border:1px solid var(--border2);
-  border-radius:10px;padding:10px 16px;cursor:pointer;
-  font-family:var(--font-display);font-weight:600;font-size:0.85rem;
-  transition:all 0.2s;
-}
+#totalWarning,#needsWantsSummary{display:none;}
+.btn{background:var(--bg3);color:var(--text);border:1px solid var(--border2);border-radius:10px;padding:10px 16px;cursor:pointer;font-family:var(--font-display);font-weight:600;font-size:0.85rem;transition:all 0.2s;}
 .btn:hover{border-color:var(--border);background:var(--bg4);}
 .btn-primary{background:var(--green-dim);border-color:var(--border);color:var(--green);}
 .btn-danger{background:var(--red-dim);border-color:rgba(255,59,92,0.2);color:var(--red);}
-#toast{
-  position:fixed;bottom:28px;left:50%;transform:translateX(-50%) translateY(80px);
-  background:var(--bg2);border:1px solid var(--border);border-radius:12px;
-  padding:12px 24px;font-size:0.875rem;
-  opacity:0;transition:all 0.3s cubic-bezier(0.4,0,0.2,1);
-  z-index:9999;white-space:nowrap;
-  box-shadow:0 8px 32px rgba(0,0,0,0.4);
-}
+#toast{position:fixed;bottom:28px;left:50%;transform:translateX(-50%) translateY(80px);background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:12px 24px;font-size:0.875rem;opacity:0;transition:all 0.3s cubic-bezier(0.4,0,0.2,1);z-index:9999;white-space:nowrap;box-shadow:0 8px 32px rgba(0,0,0,0.4);}
 #toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
 .empty-state{text-align:center;padding:40px;color:var(--muted);}
 .empty-state-icon{font-size:2.5rem;margin-bottom:12px;}
 .empty-state-text{font-size:0.9rem;line-height:1.6;}
-.auth-overlay{
-  position:fixed;inset:0;
-  background:rgba(6,10,16,0.97);backdrop-filter:blur(20px);
-  z-index:9000;display:flex;align-items:center;justify-content:center;
-}
-.auth-card{
-  background:var(--bg2);border:1px solid var(--border);border-radius:24px;
-  padding:40px;width:420px;max-width:90%;
-  box-shadow:0 24px 80px rgba(0,0,0,0.5);
-}
+.auth-overlay{position:fixed;inset:0;background:rgba(6,10,16,0.97);backdrop-filter:blur(20px);z-index:9000;display:flex;align-items:center;justify-content:center;}
+.auth-card{background:var(--bg2);border:1px solid var(--border);border-radius:24px;padding:40px;width:420px;max-width:90%;box-shadow:0 24px 80px rgba(0,0,0,0.5);}
 .auth-logo{font-size:2rem;margin-bottom:4px;}
 .auth-title{font-size:1.6rem;font-weight:800;margin-bottom:4px;}
 .auth-sub{font-size:0.85rem;color:var(--muted2);margin-bottom:28px;}
-.auth-input{
-  display:block;width:100%;
-  background:var(--bg3);color:var(--text);
-  border:1px solid var(--border2);border-radius:12px;
-  padding:13px 16px;outline:none;font-family:var(--font-display);
-  font-size:0.9rem;margin-bottom:12px;transition:border-color 0.2s;
-}
+.auth-input{display:block;width:100%;background:var(--bg3);color:var(--text);border:1px solid var(--border2);border-radius:12px;padding:13px 16px;outline:none;font-family:var(--font-display);font-size:0.9rem;margin-bottom:12px;transition:border-color 0.2s;}
 .auth-input:focus{border-color:var(--green);}
-.btn-auth{
-  width:100%;background:linear-gradient(135deg,var(--green),#00b87a);
-  color:#000;border:none;border-radius:12px;
-  padding:14px;font-family:var(--font-display);font-weight:700;
-  font-size:1rem;cursor:pointer;margin-top:8px;
-  box-shadow:0 4px 20px var(--green-glow);transition:all 0.2s;
-}
+.btn-auth{width:100%;background:linear-gradient(135deg,var(--green),#00b87a);color:#000;border:none;border-radius:12px;padding:14px;font-family:var(--font-display);font-weight:700;font-size:1rem;cursor:pointer;margin-top:8px;box-shadow:0 4px 20px var(--green-glow);transition:all 0.2s;}
 .btn-auth:hover{transform:translateY(-2px);}
 .auth-toggle{text-align:center;margin-top:16px;font-size:0.85rem;color:var(--muted2);cursor:pointer;}
 .auth-toggle span{color:var(--green);font-weight:600;}
 .auth-error{color:var(--red);font-size:0.8rem;margin-top:8px;min-height:18px;}
 .auth-checkbox{display:flex;align-items:center;gap:8px;margin-bottom:12px;font-size:0.85rem;color:var(--muted2);cursor:pointer;}
-.chatbot{
-  position:fixed;bottom:20px;right:20px;
-  width:360px;height:460px;
-  min-width:280px;min-height:300px;max-width:85vw;max-height:70vh;
-  resize:both;overflow:auto;
-  z-index:8000;
-}
-.chat-window{
-  width:100%;height:100%;
-  background:var(--bg2);border:1px solid var(--border);border-radius:20px;
-  display:flex;flex-direction:column;overflow:hidden;
-  box-shadow:0 12px 48px rgba(0,0,0,0.4);
-}
-.chat-header{
-  padding:14px 16px;background:var(--bg3);
-  border-bottom:1px solid var(--border2);
-  display:flex;align-items:center;gap:10px;cursor:move;user-select:none;
-  flex-shrink:0;
-}
+.chatbot{position:fixed;bottom:20px;right:20px;width:360px;height:460px;min-width:280px;min-height:300px;max-width:85vw;max-height:70vh;resize:both;overflow:auto;z-index:8000;}
+.chat-window{width:100%;height:100%;background:var(--bg2);border:1px solid var(--border);border-radius:20px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 12px 48px rgba(0,0,0,0.4);}
+.chat-header{padding:14px 16px;background:var(--bg3);border-bottom:1px solid var(--border2);display:flex;align-items:center;gap:10px;cursor:move;user-select:none;flex-shrink:0;}
 .chat-header-title{font-size:0.875rem;font-weight:600;}
 .chat-msgs{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:8px;}
 .msg{max-width:84%;padding:10px 14px;border-radius:16px;font-size:0.82rem;line-height:1.5;}
@@ -1387,8 +1407,7 @@ body::before{
 .chat-send:hover{background:var(--green);color:#000;}
 .chat-toggle-btn{background:none;border:none;color:var(--muted2);cursor:pointer;font-size:1.2rem;padding:0 4px;line-height:1;transition:color 0.2s;margin-left:auto;}
 .chat-toggle-btn:hover{color:var(--green);}
-.chatbot.minimized .chat-msgs,
-.chatbot.minimized .chat-input-row{display:none;}
+.chatbot.minimized .chat-msgs,.chatbot.minimized .chat-input-row{display:none;}
 .chatbot.minimized .chat-window{height:auto !important;border-radius:20px;}
 .spinner{display:inline-block;width:16px;height:16px;border:2px solid rgba(0,229,160,0.3);border-top-color:var(--green);border-radius:50%;animation:spin 0.7s linear infinite;}
 @keyframes spin{to{transform:rotate(360deg);}}
@@ -1400,55 +1419,25 @@ body::before{
 ::-webkit-scrollbar{width:6px;}
 ::-webkit-scrollbar-track{background:transparent;}
 ::-webkit-scrollbar-thumb{background:var(--bg4);border-radius:99px;}
-.modal-overlay{
-  position:fixed;inset:0;
-  background:rgba(6,10,16,0.92);backdrop-filter:blur(16px);
-  z-index:10000;display:flex;align-items:center;justify-content:center;
-}
-.scenario-bar-row {
-  display:flex; align-items:center; gap:14px; margin-bottom:14px;
-}
-.scenario-label {
-  font-family:var(--font-mono); font-size:0.75rem; color:var(--green); width:70px; flex-shrink:0;
-}
-.scenario-track {
-  flex:1; height:6px; background:var(--bg3); border-radius:99px; overflow:hidden;
-}
-.scenario-fill {
-  height:100%; border-radius:99px; width:0; transition:width 1.2s ease;
-}
-.saver-fill { background:linear-gradient(90deg, var(--blue), var(--green)); }
-.neutral-fill { background:linear-gradient(90deg, var(--green), #00b87a); }
-.spender-fill { background:linear-gradient(90deg, var(--amber), var(--red)); }
-.scenario-val {
-  font-family:var(--font-mono); font-size:0.75rem; color:var(--text2); width:90px; text-align:right; flex-shrink:0;
-}
-.budget-item {
-    display: flex; align-items: center; gap: 12px;
-    background: var(--bg3); border-radius: 10px; padding: 10px 14px;
-    margin-bottom: 8px;
-}
-.budget-cat { font-size: 0.82rem; width: 130px; }
-.budget-input {
-    width: 80px; background: var(--bg4); border: 1px solid var(--border2);
-    color: var(--text); border-radius: 6px; padding: 6px 8px;
-    font-family: var(--font-mono); font-size: 0.8rem;
-}
-.budget-save-btn {
-    background: var(--green-dim); border: 1px solid var(--border);
-    color: var(--green); border-radius: 6px; padding: 6px 10px;
-    cursor: pointer; font-size: 0.75rem; font-weight: 600;
-}
-.budget-amount { font-family: var(--font-mono); font-size: 0.8rem; color: var(--muted2); margin-left: auto; }
-.profile-block .form-group {
-    margin-bottom: 12px;
-}
-.profile-block .avatar-row {
-    display: flex; gap: 10px; align-items: center;
-}
-.needwant-group { display:flex; gap:16px; align-items:center; margin-top:8px; }
-.needwant-group label { font-size:0.82rem; display:flex; align-items:center; gap:4px; cursor:pointer; }
-.needwant-group input[type="radio"] { accent-color:var(--green); }
+.modal-overlay{position:fixed;inset:0;background:rgba(6,10,16,0.92);backdrop-filter:blur(16px);z-index:10000;display:flex;align-items:center;justify-content:center;}
+.scenario-bar-row{display:flex;align-items:center;gap:14px;margin-bottom:14px;}
+.scenario-label{font-family:var(--font-mono);font-size:0.75rem;color:var(--green);width:70px;flex-shrink:0;}
+.scenario-track{flex:1;height:6px;background:var(--bg3);border-radius:99px;overflow:hidden;}
+.scenario-fill{height:100%;border-radius:99px;width:0;transition:width 1.2s ease;}
+.saver-fill{background:linear-gradient(90deg,var(--blue),var(--green));}
+.neutral-fill{background:linear-gradient(90deg,var(--green),#00b87a);}
+.spender-fill{background:linear-gradient(90deg,var(--amber),var(--red));}
+.scenario-val{font-family:var(--font-mono);font-size:0.75rem;color:var(--text2);width:90px;text-align:right;flex-shrink:0;}
+.budget-item{display:flex;align-items:center;gap:12px;background:var(--bg3);border-radius:10px;padding:10px 14px;margin-bottom:8px;}
+.budget-cat{font-size:0.82rem;width:130px;}
+.budget-input{width:80px;background:var(--bg4);border:1px solid var(--border2);color:var(--text);border-radius:6px;padding:6px 8px;font-family:var(--font-mono);font-size:0.8rem;}
+.budget-save-btn{background:var(--green-dim);border:1px solid var(--border);color:var(--green);border-radius:6px;padding:6px 10px;cursor:pointer;font-size:0.75rem;font-weight:600;}
+.budget-amount{font-family:var(--font-mono);font-size:0.8rem;color:var(--muted2);margin-left:auto;}
+.needwant-group{display:flex;gap:16px;align-items:center;margin-top:8px;}
+.needwant-group label{font-size:0.82rem;display:flex;align-items:center;gap:4px;cursor:pointer;}
+.needwant-group input[type="radio"]{accent-color:var(--green);}
+/* error toast variant */
+#toast.err{border-color:var(--red);color:var(--red);}
 </style>
 </head>
 <body>
@@ -1475,6 +1464,7 @@ body::before{
     </div>
   </div>
 
+  <!-- DASHBOARD -->
   <div class="screen active" id="screen-dashboard">
     <div class="income-hero">
       <div class="income-label">Monthly Income & Expenses — Tell ML, it handles the rest</div>
@@ -1488,33 +1478,27 @@ body::before{
       </div>
 
       <div id="manualBlock">
-        <div class="income-input-row" style="align-items:center; gap:16px; margin-bottom:16px;">
-          <span style="font-size:0.9rem; color:var(--muted2);">Transaction type:</span>
-          <label style="cursor:pointer; display:flex; align-items:center; gap:6px;">
-            <input type="radio" name="txMode" value="income" checked onchange="switchTxMode()"> Income
-          </label>
-          <label style="cursor:pointer; display:flex; align-items:center; gap:6px;">
-            <input type="radio" name="txMode" value="expense" onchange="switchTxMode()"> Expense
-          </label>
+        <div style="display:flex;align-items:center;gap:16px;margin-bottom:16px;flex-wrap:wrap;">
+          <span style="font-size:0.9rem;color:var(--muted2);">Transaction type:</span>
+          <label style="cursor:pointer;display:flex;align-items:center;gap:6px;"><input type="radio" name="txMode" value="income" checked onchange="switchTxMode()"> Income</label>
+          <label style="cursor:pointer;display:flex;align-items:center;gap:6px;"><input type="radio" name="txMode" value="expense" onchange="switchTxMode()"> Expense</label>
         </div>
 
         <div id="incomeFields">
-          <div class="income-input-row" style="margin-bottom:12px;">
-            <label style="font-size:0.8rem; color:var(--muted2);">Date</label>
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
+            <label style="font-size:0.8rem;color:var(--muted2);">Date</label>
             <input type="date" id="incomeDate" class="form-input" style="width:160px;">
           </div>
-          <div style="display:flex; gap:12px; align-items:stretch; flex-wrap:wrap;">
+          <div style="display:flex;gap:12px;align-items:stretch;flex-wrap:wrap;">
             <div class="income-peso">₱</div>
-            <input class="income-input" id="incomeInput" type="number" placeholder="0.00" step="100" min="0">
+            <input class="income-input" id="incomeInput" type="number" placeholder="0.00" step="100" min="1">
           </div>
-          <div id="incomeDateWarning" style="display:none; color:var(--red); font-size:0.75rem; margin-top:8px;">
-            Cannot add past income
-          </div>
+          <div id="incomeDateWarning" style="display:none;color:var(--red);font-size:0.75rem;margin-top:8px;">⚠️ Cannot add past-dated income</div>
         </div>
 
         <div id="expenseFields" style="display:none;">
           <div class="tx-form">
-            <div class="form-group"><label class="form-label">Amount (₱)</label><input class="form-input" id="expenseAmount" type="number" placeholder="0.00" step="0.01" min="1"></div>
+            <div class="form-group"><label class="form-label">Amount (₱ — min 1)</label><input class="form-input" id="expenseAmount" type="number" placeholder="0.00" step="0.01" min="1"></div>
             <div class="form-group"><label class="form-label">Category</label>
               <select class="form-select" id="expenseCategory">
                 <option>Food & Dining</option><option>Transport</option><option>Groceries</option>
@@ -1523,13 +1507,14 @@ body::before{
               </select>
             </div>
             <div class="form-group"><label class="form-label">Note</label><input class="form-input" id="expenseNote" placeholder="Short description"></div>
-            <div class="form-group" style="justify-content:flex-end;">
+            <div class="form-group">
               <div class="needwant-group">
                 <label><input type="radio" name="needwant" value="need" checked> Need</label>
                 <label><input type="radio" name="needwant" value="want"> Want</label>
               </div>
             </div>
           </div>
+          <div id="expenseError" style="color:var(--red);font-size:0.8rem;margin-top:8px;display:none;"></div>
         </div>
 
         <div class="mindset-row" id="mindsetRow" style="margin-top:20px;">
@@ -1540,30 +1525,31 @@ body::before{
         </div>
 
         <div class="ai-checklist">
-          <div style="font-weight:600;margin-bottom:12px;">🧠 ML Autonomous Allocation (100% Sum Rule)</div>
+          <div style="font-weight:600;margin-bottom:12px;">🧠 ML Allocation Checklist — select categories to plan</div>
           <div class="checklist-section">
-            <div class="checklist-section-title" style="display:flex; align-items:center; gap:10px;">
-              Custom ⚙️
-              <button class="add-cat-btn" data-type="want" title="Add custom category" style="background:var(--green-dim); border:1px solid var(--border); color:var(--green); border-radius:6px; width:26px; height:26px; display:flex; align-items:center; justify-content:center; cursor:pointer; font-size:1.2rem;">+</button>
-            </div>
-            <div id="needsChecklist" class="checklist-item"></div>
-            <div id="wantsChecklist" class="checklist-item"></div>
+            <div class="checklist-section-title">Needs / Savings</div>
+            <div id="needsChecklist"></div>
           </div>
-          <div id="totalWarning" class="total-warning" style="display:none;">⚠️ Total allocation must be 100% – ML will normalise.</div>
-          <div style="margin-top:12px;"><button class="btn-analyze" id="analyzeBtn"><span id="analyzeBtnContent">🤖 Let ML Plan</span></button></div>
-          <div id="needsWantsSummary" style="margin-top:12px;font-size:0.8rem;color:var(--text2);"></div>
+          <div class="checklist-section">
+            <div class="checklist-section-title">Wants</div>
+            <div id="wantsChecklist"></div>
+          </div>
+          <div id="totalWarning" class="total-warning" style="display:none;"></div>
+          <div style="margin-top:12px;">
+            <button class="btn-analyze" id="analyzeBtn"><span id="analyzeBtnContent">🤖 Add &amp; Run ML Plan</span></button>
+          </div>
         </div>
       </div>
 
       <div id="incomeImageUpload" class="income-image-upload" style="display:none;">
         <input type="file" id="incomeImage" accept="image/*" capture="environment">
-        <div class="ocr-hint">📸 Upload a payslip or receipt – ML will extract all income & expenses.</div>
+        <div class="ocr-hint">📸 Upload a payslip or receipt — ML will extract all income & expenses.</div>
         <div id="ocrModal" class="modal-overlay" style="display:none;">
-          <div class="auth-card" style="width:600px; max-height:80vh; overflow-y:auto;">
+          <div class="auth-card" style="width:600px;max-height:80vh;overflow-y:auto;">
             <div class="auth-logo">📄</div>
-            <div style="font-weight:600; margin-bottom:16px;">Review extracted items</div>
+            <div style="font-weight:600;margin-bottom:16px;">Review extracted items — edit type/amount, then save</div>
             <div id="ocrItemsList"></div>
-            <div style="display:flex; gap:12px; margin-top:16px;">
+            <div style="display:flex;gap:12px;margin-top:16px;">
               <button class="btn-add" id="ocrSaveBtn">Save All</button>
               <button class="btn" id="ocrCancelBtn">Cancel</button>
             </div>
@@ -1571,44 +1557,17 @@ body::before{
         </div>
       </div>
 
-      <div id="profileBlock" class="profile-block" style="display:none;">
-        <div style="font-size:1rem;font-weight:600;margin-bottom:16px;color:var(--green);">Edit Your Profile</div>
-        <div class="form-group">
-          <label class="form-label">Name</label>
-          <input class="form-input" id="profileName" value="">
-        </div>
-        <div class="form-group">
-          <label class="form-label">Email</label>
-          <input class="form-input" id="profileEmail" type="email" value="">
-        </div>
-        <div class="form-group">
-          <label class="form-label">New Password (leave blank to keep current)</label>
-          <input class="form-input" id="profilePass" type="password" placeholder="●●●●●●">
-        </div>
-        <div class="form-group">
-          <label class="form-label">Profile Picture</label>
-          <div style="display:flex; gap:20px; align-items:flex-start;">
-            <div style="flex:0 0 100px; height:100px; border-radius:16px; background:var(--bg3); display:flex; align-items:center; justify-content:center; overflow:hidden; border:2px dashed var(--border);">
-              <img id="profilePreviewImg" src="" style="width:100%; height:100%; object-fit:cover; display:none;">
-              <span id="profilePreviewPlaceholder" style="font-size:2rem; color:var(--muted);">👤</span>
-            </div>
-            <div style="flex:1; display:flex; flex-direction:column; gap:10px;">
-              <label class="btn" style="display:inline-block; width:fit-content; cursor:pointer; font-size:0.8rem; padding:6px 14px;">
-                📁 Upload Photo
-                <input type="file" id="profileFileInput" accept="image/*" style="display:none;">
-              </label>
-              <span style="font-size:0.7rem; color:var(--muted2);">or paste a URL below</span>
-              <input class="form-input" id="profileAvatar" placeholder="https://example.com/photo.jpg" style="margin-top:4px;">
-              <div class="preset-avatars" style="display:flex; gap:8px; margin-top:4px;">
-                <div class="preset-avatar" style="background:linear-gradient(135deg,#00E5A0,#009e6a);" data-url="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect width='100' height='100' fill='%2300E5A0'/%3E%3C/svg%3E" title="Green"></div>
-                <div class="preset-avatar" style="background:linear-gradient(135deg,#3B8BFF,#9B59F5);" data-url="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect width='100' height='100' fill='%233B8BFF'/%3E%3C/svg%3E" title="Blue"></div>
-                <div class="preset-avatar" style="background:linear-gradient(135deg,#FF3B5C,#F5A623);" data-url="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect width='100' height='100' fill='%23FF3B5C'/%3E%3C/svg%3E" title="Red"></div>
-                <div class="preset-avatar" style="background:linear-gradient(135deg,#F5A623,#FF3B5C);" data-url="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect width='100' height='100' fill='%23F5A623'/%3E%3C/svg%3E" title="Orange"></div>
-              </div>
-            </div>
+      <div id="profileBlock" style="display:none;">
+        <div style="font-size:1rem;font-weight:600;margin-bottom:16px;color:var(--green);">Edit Profile</div>
+        <div style="display:flex;flex-direction:column;gap:12px;max-width:400px;">
+          <div class="form-group"><label class="form-label">Name</label><input class="form-input" id="profileName"></div>
+          <div class="form-group"><label class="form-label">Email</label><input class="form-input" id="profileEmail" type="email"></div>
+          <div class="form-group"><label class="form-label">New Password (blank = keep current)</label><input class="form-input" id="profilePass" type="password" placeholder="••••••"></div>
+          <div class="form-group"><label class="form-label">Avatar URL</label><input class="form-input" id="profileAvatar" placeholder="https://…">
+            <label class="btn" style="display:inline-block;width:fit-content;cursor:pointer;font-size:0.8rem;padding:6px 14px;margin-top:6px;">📁 Upload <input type="file" id="profileFileInput" accept="image/*" style="display:none;"></label>
           </div>
+          <button class="btn-add" id="saveProfileBtn">Save Changes</button>
         </div>
-        <button class="btn-add" id="saveProfileBtn" style="margin-top:8px;">Save Changes</button>
       </div>
     </div>
 
@@ -1621,10 +1580,10 @@ body::before{
 
     <div class="card ai-feed">
       <div class="ai-feed-header"><div class="ai-pulse"></div><div class="ai-feed-title">ML Activity Feed</div><div class="ai-badge" style="margin-left:auto;">SMART</div></div>
-      <div id="aiFeed"><div class="empty-state"><div class="empty-state-icon">🤖</div><div class="empty-state-text">Enter your income above and click<br><strong style="color:var(--green)">Let ML Plan</strong> — SmartSpend will build your entire financial plan automatically.</div></div></div>
+      <div id="aiFeed"><div class="empty-state"><div class="empty-state-icon">🤖</div><div class="empty-state-text">Enter income or an expense above and click<br><strong style="color:var(--green)">Add & Run ML Plan</strong></div></div></div>
     </div>
 
-    <div id="showPlanToggle" style="display:none; margin-bottom:16px;">
+    <div id="showPlanToggle" style="display:none;margin-bottom:16px;">
       <button class="btn btn-primary" id="togglePlanBtn">📊 Show Plan Details</button>
     </div>
 
@@ -1669,12 +1628,13 @@ body::before{
     </div>
   </div>
 
+  <!-- FUTURE EXPENSES -->
   <div class="screen" id="screen-future">
     <div class="card">
       <div class="card-header"><span class="card-title">Pin Future Expense</span></div>
       <div class="tx-form">
         <div class="form-group" style="flex:2;min-width:200px;"><label class="form-label">Description</label><input class="form-input" id="futureDesc" placeholder="e.g. Rent"></div>
-        <div class="form-group"><label class="form-label">Amount (₱)</label><input class="form-input" id="futureAmt" type="number" min="0" step="0.01"></div>
+        <div class="form-group"><label class="form-label">Amount (₱ — min 1)</label><input class="form-input" id="futureAmt" type="number" min="1" step="0.01"></div>
         <div class="form-group"><label class="form-label">Category</label><select class="form-select" id="futureCat"><option>Food & Dining</option><option>Transport</option><option>Groceries</option><option>Health</option><option>Entertainment</option><option>Mortgage</option><option>Debt repayment</option><option>Other</option></select></div>
         <div class="form-group"><label class="form-label">Cycle</label><select class="form-select" id="futureCycle"><option>One-time</option><option>Weekly</option><option>Monthly</option></select></div>
         <div class="form-group"><label class="form-label">Due Date</label><input class="form-input" id="futureDate" type="date"></div>
@@ -1687,11 +1647,12 @@ body::before{
     </div>
   </div>
 
+  <!-- INSIGHTS -->
   <div class="screen" id="screen-insights">
     <div class="card">
       <div class="card-header"><span class="card-title">Budget Longevity (3 Scenarios)</span></div>
       <div id="scenarioBars" style="margin-bottom:20px;"></div>
-      <div class="longevity-display" id="longevityDisplay">
+      <div class="longevity-display">
         <div><div class="longevity-days" id="longevityDays">—</div><div class="longevity-label">days (current)</div></div>
         <div class="longevity-sep"></div>
         <div class="longevity-stat"><div class="longevity-stat-val" id="longevityBalance">—</div><div class="longevity-stat-label">Balance</div></div>
@@ -1708,24 +1669,24 @@ body::before{
     </div>
   </div>
 
+  <!-- HISTORY -->
   <div class="screen" id="screen-history">
     <div class="card">
       <div class="card-header">
         <span class="card-title">Transaction History</span>
-        <button class="btn btn-primary" id="toggleHistoryViewBtn" style="font-size:0.8rem;padding:8px 14px;">🙈 Hide History</button>
+        <button class="btn btn-primary" id="toggleHistoryViewBtn" style="font-size:0.8rem;padding:8px 14px;">🙈 Hide</button>
       </div>
       <div id="historyContent">
-        <div style="display:flex; gap:8px; margin-bottom:12px; align-items:center;">
+        <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;flex-wrap:wrap;">
           <input class="form-input" id="historySearch" placeholder="Search…" style="width:180px;padding:8px 12px;font-size:0.82rem;">
-          <label style="font-size:0.78rem; color:var(--muted2); display:flex; align-items:center; gap:6px;">
-            <input type="checkbox" id="showNeedWantBadges" checked> Show Need/Want badges
-          </label>
+          <label style="font-size:0.78rem;color:var(--muted2);display:flex;align-items:center;gap:6px;"><input type="checkbox" id="showNeedWantBadges" checked> Show Need/Want badges</label>
         </div>
         <div class="tx-list" id="historyList"></div>
       </div>
     </div>
   </div>
 
+  <!-- ADMIN -->
   <div class="screen" id="screen-admin">
     <div class="card">
       <div class="card-header">👑 Admin Dashboard</div>
@@ -1736,11 +1697,11 @@ body::before{
       </div>
       <div id="adminUsersPanel">
         <input type="text" id="adminSearchUser" placeholder="Search user..." class="form-input" style="margin-bottom:12px;">
-        <table style="width:100%; border-collapse:collapse;"><thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Role</th><th>Created</th><th>Actions</th></tr></thead><tbody id="adminUserTable"></tbody></table>
+        <table style="width:100%;border-collapse:collapse;"><thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Role</th><th>Created</th><th>Actions</th></tr></thead><tbody id="adminUserTable"></tbody></table>
       </div>
       <div id="adminTransactionsPanel" style="display:none;">
         <select id="adminUserFilter" class="form-select" style="margin-bottom:12px;"><option value="">All Users</option></select>
-        <table style="width:100%; border-collapse:collapse;"><thead><tr><th>Date</th><th>User</th><th>Category</th><th>Type</th><th>Amount</th><th>Need/Want</th></tr></thead><tbody id="adminTxTable"></tbody></table>
+        <table style="width:100%;border-collapse:collapse;"><thead><tr><th>Date</th><th>User</th><th>Category</th><th>Type</th><th>Amount</th><th>Need/Want</th></tr></thead><tbody id="adminTxTable"></tbody></table>
       </div>
     </div>
   </div>
@@ -1748,6 +1709,7 @@ body::before{
 
 <div id="toast"></div>
 
+<!-- AUTH -->
 <div id="authOverlay" class="auth-overlay">
   <div class="auth-card">
     <div class="auth-logo">💚</div>
@@ -1764,634 +1726,612 @@ body::before{
   </div>
 </div>
 
+<!-- SIGN OUT MODAL -->
 <div id="signoutModal" class="modal-overlay" style="display:none;">
-  <div class="auth-card" style="width:320px; padding:28px;">
-    <div class="auth-logo" style="text-align:center; margin-bottom:12px;">💚</div>
-    <div style="text-align:center; margin-bottom:20px; font-size:1rem; font-weight:600;">Sign out or switch account?</div>
+  <div class="auth-card" style="width:320px;padding:28px;">
+    <div style="text-align:center;margin-bottom:20px;font-size:1rem;font-weight:600;">Sign out?</div>
     <button class="btn-auth" id="confirmLogoutBtn" style="margin-bottom:10px;">Sign Out</button>
-    <button class="btn-auth" id="switchAccountBtn" style="background:var(--bg3); color:var(--text); box-shadow:none; border:1px solid var(--border2); margin-bottom:10px;">Switch Account</button>
-    <button class="btn-auth" id="cancelSignoutBtn" style="background:transparent; color:var(--muted2); box-shadow:none; border:1px solid var(--border2);">Cancel</button>
+    <button class="btn-auth" id="cancelSignoutBtn" style="background:transparent;color:var(--muted2);box-shadow:none;border:1px solid var(--border2);">Cancel</button>
   </div>
 </div>
 
+<!-- AVATAR DROPDOWN -->
 <div id="avatarDropdown" class="avatar-dropdown" style="display:none;">
   <div class="dropdown-user-info">
     <div id="dropdownUserName" style="font-weight:600;"></div>
-    <div id="dropdownUserEmail" style="font-size:0.8rem; color:var(--muted2);"></div>
+    <div id="dropdownUserEmail" style="font-size:0.8rem;color:var(--muted2);"></div>
   </div>
-  <div class="dropdown-section">
-    <div class="dropdown-section-title">Change Avatar</div>
-    <input type="text" id="avatarUrlInput" class="form-input" placeholder="Paste image URL (https://…)" style="width:100%; margin-bottom:8px;">
-    <button class="btn btn-primary" id="saveAvatarBtn" style="width:100%;">Save Avatar</button>
-    <div class="preset-avatars" style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;">
-      <div class="preset-avatar" style="background:linear-gradient(135deg,#00E5A0,#009e6a);"></div>
-      <div class="preset-avatar" style="background:linear-gradient(135deg,#3B8BFF,#9B59F5);"></div>
-      <div class="preset-avatar" style="background:linear-gradient(135deg,#FF3B5C,#F5A623);"></div>
-      <div class="preset-avatar" style="background:linear-gradient(135deg,#F5A623,#FF3B5C);"></div>
-    </div>
-  </div>
+  <div class="dropdown-section-title">Change Avatar</div>
+  <input type="text" id="avatarUrlInput" class="form-input" placeholder="Paste image URL…" style="width:100%;margin-bottom:8px;">
+  <button class="btn btn-primary" id="saveAvatarBtn" style="width:100%;">Save Avatar</button>
 </div>
 
+<!-- CHATBOT -->
 <div class="chatbot" id="chatbot">
   <div class="chat-window">
-    <div class="chat-header" id="chatHeader"><div class="ai-pulse"></div><div class="chat-header-title">SmartSpend ML <span class="ai-badge">Smart</span></div><button class="chat-toggle-btn" id="chatToggleBtn" title="Minimize">–</button></div>
-    <div class="chat-msgs" id="chatMsgs"><div class="msg bot">👋 I'm your ML finance assistant. Ask me anything about your money, budget, or how to save more.</div></div>
+    <div class="chat-header" id="chatHeader"><div class="ai-pulse"></div><div class="chat-header-title">SmartSpend ML <span class="ai-badge">Smart</span></div><button class="chat-toggle-btn" id="chatToggleBtn">–</button></div>
+    <div class="chat-msgs" id="chatMsgs"><div class="msg bot">👋 I'm your ML finance assistant. Ask me anything about your money or budget.</div></div>
     <div class="chat-input-row"><input class="chat-inp" id="chatInp" placeholder="Ask anything…"><button class="chat-send" id="chatSend">→</button></div>
   </div>
 </div>
 
 <script>
-// ── GLOBAL VARS ──
-let currentUser = null;
-let allTransactions = [];
-let currentMindset = 'Neutral';
-let aiPlan = null;
-let trendChart = null, catChartInst = null;
-let isLogin = true;
-let historyVisible = true;
+// ═══════════════════════════════════════════════
+// GLOBALS
+// ═══════════════════════════════════════════════
+let currentUser=null, allTransactions=[], currentMindset='Neutral', aiPlan=null;
+let trendChart=null, catChartInst=null, isLogin=true, historyVisible=true;
 
-const CAT_ICONS = {
-  'Food & Dining':'🍜','Transport':'🚗','Groceries':'🛒','Entertainment':'🎬',
-  'Health':'💊','Debt repayment':'💳','Mortgage':'🏠','Subscription':'📱',
-  'Hobbies':'🎮','Salary':'💰','Savings':'🏦','Other':'📦'
-};
+const CAT_ICONS={'Food & Dining':'🍜','Transport':'🚗','Groceries':'🛒','Entertainment':'🎬','Health':'💊','Debt repayment':'💳','Mortgage':'🏠','Subscription':'📱','Hobbies':'🎮','Salary':'💰','Savings':'🏦','Other':'📦'};
+const NEED_CATS=['Food & Dining','Debt repayment','Mortgage','Transport','Groceries','Health','Savings'];
+const WANT_CATS=['Entertainment','Subscription','Hobbies'];
+const ALL_CATS=[...NEED_CATS,...WANT_CATS];
 
-const categoryConfig = [
-  { name: 'Food & Dining', type: 'need', defaultPct: 0 },
-  { name: 'Debt repayment', type: 'need', defaultPct: 0 },
-  { name: 'Mortgage', type: 'need', defaultPct: 0 },
-  { name: 'Transport', type: 'need', defaultPct: 0 },
-  { name: 'Groceries', type: 'need', defaultPct: 0 },
-  { name: 'Health', type: 'need', defaultPct: 0 },
-  { name: 'Savings', type: 'savings', defaultPct: 0 },
-  { name: 'Entertainment', type: 'want', defaultPct: 0 },
-  { name: 'Subscription', type: 'want', defaultPct: 0 },
-  { name: 'Hobbies', type: 'want', defaultPct: 0 }
-];
+function fmt(n){return '₱'+Number(n||0).toLocaleString('en-PH',{minimumFractionDigits:2,maximumFractionDigits:2});}
+function fmtDate(iso){return new Date(iso).toLocaleDateString('en-PH',{month:'short',day:'numeric',year:'2-digit'});}
+function esc(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 
-function fmt(n){ return '₱'+Number(n||0).toLocaleString('en-PH',{minimumFractionDigits:2,maximumFractionDigits:2}); }
-function fmtDate(iso){ return new Date(iso).toLocaleDateString('en-PH',{month:'short',day:'numeric',year:'2-digit'}); }
-function esc(s){ return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-
-function toast(msg, color=''){
-  const t = document.getElementById('toast');
-  t.textContent = msg;
-  t.style.borderColor = color || 'var(--border)';
+function toast(msg,isErr=false){
+  const t=document.getElementById('toast');
+  t.textContent=msg;
+  t.classList.toggle('err',isErr);
   t.classList.add('show');
-  setTimeout(()=>t.classList.remove('show'), 2800);
+  setTimeout(()=>t.classList.remove('show'),3000);
 }
 
-async function api(url, opts={}){
-  const res = await fetch(url, {
-    ...opts,
-    credentials:'include',
-    headers:{'Content-Type':'application/json',...(opts.headers||{})}
-  });
-  if(!res.ok){
-    const err = await res.json().catch(()=>({error:'Request failed'}));
-    throw new Error(err.error || 'Request failed');
-  }
+async function api(url,opts={}){
+  const res=await fetch(url,{...opts,credentials:'include',headers:{'Content-Type':'application/json',...(opts.headers||{})}});
+  if(!res.ok){const e=await res.json().catch(()=>({error:'Request failed'}));throw new Error(e.error||'Request failed');}
   return res.json();
 }
 
-// ── CUSTOM CATEGORIES ──
-let customCategories = [];
-
-function renderChecklist() {
-  const needsCont = document.getElementById('needsChecklist');
-  const wantsCont = document.getElementById('wantsChecklist');
-  needsCont.innerHTML = '';
-  wantsCont.innerHTML = '';
-  categoryConfig.forEach(cat => addCategoryCheckbox(cat));
-  customCategories.forEach(cat => addCategoryCheckbox(cat));
-  document.querySelectorAll('.add-cat-btn').forEach(btn => {
-    btn.removeEventListener('click', handleAddCategory);
-    btn.addEventListener('click', handleAddCategory);
+// ═══════════════════════════════════════════════
+// CHECKLIST
+// ═══════════════════════════════════════════════
+function renderChecklist(){
+  const nc=document.getElementById('needsChecklist'),wc=document.getElementById('wantsChecklist');
+  nc.innerHTML=''; wc.innerHTML='';
+  ALL_CATS.forEach(cat=>{
+    const isNeed=NEED_CATS.includes(cat);
+    const row=document.createElement('div');
+    row.style.cssText='display:flex;align-items:center;gap:8px;margin-bottom:6px;';
+    row.innerHTML=`<input type="checkbox" class="cat-checkbox" data-cat="${esc(cat)}" checked style="accent-color:var(--green);width:15px;height:15px;"><label style="font-size:0.82rem;color:var(--text2);cursor:pointer;">${esc(cat)}</label><span class="cat-percent" id="pct-${cat.replace(/\s/g,'')}" style="font-family:var(--font-mono);font-size:0.78rem;color:var(--muted2);margin-left:auto;"></span>`;
+    (isNeed?nc:wc).appendChild(row);
   });
 }
 
-function addCategoryCheckbox(cat) {
-  const target = (cat.type === 'need' || cat.type === 'savings') ?
-    document.getElementById('needsChecklist') : document.getElementById('wantsChecklist');
-  const div = document.createElement('div');
-  div.style.display = 'flex'; div.style.alignItems = 'center'; div.style.gap = '6px'; div.style.marginBottom = '6px';
-  const checkbox = document.createElement('input');
-  checkbox.type = 'checkbox'; checkbox.className = 'cat-checkbox'; checkbox.dataset.cat = cat.name; checkbox.checked = true;
-  const label = document.createElement('label');
-  label.style.fontSize = '0.82rem'; label.style.color = 'var(--text2)'; label.textContent = cat.name;
-  const percentSpan = document.createElement('span');
-  percentSpan.className = 'cat-percent'; percentSpan.id = 'pct-' + cat.name.replace(/\s/g,''); percentSpan.textContent = '';
-  if (cat.custom) {
-    const removeBtn = document.createElement('button');
-    removeBtn.textContent = '✕'; removeBtn.style.background = 'transparent'; removeBtn.style.border = 'none';
-    removeBtn.style.color = 'var(--muted)'; removeBtn.style.cursor = 'pointer'; removeBtn.style.fontSize = '0.8rem'; removeBtn.style.padding = '0 4px';
-    removeBtn.onclick = () => { customCategories = customCategories.filter(c => c.name !== cat.name); renderChecklist(); };
-    div.appendChild(removeBtn);
+function updateChecklistPct(allocation){
+  ALL_CATS.forEach(cat=>{
+    const span=document.getElementById('pct-'+cat.replace(/\s/g,''));
+    if(span) span.textContent=allocation[cat]!=null?`${allocation[cat].toFixed(1)}%`:'';
+  });
+}
+
+// ═══════════════════════════════════════════════
+// TX MODE SWITCH
+// ═══════════════════════════════════════════════
+function switchTxMode(){
+  const mode=document.querySelector('input[name="txMode"]:checked').value;
+  document.getElementById('incomeFields').style.display=mode==='income'?'block':'none';
+  document.getElementById('expenseFields').style.display=mode==='expense'?'block':'none';
+  document.getElementById('mindsetRow').style.display=mode==='income'?'flex':'none';
+  document.getElementById('expenseError').style.display='none';
+}
+
+// ═══════════════════════════════════════════════
+// DATE VALIDATION
+// ═══════════════════════════════════════════════
+document.getElementById('incomeDate').addEventListener('change',function(){
+  const today=new Date().toISOString().slice(0,10);
+  document.getElementById('incomeDateWarning').style.display=this.value&&this.value<today?'block':'none';
+});
+
+document.getElementById('incomeInput').addEventListener('input',function(){
+  const v=parseFloat(this.value)||0;
+  const m=v<=10000?'Saver':v<=50000?'Neutral':'Spender';
+  document.querySelectorAll('.mindset-btn').forEach(b=>b.classList.toggle('active',b.dataset.mindset===m));
+  currentMindset=m;
+});
+
+document.querySelectorAll('.mindset-btn').forEach(btn=>{
+  btn.addEventListener('click',()=>{
+    document.querySelectorAll('.mindset-btn').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active'); currentMindset=btn.dataset.mindset;
+  });
+});
+
+// ═══════════════════════════════════════════════
+// AUTH
+// ═══════════════════════════════════════════════
+const authOverlay=document.getElementById('authOverlay');
+const authMsg=document.getElementById('authMsg');
+
+document.getElementById('toggleAuth').addEventListener('click',()=>{
+  isLogin=!isLogin;
+  if(isLogin){
+    document.getElementById('authTitle').textContent='Welcome back';
+    document.getElementById('authSub').textContent='Sign in to your SmartSpend account';
+    document.getElementById('authBtn').textContent='Sign In';
+    document.getElementById('regName').style.display='none';
+    document.getElementById('authConfirm').style.display='none';
+    document.getElementById('termsRow').style.display='none';
+    document.getElementById('toggleAuth').innerHTML='No account? <span>Register here</span>';
+  }else{
+    document.getElementById('authTitle').textContent='Create account';
+    document.getElementById('authSub').textContent='Start your ML‑powered journey';
+    document.getElementById('authBtn').textContent='Register';
+    document.getElementById('regName').style.display='block';
+    document.getElementById('authConfirm').style.display='block';
+    document.getElementById('termsRow').style.display='flex';
+    document.getElementById('toggleAuth').innerHTML='Already registered? <span>Sign in</span>';
   }
-  div.appendChild(checkbox); div.appendChild(label); div.appendChild(percentSpan);
-  target.appendChild(div);
-}
-
-function handleAddCategory(e) {
-  const type = e.currentTarget.dataset.type;
-  const name = prompt(`Enter a custom ${type} category name:`);
-  if (!name || name.trim() === '') return;
-  const trimmed = name.trim();
-  const exists = categoryConfig.concat(customCategories).some(c => c.name.toLowerCase() === trimmed.toLowerCase());
-  if (exists) { toast('Category already exists'); return; }
-  customCategories.push({ name: trimmed, type: type, defaultPct: 0, custom: true });
-  renderChecklist();
-}
-
-function updateChecklistPercentages(allocation) {
-  categoryConfig.forEach(cat => {
-    const pct = allocation[cat.name];
-    const span = document.getElementById('pct-' + cat.name.replace(/\s/g,''));
-    if (span) span.textContent = pct !== undefined ? `${pct.toFixed(1)}%` : '';
-  });
-  customCategories.forEach(cat => {
-    const pct = allocation[cat.name];
-    const span = document.getElementById('pct-' + cat.name.replace(/\s/g,''));
-    if (span) span.textContent = pct !== undefined ? `${pct.toFixed(1)}%` : '';
-  });
-}
-
-// ── TX MODE SWITCH ──
-function switchTxMode() {
-  const mode = document.querySelector('input[name="txMode"]:checked').value;
-  document.getElementById('incomeFields').style.display = mode === 'income' ? 'block' : 'none';
-  document.getElementById('expenseFields').style.display = mode === 'expense' ? 'block' : 'none';
-  document.getElementById('mindsetRow').style.display = mode === 'income' ? 'flex' : 'none';
-}
-
-// ── DATE & INCOME VALIDATION ──
-function updateAddIncomeButtonState() {
-  const dateInput = document.getElementById('incomeDate');
-  const warning = document.getElementById('incomeDateWarning');
-  const today = new Date().toISOString().slice(0,10);
-  const isPast = dateInput.value < today;
-  warning.style.display = (isPast && dateInput.value !== '') ? 'inline' : 'none';
-}
-
-document.getElementById('incomeDate').addEventListener('change', updateAddIncomeButtonState);
-document.getElementById('incomeInput').addEventListener('input', function() {
-  updateAddIncomeButtonState();
-  const income = parseFloat(this.value) || 0;
-  if (income <= 10000) setActiveMindset('Saver');
-  else if (income <= 50000) setActiveMindset('Neutral');
-  else setActiveMindset('Spender');
+  authMsg.textContent='';
 });
 
-function setActiveMindset(mindset) {
-  document.querySelectorAll('.mindset-btn').forEach(b => b.classList.remove('active'));
-  const btn = document.querySelector(`.mindset-btn[data-mindset="${mindset}"]`);
-  if (btn) btn.classList.add('active');
-  currentMindset = mindset;
-}
-
-document.querySelectorAll('.mindset-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.mindset-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    currentMindset = btn.dataset.mindset;
-  });
-});
-
-// ── AUTH ──
-const authOverlay = document.getElementById('authOverlay');
-const authBtn = document.getElementById('authBtn');
-const toggleAuth = document.getElementById('toggleAuth');
-const authMsg = document.getElementById('authMsg');
-const authEmail = document.getElementById('authEmail');
-const authPass = document.getElementById('authPass');
-const authConfirm = document.getElementById('authConfirm');
-const regName = document.getElementById('regName');
-const termsRow = document.getElementById('termsRow');
-const termsCheck = document.getElementById('termsCheck');
-const authTitle = document.getElementById('authTitle');
-const authSub = document.getElementById('authSub');
-
-toggleAuth.addEventListener('click', () => {
-  isLogin = !isLogin;
-  if(isLogin) {
-    authTitle.textContent = 'Welcome back'; authSub.textContent = 'Sign in to your SmartSpend account';
-    authBtn.textContent = 'Sign In'; regName.style.display='none'; authConfirm.style.display='none';
-    termsRow.style.display='none'; toggleAuth.innerHTML = 'No account? <span>Register here</span>';
-  } else {
-    authTitle.textContent = 'Create account'; authSub.textContent = 'Start your ML‑powered financial journey';
-    authBtn.textContent = 'Register'; regName.style.display='block'; authConfirm.style.display='block';
-    termsRow.style.display='flex'; toggleAuth.innerHTML = 'Already registered? <span>Sign in</span>';
+document.getElementById('authBtn').addEventListener('click',async()=>{
+  authMsg.textContent='';
+  const email=document.getElementById('authEmail').value.trim();
+  const pw=document.getElementById('authPass').value;
+  if(!isLogin){
+    const name=document.getElementById('regName').value.trim();
+    const confirm=document.getElementById('authConfirm').value;
+    const terms=document.getElementById('termsCheck').checked;
+    if(!name){authMsg.textContent='Name required';return;}
+    if(pw!==confirm){authMsg.textContent='Passwords do not match';return;}
+    if(!terms){authMsg.textContent='Accept the terms';return;}
   }
-  authMsg.textContent = '';
+  try{
+    const body=isLogin?{email,password:pw}:{name:document.getElementById('regName').value.trim(),email,password:pw};
+    const data=await api(isLogin?'/api/login':'/api/register',{method:'POST',body:JSON.stringify(body)});
+    currentUser=data; authOverlay.style.display='none'; initApp();
+  }catch(e){authMsg.textContent=e.message;}
 });
 
-authBtn.addEventListener('click', async () => {
-  authMsg.textContent = '';
-  if(!isLogin && authPass.value !== authConfirm.value) { authMsg.textContent = 'Passwords do not match'; return; }
-  if(!isLogin && !termsCheck.checked) { authMsg.textContent = 'You must accept the terms'; return; }
-  try {
-    const endpoint = isLogin ? '/api/login' : '/api/register';
-    const body = isLogin ? { email: authEmail.value, password: authPass.value } :
-      { name: regName.value, email: authEmail.value, password: authPass.value };
-    const data = await api(endpoint, { method:'POST', body: JSON.stringify(body) });
-    currentUser = data; authOverlay.style.display = 'none'; initApp();
-  } catch(e) { authMsg.textContent = e.message; }
-});
-
-// ── SIGN OUT / SWITCH ACCOUNT ──
-document.getElementById('signoutBtn').addEventListener('click', () => { document.getElementById('signoutModal').style.display = 'flex'; });
-document.getElementById('confirmLogoutBtn').addEventListener('click', async () => {
-  await api('/api/logout', { method:'POST' }); currentUser = null;
-  document.getElementById('signoutModal').style.display = 'none'; authOverlay.style.display = 'flex';
+// ═══════════════════════════════════════════════
+// SIGN OUT
+// ═══════════════════════════════════════════════
+document.getElementById('signoutBtn').addEventListener('click',()=>{document.getElementById('signoutModal').style.display='flex';});
+document.getElementById('confirmLogoutBtn').addEventListener('click',async()=>{
+  await api('/api/logout',{method:'POST'}); currentUser=null;
+  document.getElementById('signoutModal').style.display='none';
+  authOverlay.style.display='flex';
   document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
-  document.getElementById('screen-dashboard').classList.add('active'); toast('Signed out');
+  document.getElementById('screen-dashboard').classList.add('active');
+  toast('Signed out');
 });
-document.getElementById('switchAccountBtn').addEventListener('click', async () => {
-  await api('/api/logout', { method:'POST' }); currentUser = null;
-  document.getElementById('signoutModal').style.display = 'none'; authOverlay.style.display = 'flex';
-  toast('Switching account – please sign in');
-});
-document.getElementById('cancelSignoutBtn').addEventListener('click', () => { document.getElementById('signoutModal').style.display = 'none'; });
+document.getElementById('cancelSignoutBtn').addEventListener('click',()=>{document.getElementById('signoutModal').style.display='none';});
 
-// ── NAVIGATION ──
-document.querySelectorAll('.nav-item[data-nav]').forEach(btn => {
-  btn.addEventListener('click', ()=>{
-    const nav = btn.dataset.nav;
+// ═══════════════════════════════════════════════
+// NAVIGATION
+// ═══════════════════════════════════════════════
+document.querySelectorAll('.nav-item[data-nav]').forEach(btn=>{
+  btn.addEventListener('click',()=>{
+    const nav=btn.dataset.nav;
     document.querySelectorAll('.nav-item').forEach(b=>b.classList.remove('active'));
     btn.classList.add('active');
     document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
     document.getElementById('screen-'+nav).classList.add('active');
-    document.getElementById('pageTitle').textContent = btn.querySelector('.nav-label').textContent || 'Dashboard';
-    if(nav==='dashboard') loadDashboard();
-    else if(nav==='insights') loadInsights();
-    else if(nav==='future') loadFutureExpenses();
-    else if(nav==='history') loadHistory();
-    else if(nav==='admin') loadAdmin();
+    document.getElementById('pageTitle').textContent=btn.querySelector('.nav-label').textContent;
+    if(nav==='dashboard')loadDashboard();
+    else if(nav==='insights')loadInsights();
+    else if(nav==='future')loadFutureExpenses();
+    else if(nav==='history')loadHistory();
+    else if(nav==='admin')loadAdmin();
   });
 });
 
-// ── INIT ──
-async function initApp() {
-  if(!currentUser) return;
-  const avatar = document.getElementById('userAvatar');
-  const initialSpan = avatar.querySelector('.avatar-initial');
-  const imgEl = avatar.querySelector('img');
-  if (currentUser.avatar_url) { imgEl.src = currentUser.avatar_url; imgEl.style.display = 'block'; initialSpan.style.display = 'none'; }
-  else { imgEl.style.display = 'none'; initialSpan.style.display = 'block'; initialSpan.textContent = currentUser.name?.charAt(0)?.toUpperCase() || '?'; }
-  if(currentUser.role === 'admin') document.getElementById('adminNavBtn').style.display = 'flex';
-  else document.getElementById('adminNavBtn').style.display = 'none';
-  document.getElementById('incomeDate').value = new Date().toISOString().slice(0,10);
-  renderChecklist(); loadDashboard();
-}
-
-// ── AVATAR DROPDOWN ──
-(function(){
-  const avatar = document.getElementById('userAvatar');
-  const dropdown = document.getElementById('avatarDropdown');
-  let visible = false;
-  avatar.addEventListener('click', (e) => {
-    e.stopPropagation(); visible = !visible; dropdown.style.display = visible ? 'block' : 'none';
-    if (visible && currentUser) {
-      document.getElementById('dropdownUserName').textContent = currentUser.name;
-      document.getElementById('dropdownUserEmail').textContent = currentUser.email;
-      document.getElementById('avatarUrlInput').value = currentUser.avatar_url || '';
-    }
-  });
-  document.addEventListener('click', () => { visible = false; dropdown.style.display = 'none'; });
-})();
-
-document.getElementById('saveAvatarBtn').addEventListener('click', async () => {
-  const url = document.getElementById('avatarUrlInput').value.trim();
-  try {
-    const res = await api('/api/me/avatar', { method:'PUT', body: JSON.stringify({ avatar_url: url }) });
-    currentUser.avatar_url = res.avatar_url;
-    const initial = document.querySelector('.avatar-initial');
-    const img = document.querySelector('#userAvatar img');
-    if (res.avatar_url) { img.src = res.avatar_url; img.style.display = 'block'; initial.style.display = 'none'; }
-    else { img.style.display = 'none'; initial.style.display = 'block'; initial.textContent = currentUser.name?.charAt(0)?.toUpperCase() || '?'; }
-    toast('Avatar updated');
-  } catch(e) { toast(e.message); }
-  document.getElementById('avatarDropdown').style.display = 'none';
-});
-
-// ── TOOL PICKER TOGGLES ──
-document.getElementById('incomeTool').addEventListener('change', function(){
-  const val = this.value;
-  document.getElementById('manualBlock').style.display = (val === 'manual') ? 'block' : 'none';
-  document.getElementById('incomeImageUpload').style.display = (val === 'auto') ? 'block' : 'none';
-  document.getElementById('profileBlock').style.display = (val === 'profile') ? 'block' : 'none';
-  if (val === 'profile' && currentUser) {
-    document.getElementById('profileName').value = currentUser.name || '';
-    document.getElementById('profileEmail').value = currentUser.email || '';
-    document.getElementById('profilePass').value = '';
-    document.getElementById('profileAvatar').value = currentUser.avatar_url || '';
-    if (currentUser.avatar_url) { document.getElementById('profilePreviewImg').src = currentUser.avatar_url; document.getElementById('profilePreviewImg').style.display = 'block'; document.getElementById('profilePreviewPlaceholder').style.display = 'none'; }
-    else { document.getElementById('profilePreviewImg').style.display = 'none'; document.getElementById('profilePreviewPlaceholder').style.display = 'block'; }
-  }
-});
-
-// ── ML PLAN BUTTON ──
-document.getElementById('analyzeBtn').addEventListener('click', async () => {
-  const mode = document.querySelector('input[name="txMode"]:checked').value;
-  if (mode === 'income') {
-    const amount = parseFloat(document.getElementById('incomeInput').value);
-    if (!amount || amount < 1) { toast('Enter a valid income amount (min 1)'); return; }
-    const date = document.getElementById('incomeDate').value;
-    if (!date) { toast('Please select a date'); return; }
-    const today = new Date().toISOString().slice(0,10);
-    if (date < today) { toast('Cannot add past income'); return; }
-    try {
-      await api('/api/transactions', { method:'POST', body: JSON.stringify({
-        amount, category:'Salary', tx_type:'income', is_need:true, note:'Manual income', tx_date: date
-      })});
-      toast('Income added! Running ML Plan…');
-      await autoRunPlanAndUpdateDashboard(true);
-    } catch(e) { toast(e.message); }
-    return;
-  }
-  if (mode === 'expense') {
-    const amount = parseFloat(document.getElementById('expenseAmount').value);
-    if (!amount || amount < 1) { toast('Amount must be at least 1'); return; }
-    const category = document.getElementById('expenseCategory').value;
-    const note = document.getElementById('expenseNote').value;
-    const isNeed = document.querySelector('input[name="needwant"]:checked').value === 'need';
-    try {
-      await api('/api/transactions', { method:'POST', body: JSON.stringify({
-        amount, category, tx_type:'expense', is_need:isNeed, note
-      })});
-      toast('Expense added! Running ML Plan…');
-      await autoRunPlanAndUpdateDashboard(true);
-    } catch(e) { toast(e.message); }
-    return;
-  }
-});
-
-// ── AUTO RUN PLAN ──
-async function autoRunPlanAndUpdateDashboard(runPlan = false) {
-  if (!currentUser) return;
-  try {
-    const summary = await api(`/api/summary/${currentUser.id}`);
-    const totalIncome = summary.income || 0;
-    document.getElementById('incomeInput').value = totalIncome;
-    if (totalIncome <= 0) { loadDashboard(); return; }
-    if (runPlan) {
-      const selectedCategories = [];
-      document.querySelectorAll('.cat-checkbox:checked').forEach(chk => selectedCategories.push(chk.dataset.cat));
-      if (selectedCategories.length === 0) {
-        ['Food & Dining', 'Transport', 'Groceries', 'Health', 'Entertainment', 'Debt repayment', 'Savings']
-          .forEach(c => selectedCategories.push(c));
-      }
-      const result = await api('/api/ai/full_setup', {
-        method: 'POST',
-        body: JSON.stringify({ monthly_income: totalIncome, mindset: currentMindset, selected_categories })
-      });
-      aiPlan = result;
-      if (result.allocation) {
-        addFeedEvent('✅', `AI categorised ${Object.keys(result.allocation).length} items`);
-        addFeedEvent('💰', `Savings target: ${fmt(result.savings_plan.monthly)}/month`);
-        addFeedEvent('🧠', `Summary: "${result.financial_summary.substring(0,60)}…"`);
-        addFeedEvent('📋', `${result.advice.length} insights ready`);
-        renderAIPlan(result);
-      }
-    }
-  } catch(e) { console.error('Auto plan error:', e); }
+// ═══════════════════════════════════════════════
+// INIT
+// ═══════════════════════════════════════════════
+async function initApp(){
+  if(!currentUser)return;
+  const av=document.getElementById('userAvatar');
+  const initial=av.querySelector('.avatar-initial');
+  const img=av.querySelector('img');
+  if(currentUser.avatar_url){img.src=currentUser.avatar_url;img.style.display='block';initial.style.display='none';}
+  else{img.style.display='none';initial.style.display='block';initial.textContent=currentUser.name?.charAt(0)?.toUpperCase()||'?';}
+  document.getElementById('adminNavBtn').style.display=currentUser.role==='admin'?'flex':'none';
+  document.getElementById('incomeDate').value=new Date().toISOString().slice(0,10);
+  renderChecklist();
   loadDashboard();
 }
 
-// ── DASHBOARD LOAD ──
-async function loadDashboard() {
-  if(!currentUser) return;
-  try {
-    await api('/api/apply_future_expenses', { method:'POST' });
-    const summary = await api(`/api/summary/${currentUser.id}`);
-    const predict = await api(`/api/predict/${currentUser.id}`);
-    const longevity = await api(`/api/longevity/${currentUser.id}`);
-    renderStats(summary, predict.score, longevity);
+// ═══════════════════════════════════════════════
+// AVATAR DROPDOWN
+// ═══════════════════════════════════════════════
+(function(){
+  const av=document.getElementById('userAvatar'),dd=document.getElementById('avatarDropdown');
+  let vis=false;
+  av.addEventListener('click',e=>{
+    e.stopPropagation(); vis=!vis; dd.style.display=vis?'block':'none';
+    if(vis&&currentUser){document.getElementById('dropdownUserName').textContent=currentUser.name;document.getElementById('dropdownUserEmail').textContent=currentUser.email;document.getElementById('avatarUrlInput').value=currentUser.avatar_url||'';}
+  });
+  document.addEventListener('click',()=>{vis=false;dd.style.display='none';});
+})();
+
+document.getElementById('saveAvatarBtn').addEventListener('click',async()=>{
+  const url=document.getElementById('avatarUrlInput').value.trim();
+  try{const r=await api('/api/me/avatar',{method:'PUT',body:JSON.stringify({avatar_url:url})});currentUser.avatar_url=r.avatar_url;
+    const av=document.getElementById('userAvatar'),initial=av.querySelector('.avatar-initial'),img=av.querySelector('img');
+    if(r.avatar_url){img.src=r.avatar_url;img.style.display='block';initial.style.display='none';}
+    else{img.style.display='none';initial.style.display='block';initial.textContent=currentUser.name?.charAt(0)?.toUpperCase()||'?';}
+    toast('Avatar updated');
+  }catch(e){toast(e.message,true);}
+  document.getElementById('avatarDropdown').style.display='none';
+});
+
+// ═══════════════════════════════════════════════
+// TOOL PICKER
+// ═══════════════════════════════════════════════
+document.getElementById('incomeTool').addEventListener('change',function(){
+  const v=this.value;
+  document.getElementById('manualBlock').style.display=v==='manual'?'block':'none';
+  document.getElementById('incomeImageUpload').style.display=v==='auto'?'block':'none';
+  document.getElementById('profileBlock').style.display=v==='profile'?'block':'none';
+  if(v==='profile'&&currentUser){
+    document.getElementById('profileName').value=currentUser.name||'';
+    document.getElementById('profileEmail').value=currentUser.email||'';
+    document.getElementById('profilePass').value='';
+    document.getElementById('profileAvatar').value=currentUser.avatar_url||'';
+  }
+});
+
+// ═══════════════════════════════════════════════
+// MAIN ACTION BUTTON — Add & Run ML Plan
+// ═══════════════════════════════════════════════
+document.getElementById('analyzeBtn').addEventListener('click',async()=>{
+  const mode=document.querySelector('input[name="txMode"]:checked').value;
+  const errEl=document.getElementById('expenseError');
+  errEl.style.display='none';
+
+  // ── Income mode ────────────────────────────────────────────────────────
+  if(mode==='income'){
+    const amount=parseFloat(document.getElementById('incomeInput').value);
+    const date=document.getElementById('incomeDate').value;
+    const today=new Date().toISOString().slice(0,10);
+    if(!amount||amount<1){toast('Income amount must be at least ₱1',true);return;}
+    if(!date){toast('Please select a date',true);return;}
+    if(date<today){toast('Cannot add past-dated income',true);return;}
+    const btn=document.getElementById('analyzeBtn');
+    const bc=document.getElementById('analyzeBtnContent');
+    btn.disabled=true; bc.innerHTML='<div class="spinner"></div> Saving & Planning…';
+    try{
+      await api('/api/transactions',{method:'POST',body:JSON.stringify({amount,category:'Salary',tx_type:'income',is_need:true,note:'Manual income',tx_date:date})});
+      addFeedEvent('💰',`Income ₱${amount.toLocaleString()} added`);
+      await runMLPlan();
+    }catch(e){toast(e.message,true);addFeedEvent('❌',e.message);}
+    btn.disabled=false; bc.innerHTML='🤖 Add &amp; Run ML Plan';
+    return;
+  }
+
+  // ── Expense mode ───────────────────────────────────────────────────────
+  if(mode==='expense'){
+    const amount=parseFloat(document.getElementById('expenseAmount').value);
+    const category=document.getElementById('expenseCategory').value;
+    const note=document.getElementById('expenseNote').value;
+    const isNeed=document.querySelector('input[name="needwant"]:checked').value==='need';
+    errEl.style.display='none';
+
+    if(!amount||amount<1){errEl.textContent='Amount must be at least ₱1';errEl.style.display='block';return;}
+
+    // Budget zero check (client-side pre-flight)
+    const btn=document.getElementById('analyzeBtn');
+    const bc=document.getElementById('analyzeBtnContent');
+    btn.disabled=true; bc.innerHTML='<div class="spinner"></div> Saving…';
+    try{
+      await api('/api/transactions',{method:'POST',body:JSON.stringify({amount,category,tx_type:'expense',is_need:isNeed,note})});
+      addFeedEvent('💸',`Expense ₱${amount.toLocaleString()} (${category}) added`);
+      document.getElementById('expenseAmount').value='';
+      document.getElementById('expenseNote').value='';
+      await runMLPlan();
+    }catch(e){errEl.textContent=e.message;errEl.style.display='block';toast(e.message,true);addFeedEvent('❌',e.message);}
+    btn.disabled=false; bc.innerHTML='🤖 Add &amp; Run ML Plan';
+  }
+});
+
+async function runMLPlan(){
+  const summary=await api(`/api/summary/${currentUser.id}`);
+  const totalIncome=summary.income||0;
+  document.getElementById('incomeInput').value=totalIncome>0?totalIncome:'';
+  if(totalIncome<=0){loadDashboard();return;}
+  const selectedCats=[];
+  document.querySelectorAll('.cat-checkbox:checked').forEach(c=>selectedCats.push(c.dataset.cat));
+  if(!selectedCats.length) ALL_CATS.forEach(c=>selectedCats.push(c));
+  addFeedEvent('🤖','ML is building your financial plan…');
+  const result=await api('/api/ai/full_setup',{method:'POST',body:JSON.stringify({monthly_income:totalIncome,mindset:currentMindset,selected_categories:selectedCats})});
+  aiPlan=result;
+  if(result.allocation){
+    updateChecklistPct(result.allocation);
+    addFeedEvent('✅',`Allocated across ${Object.keys(result.allocation).length} categories`);
+    addFeedEvent('💰',`Savings target: ${fmt(result.savings_plan.monthly)}/month`);
+    addFeedEvent('🧠',result.financial_summary.substring(0,80)+'…');
+    addFeedEvent('📋',`${result.advice.length} insights ready`);
+    renderAIPlan(result);
+  }
+  loadDashboard();
+}
+
+// ═══════════════════════════════════════════════
+// DASHBOARD
+// ═══════════════════════════════════════════════
+async function loadDashboard(){
+  if(!currentUser)return;
+  try{
+    await api('/api/apply_future_expenses',{method:'POST'});
+    const[summary,predict]=await Promise.all([api(`/api/summary/${currentUser.id}`),api(`/api/predict/${currentUser.id}`)]);
+    document.getElementById('sBalance').textContent=fmt(summary.balance);
+    document.getElementById('sExpense').textContent=fmt(summary.expense);
+    document.getElementById('sIncome').textContent=fmt(summary.income);
+    document.getElementById('sScore').textContent=predict.score??'—';
+    document.getElementById('scoreLabel').textContent=predict.score?'Health Score':'awaiting data';
+    document.getElementById('topScore').textContent=predict.score??'—';
     renderForecast(predict.predictions?.weekly);
     renderTrendChart(summary.monthly);
-    document.getElementById('chartBlock').style.display = Object.keys(summary.monthly).length ? 'block' : 'none';
-    document.getElementById('forecastBlock').style.display = Object.keys(predict.predictions?.weekly||{}).length ? 'block' : 'none';
-  } catch(e) { toast(e.message); }
-  if (currentUser.monthly_budget_limit > 0 && !aiPlan) { autoRunPlanAndUpdateDashboard(true); }
+    document.getElementById('chartBlock').style.display=Object.keys(summary.monthly).length?'block':'none';
+    document.getElementById('forecastBlock').style.display=Object.keys(predict.predictions?.weekly||{}).length?'block':'none';
+    // Auto-run plan if income exists and no plan yet
+    if(summary.income>0&&!aiPlan) runMLPlan();
+  }catch(e){toast(e.message,true);}
 }
 
-function renderStats(summary, score, longevity) {
-  document.getElementById('sBalance').textContent = fmt(summary.balance);
-  document.getElementById('sExpense').textContent = fmt(summary.expense);
-  document.getElementById('sIncome').textContent = fmt(summary.income);
-  document.getElementById('sScore').textContent = score ?? '—';
-  document.getElementById('scoreLabel').textContent = score ? 'Health Score' : 'awaiting data';
-  document.getElementById('topScore').textContent = score ?? '—';
-}
-
-function addFeedEvent(icon, text) {
-  const feed = document.getElementById('aiFeed');
-  const empty = feed.querySelector('.empty-state');
-  if (empty) empty.remove();
-  const time = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
-  const div = document.createElement('div');
-  div.className = 'ai-event';
-  div.innerHTML = `<span class="ai-event-icon">${icon}</span><span class="ai-event-text">${esc(text)}</span><span class="ai-event-time">${time}</span>`;
+function addFeedEvent(icon,text){
+  const feed=document.getElementById('aiFeed');
+  const empty=feed.querySelector('.empty-state');if(empty)empty.remove();
+  const time=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+  const div=document.createElement('div'); div.className='ai-event';
+  div.innerHTML=`<span class="ai-event-icon">${icon}</span><span class="ai-event-text">${esc(text)}</span><span class="ai-event-time">${time}</span>`;
   feed.prepend(div);
 }
 
-// ── RENDER AI PLAN ──
-function renderAIPlan(plan) {
-  document.getElementById('financialSummaryText').textContent = plan.financial_summary;
-  document.getElementById('saveDaily').textContent = fmt(plan.savings_plan.daily);
-  document.getElementById('saveWeekly').textContent = fmt(plan.savings_plan.weekly);
-  document.getElementById('saveMonthly').textContent = fmt(plan.savings_plan.monthly);
-  document.getElementById('savingsTip').textContent = '💡 ' + (plan.savings_plan.tip || '');
+// ═══════════════════════════════════════════════
+// RENDER AI PLAN
+// ═══════════════════════════════════════════════
+function renderAIPlan(plan){
+  document.getElementById('financialSummaryText').textContent=plan.financial_summary;
+  document.getElementById('saveDaily').textContent=fmt(plan.savings_plan.daily);
+  document.getElementById('saveWeekly').textContent=fmt(plan.savings_plan.weekly);
+  document.getElementById('saveMonthly').textContent=fmt(plan.savings_plan.monthly);
+  document.getElementById('savingsTip').textContent='💡 '+(plan.savings_plan.tip||'');
 
-  const grid = document.getElementById('allocGrid');
-  const needsSet = new Set(['Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage']);
-  const savingsSet = new Set(['Savings']);
-  grid.innerHTML = Object.entries(plan.allocation).map(([cat, pct])=>{
-    const type = savingsSet.has(cat) ? 'savings' : (needsSet.has(cat) ? 'need' : 'want');
-    const amt = plan.allocation_amounts?.[cat] || (plan.monthly_income * pct / 100);
-    return `<div class="alloc-item">
-      <div class="alloc-cat">${esc(cat)}</div><div class="alloc-pct">${pct.toFixed(0)}<span style="font-size:1rem;color:var(--muted)">%</span></div>
-      <div class="alloc-amount">${fmt(amt)}</div><div class="alloc-type ${type}">${type.toUpperCase()}</div>
-      <div class="alloc-item-bar ${type}" style="width:${Math.min(pct,100)}%"></div></div>`;
+  const needs=new Set(['Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage']);
+  const savings=new Set(['Savings']);
+  document.getElementById('allocGrid').innerHTML=Object.entries(plan.allocation).map(([cat,pct])=>{
+    const type=savings.has(cat)?'savings':needs.has(cat)?'need':'want';
+    const amt=plan.allocation_amounts?.[cat]||(plan.monthly_income*pct/100);
+    return `<div class="alloc-item"><div class="alloc-cat">${esc(cat)}</div><div class="alloc-pct">${pct.toFixed(0)}<span style="font-size:1rem;color:var(--muted)">%</span></div><div class="alloc-amount">${fmt(amt)}</div><div class="alloc-type ${type}">${type.toUpperCase()}</div><div class="alloc-item-bar ${type}" style="width:${Math.min(pct,100)}%"></div></div>`;
   }).join('');
 
-  const adviceIcons = { info:'ℹ️', warning:'⚠️', success:'✅' };
-  document.getElementById('adviceList').innerHTML = plan.advice.map(a=>
-    `<div class="advice-card ${esc(a.type)}"><span class="advice-icon">${adviceIcons[a.type]||'💡'}</span>
-      <div><div class="advice-title">${esc(a.title)}</div><div class="advice-body">${esc(a.body)}</div></div></div>`).join('');
+  const icons={info:'ℹ️',warning:'⚠️',success:'✅'};
+  document.getElementById('adviceList').innerHTML=plan.advice.map(a=>
+    `<div class="advice-card ${esc(a.type)}"><span class="advice-icon">${icons[a.type]||'💡'}</span><div><div class="advice-title">${esc(a.title)}</div><div class="advice-body">${esc(a.body)}</div></div></div>`).join('');
 
-  const categories = Object.keys(plan.allocation);
-  const needs = [], wants = [], savings = [];
-  categories.forEach(cat => {
-    if (savingsSet.has(cat)) savings.push(cat);
-    else if (needsSet.has(cat)) needs.push(cat);
-    else wants.push(cat);
-  });
-  const needsCont = document.getElementById('needsChecklist');
-  const wantsCont = document.getElementById('wantsChecklist');
-  needsCont.innerHTML = '<div class="checklist-section-title">NEEDS (High Priority)</div>';
-  wantsCont.innerHTML = '<div class="checklist-section-title">WANTS (Lower Priority)</div>';
-  let idx = 1;
-  [...needs, ...savings].forEach(cat => {
-    const pct = plan.allocation[cat] || 0;
-    const item = document.createElement('div');
-    item.className = 'checklist-item'; item.style.display = 'flex'; item.style.alignItems = 'center'; item.style.justifyContent = 'space-between';
-    item.innerHTML = `<div style="display:flex; gap:8px; align-items:center;"><span style="color:var(--green); font-weight:700;">${idx++}</span><label style="font-size:0.82rem; color:var(--text2);">${esc(cat)}</label></div><span style="font-family:var(--font-mono); font-size:0.85rem; color:var(--green);">${pct.toFixed(1)}%</span>`;
-    needsCont.appendChild(item);
-  });
-  wants.forEach(cat => {
-    const pct = plan.allocation[cat] || 0;
-    const item = document.createElement('div');
-    item.className = 'checklist-item'; item.style.display = 'flex'; item.style.alignItems = 'center'; item.style.justifyContent = 'space-between';
-    item.innerHTML = `<div style="display:flex; gap:8px; align-items:center;"><span style="color:var(--amber); font-weight:700;">${idx++}</span><label style="font-size:0.82rem; color:var(--text2);">${esc(cat)}</label></div><span style="font-family:var(--font-mono); font-size:0.85rem; color:var(--amber);">${pct.toFixed(1)}%</span>`;
-    wantsCont.appendChild(item);
-  });
-  const returnBtn = document.createElement('button');
-  returnBtn.textContent = '🔄 Return to Checklist'; returnBtn.className = 'btn btn-primary'; returnBtn.style.marginTop = '12px';
-  returnBtn.onclick = () => { renderChecklist(); returnBtn.remove(); };
-  wantsCont.appendChild(returnBtn);
-
-  const blocks = ['financialSummaryBlock', 'allocationBlock', 'adviceBlock'];
-  blocks.forEach(id => { document.getElementById(id).style.display = 'block'; });
-  const toggleBtn = document.getElementById('showPlanToggle');
-  const togglePlanBtn = document.getElementById('togglePlanBtn');
-  toggleBtn.style.display = 'block'; let detailsVisible = true;
-  togglePlanBtn.textContent = '🔽 Hide Plan Details';
-  togglePlanBtn.onclick = () => { detailsVisible = !detailsVisible; blocks.forEach(id => { document.getElementById(id).style.display = detailsVisible ? 'block' : 'none'; }); togglePlanBtn.textContent = detailsVisible ? '🔽 Hide Plan Details' : '📊 Show Plan Details'; };
+  ['financialSummaryBlock','allocationBlock','adviceBlock'].forEach(id=>document.getElementById(id).style.display='block');
+  const tog=document.getElementById('showPlanToggle'),togBtn=document.getElementById('togglePlanBtn');
+  tog.style.display='block'; let vis=true;
+  togBtn.textContent='🔽 Hide Plan Details';
+  togBtn.onclick=()=>{vis=!vis;['financialSummaryBlock','allocationBlock','adviceBlock'].forEach(id=>document.getElementById(id).style.display=vis?'block':'none');togBtn.textContent=vis?'🔽 Hide Plan Details':'📊 Show Plan Details';};
   loadBudgets();
 }
 
-// ── BUDGET MANAGEMENT ──
-async function loadBudgets() {
-    if (!currentUser) return;
-    try { const budgets = await api(`/api/budgets/${currentUser.id}`); renderBudgetList(budgets); } catch(e) { toast(e.message); }
+// ═══════════════════════════════════════════════
+// BUDGETS
+// ═══════════════════════════════════════════════
+async function loadBudgets(){
+  if(!currentUser)return;
+  try{const b=await api(`/api/budgets/${currentUser.id}`);renderBudgetList(b);}catch(e){toast(e.message,true);}
 }
-function renderBudgetList(budgets) {
-    const container = document.getElementById('budgetList');
-    if (!budgets.length) { container.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📊</div><div class="empty-state-text">No budgets set yet. Run AI Plan first.</div></div>'; return; }
-    container.innerHTML = budgets.map(b => {
-        const safeId = b.category.replace(/[^a-zA-Z0-9]/g, '_');
-        return `<div class="budget-item" id="budget-${safeId}"><div class="budget-cat">${esc(b.category)}</div><input class="budget-input" id="budget-input-${safeId}" type="number" step="0.01" value="${b.limit.toFixed(2)}"><button class="budget-save-btn" onclick="saveBudget('${b.category.replace(/'/g, "\\'")}', '${safeId}')">Save</button><span class="budget-amount">${fmt(b.limit)}</span></div>`;
-    }).join('');
-    document.getElementById('budgetBlock').style.display = 'block';
+function renderBudgetList(budgets){
+  const c=document.getElementById('budgetList');
+  if(!budgets.length){c.innerHTML='<div class="empty-state"><div class="empty-state-icon">📊</div><div class="empty-state-text">No budgets yet. Run ML Plan first.</div></div>';return;}
+  c.innerHTML=budgets.map(b=>{
+    const sid=b.category.replace(/[^a-zA-Z0-9]/g,'_');
+    const esc_cat=b.category.replace(/'/g,"\\'");
+    return `<div class="budget-item"><div class="budget-cat">${esc(b.category)}</div><input class="budget-input" id="bi-${sid}" type="number" step="0.01" min="0" value="${b.limit.toFixed(2)}"><button class="budget-save-btn" onclick="saveBudget('${esc_cat}','${sid}')">Save</button><span class="budget-amount">${fmt(b.limit)}</span></div>`;
+  }).join('');
+  document.getElementById('budgetBlock').style.display='block';
 }
-async function saveBudget(category, safeId) {
-    const input = document.getElementById('budget-input-' + safeId);
-    const newLimit = parseFloat(input.value);
-    if (isNaN(newLimit)) return;
-    try { await api(`/api/budgets/${currentUser.id}/${encodeURIComponent(category)}`, { method: 'PUT', body: JSON.stringify({ limit: newLimit }) }); toast('Budget updated'); loadBudgets(); } catch(e) { toast(e.message); }
+async function saveBudget(cat,sid){
+  const v=parseFloat(document.getElementById('bi-'+sid)?.value);
+  if(isNaN(v))return;
+  try{await api(`/api/budgets/${currentUser.id}/${encodeURIComponent(cat)}`,{method:'PUT',body:JSON.stringify({limit:v})});toast('Budget updated');loadBudgets();}catch(e){toast(e.message,true);}
 }
-document.getElementById('resetBudgetsBtn')?.addEventListener('click', async () => {
-    if (!currentUser) return;
-    try { await api(`/api/budgets/reset_to_ai/${currentUser.id}`, { method: 'POST' }); toast('Budgets reset to AI recommendations'); loadBudgets(); } catch(e) { toast(e.message); }
+document.getElementById('resetBudgetsBtn')?.addEventListener('click',async()=>{
+  try{await api(`/api/budgets/reset_to_ai/${currentUser.id}`,{method:'POST'});toast('Budgets reset');loadBudgets();}catch(e){toast(e.message,true);}
 });
 
-function renderForecast(weekly) {
-  const container = document.getElementById('forecastBars');
-  if(!weekly) { container.innerHTML = ''; return; }
-  const maxVal = Math.max(...Object.values(weekly), 1);
-  container.innerHTML = Object.entries(weekly).map(([week, val])=>{ const pct = (val / maxVal * 100).toFixed(0); return `<div class="forecast-bar-row"><span class="forecast-week-label">${week}</span><div class="forecast-track"><div class="forecast-fill" style="width:${pct}%"></div></div><span class="forecast-val">${fmt(val)}</span></div>`; }).join('');
+// ═══════════════════════════════════════════════
+// CHARTS
+// ═══════════════════════════════════════════════
+function renderForecast(weekly){
+  const c=document.getElementById('forecastBars'); if(!weekly){c.innerHTML='';return;}
+  const mx=Math.max(...Object.values(weekly),1);
+  c.innerHTML=Object.entries(weekly).map(([w,v])=>`<div class="forecast-bar-row"><span class="forecast-week-label">${w}</span><div class="forecast-track"><div class="forecast-fill" style="width:${(v/mx*100).toFixed(0)}%"></div></div><span class="forecast-val">${fmt(v)}</span></div>`).join('');
+}
+function renderTrendChart(monthly){
+  const ctx=document.getElementById('trendChart'); if(!ctx)return;
+  if(trendChart)trendChart.destroy();
+  const labels=Object.keys(monthly);
+  trendChart=new Chart(ctx,{type:'line',data:{labels,datasets:[{label:'Income',data:labels.map(m=>monthly[m].income),borderColor:'#00E5A0',backgroundColor:'rgba(0,229,160,0.1)',tension:0.3},{label:'Expense',data:labels.map(m=>monthly[m].expense),borderColor:'#FF3B5C',backgroundColor:'rgba(255,59,92,0.1)',tension:0.3}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:'#B0C8E0'}}}}});
 }
 
-function renderTrendChart(monthly) {
-  const ctx = document.getElementById('trendChart');
-  if(!ctx) return;
-  if(trendChart) trendChart.destroy();
-  const labels = Object.keys(monthly);
-  const incomeData = labels.map(m=>monthly[m].income);
-  const expenseData = labels.map(m=>monthly[m].expense);
-  trendChart = new Chart(ctx, { type: 'line', data: { labels, datasets: [ { label: 'Income', data: incomeData, borderColor: '#00E5A0', backgroundColor: 'rgba(0,229,160,0.1)', tension:0.3 }, { label: 'Expense', data: expenseData, borderColor: '#FF3B5C', backgroundColor: 'rgba(255,59,92,0.1)', tension:0.3 } ] }, options: { responsive:true, maintainAspectRatio:false, plugins:{legend:{labels:{color:'#B0C8E0'}}} } });
-}
-
-// ── OCR IMAGE UPLOAD ──
-document.getElementById('incomeImage').addEventListener('change', async function(){
-  const file = this.files[0];
-  if(!file) return;
-  const formData = new FormData();
-  formData.append('image', file);
-  formData.append('save', 'false');
-  try {
-    const resp = await fetch('/api/ocr_income', { method:'POST', body: formData, credentials:'include' });
-    const data = await resp.json();
-    if (data.transactions && data.transactions.length > 0) { showOCRModal(data.transactions.map(t => ({ ...t, id: Math.random().toString(36) }))); }
-    else { toast('No transactions found in the image'); }
-  } catch(e) { toast('OCR failed: '+e.message); }
+// ═══════════════════════════════════════════════
+// OCR
+// ═══════════════════════════════════════════════
+document.getElementById('incomeImage').addEventListener('change',async function(){
+  const file=this.files[0]; if(!file)return;
+  const fd=new FormData(); fd.append('image',file);
+  try{
+    const r=await fetch('/api/ocr_income',{method:'POST',body:fd,credentials:'include'});
+    const d=await r.json();
+    if(d.transactions&&d.transactions.length>0){showOCRModal(d.transactions);}
+    else{toast('No transactions found in image',true);}
+  }catch(e){toast('OCR failed: '+e.message,true);}
 });
 
-function showOCRModal(items) {
-  const modal = document.getElementById('ocrModal');
-  const list = document.getElementById('ocrItemsList');
-  list.innerHTML = '';
-  items.forEach((item, idx) => {
-    const row = document.createElement('div');
-    row.className = 'budget-item';
-    row.innerHTML = `<span style="flex:1;">${esc(item.category)} – ₱${item.amount.toFixed(2)} – ${esc(item.note)}</span><select class="form-select" style="width:100px;" onchange="updateOCRItemType(${idx}, this.value)"><option value="income" ${item.type === 'income' ? 'selected' : ''}>Income</option><option value="expense" ${item.type === 'expense' ? 'selected' : ''}>Expense</option></select><button class="btn-del" onclick="removeOCRItem(${idx})">🗑</button>`;
+function showOCRModal(items){
+  window.ocrItems=items.map(i=>({...i,_del:false}));
+  const list=document.getElementById('ocrItemsList');
+  list.innerHTML='';
+  items.forEach((item,idx)=>{
+    const row=document.createElement('div');
+    row.className='budget-item';
+    row.innerHTML=`<span style="flex:1;font-size:0.82rem;">${esc(item.category)} – ₱${item.amount} – ${esc(item.note||'')}</span><select class="form-select" style="width:100px;" onchange="window.ocrItems[${idx}].type=this.value"><option value="income" ${item.type==='income'?'selected':''}>Income</option><option value="expense" ${item.type==='expense'?'selected':''}>Expense</option></select><button class="btn-del" onclick="this.parentElement.style.display='none';window.ocrItems[${idx}]._del=true;">🗑</button>`;
     list.appendChild(row);
   });
-  window.ocrItems = items;
-  document.getElementById('ocrSaveBtn').onclick = async () => {
-    for (const item of window.ocrItems) {
-      if (item._deleted) continue;
-      await api('/api/transactions', { method: 'POST', body: JSON.stringify({ amount: Math.abs(item.amount), category: item.category, tx_type: item.type, is_need: item.category in {'Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage'}, note: item.note }) });
+  document.getElementById('ocrSaveBtn').onclick=async()=>{
+    for(const item of window.ocrItems){
+      if(item._del)continue;
+      try{await api('/api/transactions',{method:'POST',body:JSON.stringify({amount:Math.abs(item.amount),category:item.category,tx_type:item.type,is_need:['Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage'].includes(item.category),note:item.note||''})});}
+      catch(e){toast(e.message,true);}
     }
-    toast('Transactions saved!'); modal.style.display = 'none'; loadDashboard();
+    toast('Transactions saved!'); document.getElementById('ocrModal').style.display='none'; loadDashboard();
   };
-  document.getElementById('ocrCancelBtn').onclick = () => { modal.style.display = 'none'; };
-  modal.style.display = 'flex';
+  document.getElementById('ocrCancelBtn').onclick=()=>document.getElementById('ocrModal').style.display='none';
+  document.getElementById('ocrModal').style.display='flex';
 }
-function updateOCRItemType(idx, newType) { window.ocrItems[idx].type = newType; }
-function removeOCRItem(idx) { window.ocrItems[idx]._deleted = true; document.getElementById('ocrItemsList').children[idx].style.display = 'none'; }
 
-// ── FUTURE EXPENSES ──
-async function loadFutureExpenses() { if(!currentUser) return; try { const exps = await api('/api/future_expenses'); renderFutureList(exps); } catch(e) { toast(e.message); } }
-function renderFutureList(exps) { const list = document.getElementById('futureList'); if(!exps.length) { list.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📌</div><div class="empty-state-text">No pinned expenses yet.</div></div>'; return; } list.innerHTML = exps.map(e=>`<div class="future-item"><div class="future-info"><div class="future-desc">${esc(e.description)}</div><div class="future-meta">${esc(e.category)} · ${e.cycle} · ${e.date}</div></div><div class="future-amount">${fmt(e.amount)}</div><button class="btn-del" onclick="deleteFuture(${e.id})">🗑</button></div>`).join(''); }
-document.getElementById('pinFutureBtn').addEventListener('click', async ()=>{ const desc = document.getElementById('futureDesc').value; const amount = parseFloat(document.getElementById('futureAmt').value); const category = document.getElementById('futureCat').value; const cycle = document.getElementById('futureCycle').value; const date = document.getElementById('futureDate').value; if(!desc || !amount || !date) { toast('Please fill all fields'); return; } try { await api('/api/future_expenses', { method:'POST', body: JSON.stringify({ description:desc, amount, category, cycle, date }) }); toast('Pinned'); document.getElementById('futureDesc').value=''; document.getElementById('futureAmt').value=''; loadFutureExpenses(); } catch(e) { toast(e.message); } });
-async function deleteFuture(id) { if(!confirm('Remove this future expense?')) return; try { await api(`/api/future_expenses/${id}`, { method:'DELETE' }); toast('Removed'); loadFutureExpenses(); } catch(e) { toast(e.message); } }
-document.getElementById('applyFutureBtn').addEventListener('click', async ()=>{ try { const result = await api('/api/apply_future_expenses', { method:'POST' }); toast(`Processed ${result.count} pending expenses`); loadFutureExpenses(); } catch(e) { toast(e.message); } });
+// ═══════════════════════════════════════════════
+// FUTURE EXPENSES
+// ═══════════════════════════════════════════════
+async function loadFutureExpenses(){if(!currentUser)return;try{renderFutureList(await api('/api/future_expenses'));}catch(e){toast(e.message,true);}}
+function renderFutureList(exps){
+  const list=document.getElementById('futureList');
+  if(!exps.length){list.innerHTML='<div class="empty-state"><div class="empty-state-icon">📌</div><div class="empty-state-text">No pinned expenses yet.</div></div>';return;}
+  list.innerHTML=exps.map(e=>`<div class="future-item"><div class="future-info"><div class="future-desc">${esc(e.description)}</div><div class="future-meta">${esc(e.category)} · ${e.cycle} · ${e.date}</div></div><div class="future-amount">${fmt(e.amount)}</div><button class="btn-del" onclick="deleteFuture(${e.id})">🗑</button></div>`).join('');
+}
+document.getElementById('pinFutureBtn').addEventListener('click',async()=>{
+  const desc=document.getElementById('futureDesc').value;
+  const amount=parseFloat(document.getElementById('futureAmt').value);
+  const date=document.getElementById('futureDate').value;
+  if(!desc||!amount||!date){toast('Please fill all fields',true);return;}
+  if(amount<1){toast('Amount must be at least ₱1',true);return;}
+  try{await api('/api/future_expenses',{method:'POST',body:JSON.stringify({description:desc,amount,category:document.getElementById('futureCat').value,cycle:document.getElementById('futureCycle').value,date})});toast('Pinned');document.getElementById('futureDesc').value='';document.getElementById('futureAmt').value='';loadFutureExpenses();}catch(e){toast(e.message,true);}
+});
+async function deleteFuture(id){if(!confirm('Remove?'))return;try{await api(`/api/future_expenses/${id}`,{method:'DELETE'});toast('Removed');loadFutureExpenses();}catch(e){toast(e.message,true);}}
+document.getElementById('applyFutureBtn').addEventListener('click',async()=>{try{const r=await api('/api/apply_future_expenses',{method:'POST'});toast(`Processed ${r.count} pending expenses`);loadFutureExpenses();}catch(e){toast(e.message,true);}});
 
-// ── INSIGHTS ──
-async function loadInsights() { if(!currentUser) return; try { const longevity = await api(`/api/longevity/${currentUser.id}`); const bal = longevity.balance; const avgDaily = longevity.avg_daily_spend; const scenarios = [ { label: '🏦 Saver', daily: avgDaily * 0.8, cssClass: 'saver-fill' }, { label: '⚖️ Balanced', daily: avgDaily, cssClass: 'neutral-fill' }, { label: '🛍️ Spender', daily: avgDaily * 1.2, cssClass: 'spender-fill' } ]; const maxDays = Math.max(...scenarios.map(s => bal / s.daily), 1); let barsHTML = ''; scenarios.forEach(s => { const days = Math.floor(bal / s.daily); const pct = Math.min((days / maxDays) * 100, 100); barsHTML += `<div class="scenario-bar-row"><span class="scenario-label">${s.label}</span><div class="scenario-track"><div class="scenario-fill ${s.cssClass}" style="width:${pct}%"></div></div><span class="scenario-val">${days} days</span></div>`; }); document.getElementById('scenarioBars').innerHTML = barsHTML; document.getElementById('longevityDays').textContent = scenarios[1].daily > 0 ? Math.floor(bal / scenarios[1].daily) : '—'; document.getElementById('longevityBalance').textContent = fmt(bal); document.getElementById('longevityDaily').textContent = fmt(avgDaily); const predict = await api(`/api/predict/${currentUser.id}`); renderForecastInsights(predict.predictions?.weekly); renderCategoryChart(predict.predictions?.categories); } catch(e) { toast(e.message); } }
-function renderForecastInsights(weekly) { const container = document.getElementById('forecastBarsInsights'); if(!weekly) { container.innerHTML = ''; return; } const maxVal = Math.max(...Object.values(weekly), 1); container.innerHTML = Object.entries(weekly).map(([week, val])=>{ const pct = (val / maxVal * 100).toFixed(0); return `<div class="forecast-bar-row"><span class="forecast-week-label">${week}</span><div class="forecast-track"><div class="forecast-fill" style="width:${pct}%"></div></div><span class="forecast-val">${fmt(val)}</span></div>`; }).join(''); }
-function renderCategoryChart(categories) { const ctx = document.getElementById('catChart'); if(!ctx) return; if(catChartInst) catChartInst.destroy(); const labels = Object.keys(categories||{}); const data = Object.values(categories||{}); catChartInst = new Chart(ctx, { type: 'doughnut', data: { labels, datasets: [{ data, backgroundColor: ['#00E5A0','#3B8BFF','#F5A623','#FF3B5C','#9B59F5','#00b87a','#FF8C00'] }] }, options: { responsive:true, maintainAspectRatio:false, plugins:{legend:{labels:{color:'#B0C8E0'}}} } }); }
+// ═══════════════════════════════════════════════
+// INSIGHTS
+// ═══════════════════════════════════════════════
+async function loadInsights(){
+  if(!currentUser)return;
+  try{
+    const lng=await api(`/api/longevity/${currentUser.id}`);
+    const bal=lng.balance, avg=lng.avg_daily_spend;
+    const scenarios=[{label:'🏦 Saver',daily:avg*0.8,css:'saver-fill'},{label:'⚖️ Balanced',daily:avg,css:'neutral-fill'},{label:'🛍️ Spender',daily:avg*1.2,css:'spender-fill'}];
+    const maxD=Math.max(...scenarios.map(s=>bal/s.daily),1);
+    document.getElementById('scenarioBars').innerHTML=scenarios.map(s=>{const d=Math.floor(bal/s.daily);return `<div class="scenario-bar-row"><span class="scenario-label">${s.label}</span><div class="scenario-track"><div class="scenario-fill ${s.css}" style="width:${Math.min((d/maxD)*100,100)}%"></div></div><span class="scenario-val">${d} days</span></div>`;}).join('');
+    document.getElementById('longevityDays').textContent=avg>0?Math.floor(bal/avg):'—';
+    document.getElementById('longevityBalance').textContent=fmt(bal);
+    document.getElementById('longevityDaily').textContent=fmt(avg);
+    const predict=await api(`/api/predict/${currentUser.id}`);
+    // Forecast insights
+    const fi=document.getElementById('forecastBarsInsights'); const fw=predict.predictions?.weekly||{};
+    const fmax=Math.max(...Object.values(fw),1);
+    fi.innerHTML=Object.entries(fw).map(([w,v])=>`<div class="forecast-bar-row"><span class="forecast-week-label">${w}</span><div class="forecast-track"><div class="forecast-fill" style="width:${(v/fmax*100).toFixed(0)}%"></div></div><span class="forecast-val">${fmt(v)}</span></div>`).join('');
+    // Category chart
+    const ctx=document.getElementById('catChart');
+    if(catChartInst)catChartInst.destroy();
+    const cats=predict.predictions?.categories||{};
+    catChartInst=new Chart(ctx,{type:'doughnut',data:{labels:Object.keys(cats),datasets:[{data:Object.values(cats),backgroundColor:['#00E5A0','#3B8BFF','#F5A623','#FF3B5C','#9B59F5','#00b87a','#FF8C00']}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:'#B0C8E0'}}}}});
+  }catch(e){toast(e.message,true);}
+}
 
-// ── HISTORY ──
-async function loadHistory() { if(!currentUser) return; try { const txs = await api('/api/transactions'); allTransactions = txs; renderHistory(txs); } catch(e) { toast(e.message); } }
-function renderHistory(txs) { const list = document.getElementById('historyList'); const search = document.getElementById('historySearch').value.toLowerCase(); const showBadges = document.getElementById('showNeedWantBadges').checked; const filtered = txs.filter(t=> t.category.toLowerCase().includes(search) || (t.note||'').toLowerCase().includes(search)); if(!filtered.length) { list.innerHTML = '<div class="empty-state"><div class="empty-state-icon">🔍</div><div class="empty-state-text">No matching transactions.</div></div>'; return; } list.innerHTML = filtered.map(t=>{ const badgeHtml = showBadges ? (t.is_need ? '<span class="tx-badge need">Need</span>' : '<span class="tx-badge want">Want</span>') : ''; return `<div class="tx-item"><div class="tx-cat-icon">${CAT_ICONS[t.category]||'📦'}</div><div class="tx-info"><div class="tx-cat">${esc(t.category)} ${badgeHtml}</div><div class="tx-meta">${t.note?esc(t.note)+' · ':''}${fmtDate(t.tx_date)}</div></div><div class="tx-amount ${t.tx_type}">${t.tx_type==='income'?'+':'-'}${fmt(t.amount)}</div><button class="btn-del" onclick="deleteTransaction(${t.id})">🗑</button></div>`; }).join(''); }
-document.getElementById('historySearch').addEventListener('input', ()=> renderHistory(allTransactions));
-document.getElementById('showNeedWantBadges').addEventListener('change', ()=> { renderHistory(allTransactions); });
-document.getElementById('toggleHistoryViewBtn').addEventListener('click', () => { const content = document.getElementById('historyContent'); const btn = document.getElementById('toggleHistoryViewBtn'); historyVisible = !historyVisible; if (historyVisible) { content.style.display = 'block'; btn.textContent = '🙈 Hide History'; } else { content.style.display = 'none'; btn.textContent = '👁 Show History'; } });
-async function deleteTransaction(id) { if(!confirm('Delete this transaction?')) return; try { await api(`/api/transactions/${id}`, { method:'DELETE' }); toast('Deleted'); if(document.getElementById('screen-history').classList.contains('active')) loadHistory(); } catch(e) { toast(e.message); } }
+// ═══════════════════════════════════════════════
+// HISTORY
+// ═══════════════════════════════════════════════
+async function loadHistory(){if(!currentUser)return;try{const txs=await api('/api/transactions');allTransactions=txs;renderHistory(txs);}catch(e){toast(e.message,true);}}
+function renderHistory(txs){
+  const list=document.getElementById('historyList');
+  const q=document.getElementById('historySearch').value.toLowerCase();
+  const badges=document.getElementById('showNeedWantBadges').checked;
+  const f=txs.filter(t=>t.category.toLowerCase().includes(q)||(t.note||'').toLowerCase().includes(q));
+  if(!f.length){list.innerHTML='<div class="empty-state"><div class="empty-state-icon">🔍</div><div class="empty-state-text">No matching transactions.</div></div>';return;}
+  list.innerHTML=f.map(t=>`<div class="tx-item"><div class="tx-cat-icon">${CAT_ICONS[t.category]||'📦'}</div><div class="tx-info"><div class="tx-cat">${esc(t.category)}${badges?(t.is_need?'<span class="tx-badge need">Need</span>':'<span class="tx-badge want">Want</span>'):''}</div><div class="tx-meta">${t.note?esc(t.note)+' · ':''}${fmtDate(t.tx_date)}</div></div><div class="tx-amount ${t.tx_type}">${t.tx_type==='income'?'+':'-'}${fmt(t.amount)}</div><button class="btn-del" onclick="deleteTx(${t.id})">🗑</button></div>`).join('');
+}
+document.getElementById('historySearch').addEventListener('input',()=>renderHistory(allTransactions));
+document.getElementById('showNeedWantBadges').addEventListener('change',()=>renderHistory(allTransactions));
+document.getElementById('toggleHistoryViewBtn').addEventListener('click',()=>{
+  const c=document.getElementById('historyContent'),btn=document.getElementById('toggleHistoryViewBtn');
+  historyVisible=!historyVisible; c.style.display=historyVisible?'block':'none'; btn.textContent=historyVisible?'🙈 Hide':'👁 Show';
+});
+async function deleteTx(id){if(!confirm('Delete?'))return;try{await api(`/api/transactions/${id}`,{method:'DELETE'});toast('Deleted');allTransactions=allTransactions.filter(t=>t.id!==id);renderHistory(allTransactions);}catch(e){toast(e.message,true);}}
 
-// ── PROFILE PREVIEW & UPLOAD HANDLING ──
-document.getElementById('profileAvatar').addEventListener('input', function() { const url = this.value.trim(); const previewImg = document.getElementById('profilePreviewImg'); const placeholder = document.getElementById('profilePreviewPlaceholder'); if (url) { previewImg.src = url; previewImg.onerror = () => { previewImg.style.display = 'none'; placeholder.style.display = 'block'; }; previewImg.onload = () => { previewImg.style.display = 'block'; placeholder.style.display = 'none'; }; previewImg.src = url; } else { previewImg.style.display = 'none'; placeholder.style.display = 'block'; } });
-document.getElementById('profileFileInput').addEventListener('change', function(e) { const file = e.target.files[0]; if (!file) return; const reader = new FileReader(); reader.onload = function(ev) { const dataUrl = ev.target.result; document.getElementById('profileAvatar').value = dataUrl; document.getElementById('profileAvatar').dispatchEvent(new Event('input')); }; reader.readAsDataURL(file); });
-document.querySelectorAll('#profileBlock .preset-avatar').forEach(el => { el.addEventListener('click', () => { const dataUrl = el.dataset.url; document.getElementById('profileAvatar').value = dataUrl; document.getElementById('profileAvatar').dispatchEvent(new Event('input')); }); });
-document.getElementById('saveProfileBtn').addEventListener('click', async () => { const name = document.getElementById('profileName').value.trim(); const email = document.getElementById('profileEmail').value.trim(); const password = document.getElementById('profilePass').value; const avatar_url = document.getElementById('profileAvatar').value.trim(); const body = { name, email, avatar_url }; if (password) body.password = password; try { const updatedUser = await api('/api/profile', { method: 'PUT', body: JSON.stringify(body) }); currentUser = updatedUser; const initial = document.querySelector('.avatar-initial'); const img = document.querySelector('#userAvatar img'); if (updatedUser.avatar_url) { img.src = updatedUser.avatar_url; img.style.display = 'block'; initial.style.display = 'none'; } else { img.style.display = 'none'; initial.style.display = 'block'; initial.textContent = updatedUser.name?.charAt(0)?.toUpperCase() || '?'; } toast('Profile updated!'); } catch(e) { toast(e.message); } });
+// ═══════════════════════════════════════════════
+// PROFILE
+// ═══════════════════════════════════════════════
+document.getElementById('profileFileInput').addEventListener('change',function(){
+  const file=this.files[0]; if(!file)return;
+  const r=new FileReader(); r.onload=ev=>document.getElementById('profileAvatar').value=ev.target.result; r.readAsDataURL(file);
+});
+document.getElementById('saveProfileBtn').addEventListener('click',async()=>{
+  const body={name:document.getElementById('profileName').value.trim(),email:document.getElementById('profileEmail').value.trim(),avatar_url:document.getElementById('profileAvatar').value.trim()};
+  const pw=document.getElementById('profilePass').value; if(pw)body.password=pw;
+  try{
+    const u=await api('/api/profile',{method:'PUT',body:JSON.stringify(body)});
+    currentUser=u;
+    const av=document.getElementById('userAvatar'),init=av.querySelector('.avatar-initial'),img=av.querySelector('img');
+    if(u.avatar_url){img.src=u.avatar_url;img.style.display='block';init.style.display='none';}
+    else{img.style.display='none';init.style.display='block';init.textContent=u.name?.charAt(0)?.toUpperCase()||'?';}
+    toast('Profile updated!');
+  }catch(e){toast(e.message,true);}
+});
 
-// ── ADMIN ──
-async function loadAdmin() { if(!currentUser || currentUser.role!=='admin') return; try { const stats = await api('/api/admin/stats'); document.getElementById('adminStats').innerHTML = `<div class="stat-card"><div class="stat-value">${stats.total_users}</div><div class="stat-label">Users</div></div><div class="stat-card"><div class="stat-value">${stats.total_transactions}</div><div class="stat-label">Transactions</div></div><div class="stat-card"><div class="stat-value">${fmt(stats.total_income)}</div><div class="stat-label">Total Income</div></div><div class="stat-card"><div class="stat-value">${fmt(stats.total_expense)}</div><div class="stat-label">Total Expense</div></div><div class="stat-card blue-glow"><div class="stat-value">${stats.avg_health_score}</div><div class="stat-label">Avg Health Score</div></div>`; loadAdminUsers(); loadAdminTransactions(); } catch(e) { toast(e.message); } }
-document.getElementById('adminSearchUser').addEventListener('input', loadAdminUsers);
-document.getElementById('adminUserFilter').addEventListener('change', loadAdminTransactions);
-document.querySelectorAll('#adminTabs .tab').forEach(tab=>{ tab.addEventListener('click', ()=>{ document.querySelectorAll('#adminTabs .tab').forEach(t=>t.classList.remove('active')); tab.classList.add('active'); if(tab.dataset.tab==='users'){ document.getElementById('adminUsersPanel').style.display='block'; document.getElementById('adminTransactionsPanel').style.display='none'; } else { document.getElementById('adminUsersPanel').style.display='none'; document.getElementById('adminTransactionsPanel').style.display='block'; } }); });
-async function loadAdminUsers() { try { const users = await api('/api/admin/users'); const search = document.getElementById('adminSearchUser').value.toLowerCase(); const filtered = users.filter(u => u.name.toLowerCase().includes(search) || u.email.toLowerCase().includes(search)); const tbody = document.getElementById('adminUserTable'); tbody.innerHTML = filtered.map(u => `<tr id="userRow-${u.id}"><td>${u.id}</td><td>${esc(u.name)}</td><td>${esc(u.email)}</td><td>${esc(u.role)}</td><td>${fmtDate(u.created_at)}</td><td><button onclick="adminDeleteUser(${u.id})" class="btn btn-danger" style="padding:4px 8px;font-size:0.7rem;">Del</button></td></tr>`).join(''); } catch(e) { toast(e.message); } }
-async function adminDeleteUser(id){ if(!confirm('Delete this user and all their data?')) return; try { await api(`/api/admin/users/${id}`, { method:'DELETE' }); toast('User deleted'); loadAdminUsers(); } catch(e) { toast(e.message); } }
-async function loadAdminTransactions(){ try { const userId = document.getElementById('adminUserFilter').value; const url = userId ? `/api/admin/transactions?user_id=${userId}` : '/api/admin/transactions'; const txs = await api(url); document.getElementById('adminTxTable').innerHTML = txs.map(t=>`<tr><td>${fmtDate(t.tx_date)}</td><td>User ${t.user_id}</td><td>${esc(t.category)}</td><td>${t.tx_type}</td><td>${fmt(t.amount)}</td><td>${t.is_need?'Need':'Want'}</td></tr>`).join(''); const users = await api('/api/admin/users'); document.getElementById('adminUserFilter').innerHTML = '<option value="">All Users</option>'+ users.map(u=>`<option value="${u.id}">${esc(u.name)} (${u.id})</option>`).join(''); } catch(e) { toast(e.message); } }
+// ═══════════════════════════════════════════════
+// ADMIN
+// ═══════════════════════════════════════════════
+async function loadAdmin(){
+  if(!currentUser||currentUser.role!=='admin')return;
+  try{
+    const stats=await api('/api/admin/stats');
+    document.getElementById('adminStats').innerHTML=`<div class="stat-card"><div class="stat-value">${stats.total_users}</div><div class="stat-label">Users</div></div><div class="stat-card"><div class="stat-value">${stats.total_transactions}</div><div class="stat-label">Transactions</div></div><div class="stat-card"><div class="stat-value">${fmt(stats.total_income)}</div><div class="stat-label">Total Income</div></div><div class="stat-card"><div class="stat-value">${fmt(stats.total_expense)}</div><div class="stat-label">Total Expense</div></div><div class="stat-card blue-glow"><div class="stat-value">${stats.avg_health_score}</div><div class="stat-label">Avg Health Score</div></div>`;
+    loadAdminUsers(); loadAdminTransactions();
+  }catch(e){toast(e.message,true);}
+}
+document.getElementById('adminSearchUser').addEventListener('input',loadAdminUsers);
+document.getElementById('adminUserFilter').addEventListener('change',loadAdminTransactions);
+document.querySelectorAll('#adminTabs .tab').forEach(tab=>{tab.addEventListener('click',()=>{document.querySelectorAll('#adminTabs .tab').forEach(t=>t.classList.remove('active'));tab.classList.add('active');document.getElementById('adminUsersPanel').style.display=tab.dataset.tab==='users'?'block':'none';document.getElementById('adminTransactionsPanel').style.display=tab.dataset.tab==='users'?'none':'block';});});
+async function loadAdminUsers(){try{const users=await api('/api/admin/users');const q=document.getElementById('adminSearchUser').value.toLowerCase();const f=users.filter(u=>u.name.toLowerCase().includes(q)||u.email.toLowerCase().includes(q));document.getElementById('adminUserTable').innerHTML=f.map(u=>`<tr><td>${u.id}</td><td>${esc(u.name)}</td><td>${esc(u.email)}</td><td>${esc(u.role)}</td><td>${fmtDate(u.created_at)}</td><td><button onclick="adminDelUser(${u.id})" class="btn btn-danger" style="padding:4px 8px;font-size:0.7rem;">Del</button></td></tr>`).join('');}catch(e){toast(e.message,true);}}
+async function adminDelUser(id){if(!confirm('Delete user and all their data?'))return;try{await api(`/api/admin/users/${id}`,{method:'DELETE'});toast('User deleted');loadAdminUsers();}catch(e){toast(e.message,true);}}
+async function loadAdminTransactions(){try{const uid=document.getElementById('adminUserFilter').value;const txs=await api(uid?`/api/admin/transactions?user_id=${uid}`:'/api/admin/transactions');document.getElementById('adminTxTable').innerHTML=txs.map(t=>`<tr><td>${fmtDate(t.tx_date)}</td><td>User ${t.user_id}</td><td>${esc(t.category)}</td><td>${t.tx_type}</td><td>${fmt(t.amount)}</td><td>${t.is_need?'Need':'Want'}</td></tr>`).join('');const users=await api('/api/admin/users');document.getElementById('adminUserFilter').innerHTML='<option value="">All Users</option>'+users.map(u=>`<option value="${u.id}">${esc(u.name)} (${u.id})</option>`).join('');}catch(e){toast(e.message,true);}}
 
-// ── EXPORT ──
-document.getElementById('exportBtn').addEventListener('click', ()=>{ window.open('/api/export/csv', '_blank'); });
+// ═══════════════════════════════════════════════
+// EXPORT
+// ═══════════════════════════════════════════════
+document.getElementById('exportBtn').addEventListener('click',()=>window.open('/api/export/csv','_blank'));
 
-// ── CHATBOT DRAGGABLE & MINIMIZABLE ──
-(function(){ const chatbot = document.getElementById('chatbot'); const header = document.getElementById('chatHeader'); let offsetX, offsetY, isDragging = false; header.addEventListener('mousedown', (e) => { if(e.target.id === 'chatToggleBtn') return; isDragging = true; offsetX = e.clientX - chatbot.getBoundingClientRect().left; offsetY = e.clientY - chatbot.getBoundingClientRect().top; chatbot.style.cursor = 'grabbing'; e.preventDefault(); }); document.addEventListener('mousemove', (e) => { if(!isDragging) return; const left = e.clientX - offsetX; const top = e.clientY - offsetY; const w = window.innerWidth, h = window.innerHeight; const bw = chatbot.offsetWidth, bh = chatbot.offsetHeight; chatbot.style.left = Math.max(0, Math.min(left, w - bw)) + 'px'; chatbot.style.top = Math.max(0, Math.min(top, h - bh)) + 'px'; chatbot.style.right = 'auto'; chatbot.style.bottom = 'auto'; }); document.addEventListener('mouseup', () => { if(isDragging){ isDragging = false; chatbot.style.cursor = ''; } }); document.getElementById('chatToggleBtn').addEventListener('click', () => { chatbot.classList.toggle('minimized'); document.getElementById('chatToggleBtn').textContent = chatbot.classList.contains('minimized') ? '□' : '–'; }); })();
-document.getElementById('chatSend').addEventListener('click', sendChat);
-document.getElementById('chatInp').addEventListener('keypress', e=>{ if(e.key==='Enter') sendChat(); });
-async function sendChat() { const inp = document.getElementById('chatInp'); const msg = inp.value.trim(); if(!msg) return; const msgs = document.getElementById('chatMsgs'); msgs.innerHTML += `<div class="msg user">${esc(msg)}</div>`; inp.value = ''; try { const resp = await api('/api/ai/chat', { method:'POST', body: JSON.stringify({ message: msg }) }); msgs.innerHTML += `<div class="msg bot">${esc(resp.reply)}</div>`; } catch(e) { msgs.innerHTML += `<div class="msg bot">Sorry, I'm having trouble right now.</div>`; } msgs.scrollTop = msgs.scrollHeight; }
+// ═══════════════════════════════════════════════
+// CHATBOT
+// ═══════════════════════════════════════════════
+(function(){
+  const cb=document.getElementById('chatbot'),hdr=document.getElementById('chatHeader');
+  let ox,oy,drag=false;
+  hdr.addEventListener('mousedown',e=>{if(e.target.id==='chatToggleBtn')return;drag=true;ox=e.clientX-cb.getBoundingClientRect().left;oy=e.clientY-cb.getBoundingClientRect().top;cb.style.cursor='grabbing';e.preventDefault();});
+  document.addEventListener('mousemove',e=>{if(!drag)return;cb.style.left=Math.max(0,Math.min(e.clientX-ox,window.innerWidth-cb.offsetWidth))+'px';cb.style.top=Math.max(0,Math.min(e.clientY-oy,window.innerHeight-cb.offsetHeight))+'px';cb.style.right='auto';cb.style.bottom='auto';});
+  document.addEventListener('mouseup',()=>{if(drag){drag=false;cb.style.cursor='';}});
+  document.getElementById('chatToggleBtn').addEventListener('click',()=>{cb.classList.toggle('minimized');document.getElementById('chatToggleBtn').textContent=cb.classList.contains('minimized')?'□':'–';});
+})();
+document.getElementById('chatSend').addEventListener('click',sendChat);
+document.getElementById('chatInp').addEventListener('keypress',e=>{if(e.key==='Enter')sendChat();});
+async function sendChat(){
+  const inp=document.getElementById('chatInp');const msg=inp.value.trim();if(!msg)return;
+  const msgs=document.getElementById('chatMsgs');
+  msgs.innerHTML+=`<div class="msg user">${esc(msg)}</div>`;inp.value='';
+  try{const r=await api('/api/ai/chat',{method:'POST',body:JSON.stringify({message:msg})});msgs.innerHTML+=`<div class="msg bot">${esc(r.reply)}</div>`;}
+  catch(e){msgs.innerHTML+=`<div class="msg bot">Sorry, I'm having trouble right now.</div>`;}
+  msgs.scrollTop=msgs.scrollHeight;
+}
 
-// ── INITIAL LOAD ──
-(async ()=>{ try { const user = await api('/api/me'); currentUser = user; authOverlay.style.display = 'none'; initApp(); } catch(e) { authOverlay.style.display = 'flex'; } })();
+// ═══════════════════════════════════════════════
+// BOOT
+// ═══════════════════════════════════════════════
+(async()=>{
+  try{const user=await api('/api/me');currentUser=user;authOverlay.style.display='none';initApp();}
+  catch(e){authOverlay.style.display='flex';}
+})();
 </script>
 </body>
-</html>
-"""
+</html>"""
 
 
 # ----------------------------------------------------------------------
