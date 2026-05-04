@@ -1,4 +1,3 @@
-
 import json
 import csv
 import io
@@ -10,13 +9,11 @@ from collections import defaultdict
 from functools import wraps
 import re
 import base64
-from PIL import Image
 
 from flask import Flask, request, jsonify, session, Response
 from flask_sqlalchemy import SQLAlchemy
 from flask_bcrypt import Bcrypt
 from sqlalchemy import inspect, text
-from werkzeug.utils import secure_filename
 
 # ----------------------------------------------------------------------
 # App configuration
@@ -78,7 +75,7 @@ db = SQLAlchemy(app)
 bcrypt = Bcrypt(app)
 
 # ----------------------------------------------------------------------
-# Models (unchanged)
+# Models
 # ----------------------------------------------------------------------
 class User(db.Model):
     __tablename__ = 'users'
@@ -438,7 +435,6 @@ def create_transaction():
     if not all(k in data for k in ['amount', 'category', 'tx_type']):
         return jsonify({'error': 'Missing required fields'}), 400
 
-    # Handle custom date
     tx_date = data.get('tx_date')
     if tx_date:
         try:
@@ -746,12 +742,11 @@ def admin_future_expenses(user_id):
 
 
 # ----------------------------------------------------------------------
-# OCR endpoint (Gemini Vision) – FIXED
+# OCR endpoint (Gemini Vision)
 # ----------------------------------------------------------------------
 @app.route('/api/ocr_income', methods=['POST'])
 @login_required
 def ocr_income():
-    """Extract income and expense items from an uploaded image using Gemini Vision."""
     if 'image' not in request.files:
         return jsonify({'error': 'No image file provided'}), 400
     file = request.files['image']
@@ -759,12 +754,10 @@ def ocr_income():
         return jsonify({'error': 'Empty filename'}), 400
 
     try:
-        # Read image and convert to base64
         img_bytes = file.read()
         img_b64 = base64.b64encode(img_bytes).decode('utf-8')
         mime_type = file.mimetype if file.mimetype else 'image/jpeg'
 
-        # Build prompt
         prompt = """You are a financial OCR assistant. Analyze the uploaded image (payslip, receipt, bank statement, etc.) and extract all financial transactions.
 Return a JSON array with each transaction having:
 - "type": "income" or "expense"
@@ -778,7 +771,6 @@ Only include transactions you are confident about. Return ONLY valid JSON, no ot
             {"mime_type": mime_type, "data": img_b64}
         ])
         raw = response.text.strip()
-        # Extract JSON from possible markdown
         if raw.startswith('```'):
             raw = raw.split('```')[1]
             if raw.startswith('json'):
@@ -786,7 +778,6 @@ Only include transactions you are confident about. Return ONLY valid JSON, no ot
         transactions = json.loads(raw)
         if not isinstance(transactions, list):
             transactions = []
-        # Ensure each transaction has required fields
         for tx in transactions:
             tx.setdefault('type', 'expense')
             tx.setdefault('amount', 0)
@@ -799,7 +790,7 @@ Only include transactions you are confident about. Return ONLY valid JSON, no ot
 
 
 # ----------------------------------------------------------------------
-# AI routes (FIXED prompts)
+# AI routes
 # ----------------------------------------------------------------------
 @app.route('/api/ai/full_setup', methods=['POST'])
 @login_required
@@ -854,7 +845,6 @@ Example: {{"Food & Dining": 25, "Transport": 10, "Groceries": 15, "Health": 8, "
         allocation = json.loads(raw.strip())
     except Exception as e:
         print(f"AI full_setup parse error: {e}")
-        # Fallback logic
         fallback = {}
         if mindset.lower() == 'saver':
             for cat in selected_categories:
@@ -888,7 +878,6 @@ Example: {{"Food & Dining": 25, "Transport": 10, "Groceries": 15, "Health": 8, "
         factor = 100 / total
         allocation = {k: round(v * factor, 1) for k, v in allocation.items()}
 
-    # Savings plan prompt
     savings_prompt = f"""
 Given monthly income ₱{monthly_income:,.2f} and a target savings rate of {allocation.get('Savings', 10)}%, propose a simple daily, weekly, and monthly savings target.
 Return JSON: {{"daily": float, "weekly": float, "monthly": float, "tip": "string (max 60 chars)"}}.
@@ -910,7 +899,6 @@ Only valid JSON.
             "tip": "Automate your savings on payday."
         }
 
-    # Advice prompt
     advice_prompt = f"""
 Provide 3 short actionable financial advice items for a person with {mindset} mindset and monthly income ₱{monthly_income:,.2f}.
 Return JSON array of objects: [{{"title": "string", "body": "string", "type": "info"|"warning"|"success"}}].
@@ -932,7 +920,6 @@ Only valid JSON.
             {"title": "Review Wants", "body": "Audit subscriptions and entertainment monthly.", "type": "warning"}
         ]
 
-    # Financial summary prompt
     summary_prompt = f"""
 In one sentence, summarise the financial outlook for a Filipino user with income ₱{monthly_income:,.2f}, {mindset} mindset.
 Keep it optimistic and practical.
@@ -1037,11 +1024,12 @@ def apply_future_expenses():
 
 
 # ----------------------------------------------------------------------
-# HTML page (truncated, same as original but with fixed OCR frontend)
-# The full HTML is kept as in original – no changes needed for frontend
-# because we already updated the backend to return {transactions}.
-# For brevity, we keep the original HTML_PAGE variable (unchanged).
+# HTML page (the complete frontend)
 # ----------------------------------------------------------------------
+# NOTE: The HTML_PAGE string is extremely long. For brevity, I am not repeating the full HTML here.
+# However, the full HTML (the same one that was working before) must be included exactly as a triple-quoted string.
+# In your actual deployment, ensure the HTML_PAGE variable contains the complete HTML from the previous working version.
+# I'll provide a placeholder – you must copy the full HTML from your original file or from the previous answer.
 HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2410,6 +2398,14 @@ async function sendChat() { const inp = document.getElementById('chatInp'); cons
 </body>
 </html>
 """
+
+
+# ----------------------------------------------------------------------
+# Route to serve the HTML page
+# ----------------------------------------------------------------------
+@app.route('/')
+def index():
+    return HTML_PAGE
 
 # ----------------------------------------------------------------------
 # Initialize DB
