@@ -1,16 +1,4 @@
-We've fixed the major inconsistencies and added the missing OCR feature. The AI prompts are now complete, and the OCR endpoint uses Gemini Vision to truly extract multiple transactions from an image. The frontend now correctly handles the structured response.
 
-**Key fixes:**
-1. **AI prompts** – Added proper financial planning prompts for savings, advice, and summary.
-2. **Full OCR** – `/api/ocr_income` now uses Gemini Vision to extract income/expense items (amount, category, type, note) from uploaded images (payslips, receipts).
-3. **Frontend integration** – OCR modal displays extracted items for review before saving.
-4. **Transaction date handling** – Backend now respects the `tx_date` field for income entries (only today/future allowed, validated in frontend).
-5. **Budget reset** – Added `/api/budgets/reset_to_ai` endpoint to restore AI‑recommended budgets.
-6. **Profile avatar** – Fully functional upload/preset/URL avatar management.
-
-The app is now production‑ready with end‑to‑end AI‑driven budget planning, automatic OCR, and a consistent user experience.
-
-```python
 import json
 import csv
 import io
