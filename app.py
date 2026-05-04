@@ -53,7 +53,7 @@ from flask_cors import CORS
 CORS(app, supports_credentials=True)
 
 # ----------------------------------------------------------------------
-# Multi-AI Router (unchanged)
+# Multi-AI Router
 # ----------------------------------------------------------------------
 GEMINI_MODELS = ["gemini-2.0-flash"]
 FREE_MODELS = [
@@ -62,6 +62,7 @@ FREE_MODELS = [
     "mistralai/mistral-7b-instruct:free",
     "microsoft/phi-3-mini-128k-instruct:free",
 ]
+
 def route_ai_request(prompt, max_tokens=400):
     if OPENROUTER_API_KEY:
         for model in FREE_MODELS:
@@ -101,7 +102,7 @@ db = SQLAlchemy(app)
 bcrypt = Bcrypt(app)
 
 # ----------------------------------------------------------------------
-# Models (unchanged)
+# Models
 # ----------------------------------------------------------------------
 class User(db.Model):
     __tablename__ = 'users'
@@ -207,7 +208,7 @@ class UserAllocation(db.Model):
     __table_args__ = (db.UniqueConstraint('user_id', 'category_name', name='unique_user_category_allocation'),)
 
 # ----------------------------------------------------------------------
-# Schema migration helper (unchanged)
+# Schema migration helper
 # ----------------------------------------------------------------------
 def ensure_schema():
     inspector = inspect(db.engine)
@@ -264,7 +265,7 @@ def ensure_schema():
         db.session.commit()
 
 # ----------------------------------------------------------------------
-# Authentication helpers (unchanged)
+# Authentication helpers
 # ----------------------------------------------------------------------
 def login_required(f):
     @wraps(f)
@@ -314,7 +315,7 @@ def validate_transaction(user_id, amount, tx_type):
             raise ValueError("This expense would exceed your monthly income. Add more income first.")
 
 # ----------------------------------------------------------------------
-# Analytics helpers (unchanged)
+# Analytics helpers
 # ----------------------------------------------------------------------
 def compute_health_score(user_id):
     thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
@@ -495,7 +496,7 @@ def compute_longevity(user_id):
     return {'balance': summary['balance'], 'avg_daily_spend': avg_daily, 'days': days}
 
 # ----------------------------------------------------------------------
-# Auth routes (unchanged)
+# Auth routes
 # ----------------------------------------------------------------------
 @app.route('/api/register', methods=['POST'])
 def register():
@@ -566,8 +567,10 @@ def update_profile():
     return jsonify(user.to_dict()), 200
 
 # ----------------------------------------------------------------------
-# Transaction routes (updated to accept tx_date)
+# Transaction routes
 # ----------------------------------------------------------------------
+needs_set = {'Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage'}
+
 @app.route('/api/transactions', methods=['GET'])
 @login_required
 def list_transactions():
@@ -594,7 +597,6 @@ def create_transaction():
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
 
-    # Allow client to set the transaction date (otherwise use current time)
     tx_date_str = data.get('tx_date')
     if tx_date_str:
         tx_date = datetime.fromisoformat(tx_date_str)
@@ -614,7 +616,6 @@ def create_transaction():
     db.session.add(tx)
     db.session.commit()
 
-    # Auto‑process future expenses when salary is added (use the transaction's date)
     if tx.tx_type == 'income' and tx.category.lower() == 'salary':
         today = tx_date.date()
         for exp in FutureExpense.query.filter(
@@ -637,8 +638,6 @@ def create_transaction():
         db.session.commit()
 
     return jsonify(tx.to_dict()), 201
-
-needs_set = {'Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage'}
 
 @app.route('/api/transactions/quick', methods=['POST'])
 @login_required
@@ -761,7 +760,7 @@ def reset_budgets_to_ai(user_id):
     return jsonify({'message': 'Budgets reset to AI recommendations'}), 200
 
 # ----------------------------------------------------------------------
-# Summary / Predict / Longevity (merged)
+# Summary / Predict / Longevity
 # ----------------------------------------------------------------------
 @app.route('/api/summary/<int:user_id>')
 @login_required
@@ -1044,7 +1043,7 @@ def detect_anomalies(user_id):
     return jsonify({'anomalies': anomalies})
 
 # ----------------------------------------------------------------------
-# OCR endpoint (UPDATED to support preview without saving)
+# OCR endpoint (with preview without saving)
 # ----------------------------------------------------------------------
 @app.route('/api/ocr_income', methods=['POST'])
 @login_required
@@ -1056,7 +1055,6 @@ def ocr_income():
     if file.filename == '':
         return jsonify({'error': 'Empty filename'}), 400
 
-    # Check if we should only preview (extract without saving)
     save_to_db = request.form.get('save', 'true').lower() != 'false'
 
     image_bytes = file.read()
@@ -1121,7 +1119,6 @@ Example:
     if not raw:
         return jsonify({'error': 'Could not extract transactions from image'}), 500
 
-    # JSON extraction
     items = None
     try:
         cleaned = raw.strip()
@@ -1144,7 +1141,6 @@ Example:
     if not items:
         return jsonify({'error': 'Failed to parse AI output', 'raw_output': raw[:200]}), 500
 
-    # If preview only, return items without saving
     if not save_to_db:
         preview = []
         for item in items:
@@ -1158,7 +1154,6 @@ Example:
             })
         return jsonify({'transactions': preview, 'count': len(preview)})
 
-    # Save to database (existing logic)
     created_txs = []
     errors = []
     for item in items:
@@ -1357,7 +1352,6 @@ Example output: {{"Food & Dining": 45.0, "Transport": 15.0, "Savings": 40.0}}
         factor = 100 / total
         allocation = {k: round(v * factor, 1) for k, v in allocation.items()}
 
-    # Savings plan
     savings_prompt = f"""
 User monthly income: ₱{monthly_income:.2f}, monthly expenses: ₱{sum(recent_spending.values()):.2f}, current balance: ₱{get_monthly_summary(user.id)['balance']:.2f}.
 Spending mindset: {mindset}.
@@ -1380,7 +1374,6 @@ Return JSON: {{"daily": float, "weekly": float, "monthly": float, "tip": "string
             "tip": "Automate your savings on payday."
         }
 
-    # Advice
     advice_prompt = f"""
 User has budget allocations: {allocation}. Recent spending: {dict(recent_spending)}.
 Provide 3 short pieces of financial advice as JSON array:
@@ -1402,7 +1395,6 @@ Provide 3 short pieces of financial advice as JSON array:
             {"title": "Review Wants", "body": "Audit subscriptions and entertainment monthly.", "type": "warning"}
         ]
 
-    # Financial summary
     summary_prompt = f"Based on monthly income ₱{monthly_income}, mindset {mindset}, and allocations {allocation}, give a one‑sentence overall financial health assessment."
     try:
         raw_summary = route_ai_request(summary_prompt, max_tokens=100)
@@ -1410,7 +1402,6 @@ Provide 3 short pieces of financial advice as JSON array:
     except Exception:
         financial_summary = "Your AI plan is ready. Start by logging your expenses to get personalized insights."
 
-    # Save allocations
     UserAllocation.query.filter_by(user_id=user.id).delete()
     needs = {'Food & Dining', 'Transport', 'Groceries', 'Health', 'Debt repayment', 'Mortgage'}
     savings_cats = {'Savings'}
@@ -1478,7 +1469,7 @@ Reply in 3-5 sentences, warm, actionable, use ₱.
     return jsonify({'reply': reply})
 
 # ----------------------------------------------------------------------
-# Apply future expenses (FIXED indentation + Asia/Manila timezone)
+# Apply future expenses
 # ----------------------------------------------------------------------
 @app.route('/api/apply_future_expenses', methods=['POST'])
 @login_required
@@ -1487,7 +1478,6 @@ def apply_future_expenses():
     today = datetime.now(ZoneInfo("Asia/Manila")).date()
     applied = []
 
-    # 1. One-time expenses
     onetime = FutureExpense.query.filter(
         FutureExpense.user_id == user.id,
         FutureExpense.expense_date <= today,
@@ -1507,7 +1497,6 @@ def apply_future_expenses():
         applied.append(exp.description)
         db.session.delete(exp)
 
-    # 2. Recurring expenses
     recurring = FutureExpense.query.filter(
         FutureExpense.user_id == user.id,
         FutureExpense.expense_date <= today,
@@ -1542,9 +1531,6 @@ def apply_future_expenses():
     db.session.commit()
     return jsonify({'applied': applied, 'count': len(applied)}), 200
 
-# ----------------------------------------------------------------------
-# Frontend HTML – FINAL UPDATED VERSION (matches all frontend requests)
-# ----------------------------------------------------------------------
 HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2575,6 +2561,7 @@ async function sendChat() {
 </body>
 </html>
 """
+
 
 @app.route('/')
 def index():
