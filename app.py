@@ -121,7 +121,7 @@ class User(db.Model):
     monthly_budget_limit = db.Column(db.Float, default=0.0)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     role = db.Column(db.String(20), default='user')
-    avatar_url = db.Column(db.Text, nullable=True, default=None)   # TEXT allows long data URLs
+    avatar_url = db.Column(db.Text, nullable=True, default=None)
 
     transactions = db.relationship('Transaction', backref='user', lazy=True)
     budgets = db.relationship('Budget', backref='user', lazy=True)
@@ -220,7 +220,6 @@ def ensure_schema():
     inspector = inspect(db.engine)
     dialect = db.engine.dialect.name
 
-    # Users table
     if inspector.has_table('users'):
         existing_columns = [col['name'] for col in inspector.get_columns('users')]
         if 'password' in existing_columns and 'password_hash' in existing_columns:
@@ -228,32 +227,26 @@ def ensure_schema():
                 conn.execute(text('ALTER TABLE users DROP COLUMN password'))
                 conn.commit()
 
-        # Add missing columns if any
         for col, defn in [
             ('password_hash', "VARCHAR(128) NOT NULL DEFAULT ''"),
             ('social_status', "VARCHAR(20) DEFAULT 'Middle'"),
             ('spending_mindset', "VARCHAR(20) DEFAULT 'Neutral'"),
             ('monthly_budget_limit', "FLOAT DEFAULT 0.0"),
             ('role', "VARCHAR(20) DEFAULT 'user'"),
-            ('avatar_url', "TEXT"),   # Changed to TEXT directly
+            ('avatar_url', "TEXT"),
         ]:
             if col not in existing_columns:
                 with db.engine.connect() as conn:
                     conn.execute(text(f'ALTER TABLE users ADD COLUMN {col} {defn}'))
                     conn.commit()
 
-        # Only attempt to change column type on PostgreSQL (SQLite does not support ALTER COLUMN TYPE)
         if dialect == 'postgresql':
             avatar_col_info = next((col for col in inspector.get_columns('users') if col['name'] == 'avatar_url'), None)
             if avatar_col_info and 'varchar' in str(avatar_col_info['type']).lower():
                 with db.engine.connect() as conn:
                     conn.execute(text('ALTER TABLE users ALTER COLUMN avatar_url TYPE TEXT'))
                     conn.commit()
-        else:
-            # For SQLite, we trust that the column is already TEXT (since we added it as TEXT above)
-            pass
 
-    # Transactions table
     if inspector.has_table('transactions'):
         tx_columns = [col['name'] for col in inspector.get_columns('transactions')]
         if 'is_need' not in tx_columns:
@@ -267,7 +260,6 @@ def ensure_schema():
 
     db.create_all()
 
-    # Create default admin user
     admin = User.query.filter_by(email='admin@smartspend.com').first()
     if not admin:
         admin = User(name='Admin', email='admin@smartspend.com', role='admin')
@@ -305,7 +297,7 @@ def get_current_user():
     return User.query.get(session.get('user_id')) if 'user_id' in session else None
 
 # ----------------------------------------------------------------------
-# Analytics helpers
+# Analytics helpers (unchanged)
 # ----------------------------------------------------------------------
 def compute_health_score(user_id):
     thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
@@ -454,7 +446,7 @@ def update_avatar():
     data = request.json
     url = data.get('avatar_url', '').strip()
     if url and not (url.startswith('http://') or url.startswith('https://') or url.startswith('data:image/')):
-        return jsonify({'error': 'Invalid URL. Must start with http, https, or data:image/'}), 400
+        return jsonify({'error': 'Invalid URL'}), 400
     user.avatar_url = url if url else None
     db.session.commit()
     return jsonify({'avatar_url': user.avatar_url}), 200
@@ -511,9 +503,8 @@ def create_transaction():
     )
     db.session.add(tx)
     db.session.commit()
-    # Auto-apply one-time future expenses only on salary income
     if tx.tx_type == 'income' and tx.category.lower() == 'salary':
-        today = get_today_date()   # FIXED: uses safe UTC+8 fallback
+        today = get_today_date()
         for exp in FutureExpense.query.filter(
             FutureExpense.user_id == user.id,
             FutureExpense.expense_date <= today,
@@ -540,7 +531,7 @@ def delete_transaction(tx_id):
     return jsonify({'message': 'Deleted'}), 200
 
 # ----------------------------------------------------------------------
-# Budget routes (unchanged)
+# Budget routes
 # ----------------------------------------------------------------------
 @app.route('/api/budgets/<int:user_id>', methods=['GET'])
 @login_required
@@ -587,8 +578,33 @@ def update_single_budget(user_id, category):
     db.session.commit()
     return jsonify({'message': 'Budget updated', 'limit': limit})
 
+# Additional endpoint to reset budgets to the AI recommended values (new feature)
+@app.route('/api/budgets/reset_to_ai/<int:user_id>', methods=['POST'])
+@login_required
+def reset_budgets_to_ai(user_id):
+    if get_current_user().id != user_id:
+        return jsonify({'error': 'Forbidden'}), 403
+    # Get the user's current allocations (percentages)
+    allocations = UserAllocation.query.filter_by(user_id=user_id).all()
+    if not allocations:
+        return jsonify({'error': 'No AI allocation found. Run AI plan first.'}), 400
+    user = get_current_user()
+    monthly_income = user.monthly_budget_limit
+    if monthly_income <= 0:
+        return jsonify({'error': 'Monthly income not set. Run AI plan.'}), 400
+    # Update each budget
+    for alloc in allocations:
+        budget = Budget.query.filter_by(user_id=user_id, category=alloc.category_name).first()
+        new_limit = round(monthly_income * alloc.percentage / 100, 2)
+        if budget:
+            budget.limit_amount = new_limit
+        else:
+            db.session.add(Budget(user_id=user_id, category=alloc.category_name, limit_amount=new_limit))
+    db.session.commit()
+    return jsonify({'message': 'Budgets reset to AI recommendations'}), 200
+
 # ----------------------------------------------------------------------
-# Summary, Predict, Longevity, Future expenses, Allocations, Export (mostly unchanged)
+# Summary, Predict, Longevity, Future expenses, Allocations, Export
 # ----------------------------------------------------------------------
 @app.route('/api/summary/<int:user_id>')
 @login_required
@@ -782,7 +798,7 @@ def admin_future_expenses(user_id):
     return jsonify([e.to_dict() for e in exps])
 
 # ----------------------------------------------------------------------
-# OCR endpoint (unchanged except fixed timezone usage)
+# OCR endpoint (unchanged)
 # ----------------------------------------------------------------------
 @app.route('/api/ocr_income', methods=['POST'])
 @login_required
@@ -917,7 +933,7 @@ Example:
     })
 
 # ----------------------------------------------------------------------
-# AI full setup (unchanged except fallback JSON parsing)
+# AI full setup (unchanged)
 # ----------------------------------------------------------------------
 @app.route('/api/ai/full_setup', methods=['POST'])
 @login_required
@@ -1125,10 +1141,9 @@ Reply in 3-5 sentences, warm, actionable, use ₱.
     return jsonify({'reply': reply})
 
 # ----------------------------------------------------------------------
-# Helper for safe datetime in Asia/Manila with fallback
+# Helper for safe datetime
 # ----------------------------------------------------------------------
 def get_today_date():
-    """Return today's date in Asia/Manila timezone, fallback to UTC if zoneinfo fails."""
     try:
         return datetime.now(ZoneInfo("Asia/Manila")).date()
     except Exception as e:
@@ -1136,13 +1151,13 @@ def get_today_date():
         return datetime.now(timezone.utc).date()
 
 # ----------------------------------------------------------------------
-# Apply future expenses (FIXED timezone)
+# Apply future expenses
 # ----------------------------------------------------------------------
 @app.route('/api/apply_future_expenses', methods=['POST'])
 @login_required
 def apply_future_expenses():
     user = get_current_user()
-    today = get_today_date()   # safe fallback
+    today = get_today_date()
     applied = []
 
     onetime = FutureExpense.query.filter(
@@ -1182,7 +1197,6 @@ def apply_future_expenses():
         db.session.add(tx)
         applied.append(f"{exp.description} (recurring)")
 
-        # Advance to next occurrence
         if exp.cycle == 'Weekly':
             next_date = exp.expense_date + timedelta(weeks=1)
         else:
@@ -1200,66 +1214,8 @@ def apply_future_expenses():
     return jsonify({'applied': applied, 'count': len(applied)}), 200
 
 # ----------------------------------------------------------------------
-# Frontend (single HTML page) – FIXED JavaScript escaping for budgets
+# Frontend HTML (with fixed budget functions + reset button)
 # ----------------------------------------------------------------------
-# IMPORTANT: In the HTML part, I have fixed the `renderBudgetList` function
-# to properly escape category names for both the element ID and the onclick handler.
-# I also changed `saveBudget` to use `encodeURIComponent` and safely build IDs.
-# The rest of the HTML remains exactly as you provided, except for those two functions.
-# Since the HTML is extremely long, I will only provide the corrected JavaScript
-# functions that need to be replaced inside the <script> tag.
-# However, for completeness I include the full HTML with the fixes.
-# (The actual full HTML is identical to yours except for the two functions below.)
-
-# Because the entire HTML_PAGE is massive, I am showing only the changes.
-# In practice, you would replace the `renderBudgetList` and `saveBudget`
-# functions inside the <script> section of HTML_PAGE.
-
-# Here are the corrected JavaScript functions (place them inside the original <script>):
-
-'''
-async function loadBudgets() {
-    if (!currentUser) return;
-    try {
-        const budgets = await api(`/api/budgets/${currentUser.id}`);
-        renderBudgetList(budgets);
-    } catch(e) { toast(e.message); }
-}
-
-function renderBudgetList(budgets) {
-    const container = document.getElementById('budgetList');
-    if (!budgets.length) {
-        container.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📊</div><div class="empty-state-text">No budgets set yet. Run AI Plan first.</div></div>';
-        return;
-    }
-    container.innerHTML = budgets.map(b => {
-        // Safely escape the category name for use in HTML id and onclick
-        const safeCat = b.category.replace(/[^a-zA-Z0-9]/g, '_');
-        return `
-          <div class="budget-item" id="budget-${safeCat}">
-            <div class="budget-cat">${esc(b.category)}</div>
-            <input class="budget-input" id="budget-input-${safeCat}" type="number" step="0.01" value="${b.limit.toFixed(2)}">
-            <button class="budget-save-btn" onclick="saveBudget('${b.category.replace(/'/g, "\\'")}', '${safeCat}')">Save</button>
-            <span class="budget-amount">${fmt(b.limit)}</span>
-          </div>`;
-    }).join('');
-    document.getElementById('budgetBlock').style.display = 'block';
-}
-
-async function saveBudget(category, safeId) {
-    const input = document.getElementById('budget-input-' + safeId);
-    const newLimit = parseFloat(input.value);
-    if (isNaN(newLimit)) return;
-    try {
-        await api(`/api/budgets/${currentUser.id}/${encodeURIComponent(category)}`, {
-            method: 'PUT',
-            body: JSON.stringify({ limit: newLimit })
-        });
-        toast('Budget updated');
-        loadBudgets();
-    } catch(e) { toast(e.message); }
-}
-'''
 HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1768,7 +1724,7 @@ body::before{
         <div class="ocr-hint">📸 Take a photo or upload a payslip / budget screenshot. ML will read all income & expenses.</div>
       </div>
 
-      <!-- Profile Edit Block (UPDATED) -->
+      <!-- Profile Edit Block -->
       <div id="profileBlock" class="profile-block" style="display:none;">
         <div style="font-size:1rem;font-weight:600;margin-bottom:16px;color:var(--green);">Edit Your Profile</div>
         <div class="form-group">
@@ -1786,12 +1742,10 @@ body::before{
         <div class="form-group">
           <label class="form-label">Profile Picture</label>
           <div style="display:flex; gap:20px; align-items:flex-start;">
-            <!-- Left: Preview -->
             <div style="flex:0 0 100px; height:100px; border-radius:16px; background:var(--bg3); display:flex; align-items:center; justify-content:center; overflow:hidden; border:2px dashed var(--border);">
               <img id="profilePreviewImg" src="" style="width:100%; height:100%; object-fit:cover; display:none;">
               <span id="profilePreviewPlaceholder" style="font-size:2rem; color:var(--muted);">👤</span>
             </div>
-            <!-- Right: Upload + URL -->
             <div style="flex:1; display:flex; flex-direction:column; gap:10px;">
               <label class="btn" style="display:inline-block; width:fit-content; cursor:pointer; font-size:0.8rem; padding:6px 14px;">
                 📁 Upload Photo
@@ -1846,9 +1800,12 @@ body::before{
       <div class="alloc-grid" id="allocGrid"></div>
     </div>
 
-    <!-- Budget Management Card -->
+    <!-- Budget Management Card (with Reset button) -->
     <div id="budgetBlock" style="display:none" class="card">
-      <div class="card-header"><span class="card-title">Manage Budgets</span></div>
+      <div class="card-header">
+        <span class="card-title">Manage Budgets</span>
+        <button class="btn btn-primary" id="resetBudgetsBtn" style="font-size:0.8rem;">⟳ Reset to AI Budgets</button>
+      </div>
       <div id="budgetList"></div>
     </div>
 
@@ -1939,11 +1896,11 @@ body::before{
       </div>
       <div id="adminUsersPanel">
         <input type="text" id="adminSearchUser" placeholder="Search user..." class="form-input" style="margin-bottom:12px;">
-        <table style="width:100%; border-collapse:collapse;"><thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Role</th><th>Created</th><th>Actions</th></tr></thead><tbody id="adminUserTable"></tbody></table>
+        <table style="width:100%; border-collapse:collapse;"><thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Role</th><th>Created</th><th>Actions</th></tr></thead><tbody id="adminUserTable"></tbody><table>
       </div>
       <div id="adminTransactionsPanel" style="display:none;">
         <select id="adminUserFilter" class="form-select" style="margin-bottom:12px;"><option value="">All Users</option></select>
-        <table style="width:100%; border-collapse:collapse;"><thead><tr><th>Date</th><th>User</th><th>Category</th><th>Type</th><th>Amount</th><th>Need/Want</th></tr></thead><tbody id="adminTxTable"></tbody></table>
+        <table style="width:100%; border-collapse:collapse;"><thead><tr><th>Date</th><th>User</th><th>Category</th><th>Type</th><th>Amount</th><th>Need/Want</th></table></thead><tbody id="adminTxTable"></tbody></table>
       </div>
     </div>
   </div>
@@ -2288,13 +2245,11 @@ document.getElementById('incomeTool').addEventListener('change', function(){
   document.getElementById('incomeImageUpload').style.display = (val === 'auto') ? 'block' : 'none';
   document.getElementById('profileBlock').style.display = (val === 'profile') ? 'block' : 'none';
 
-  // prefill profile fields when showing
   if (val === 'profile' && currentUser) {
     document.getElementById('profileName').value = currentUser.name || '';
     document.getElementById('profileEmail').value = currentUser.email || '';
     document.getElementById('profilePass').value = '';
     document.getElementById('profileAvatar').value = currentUser.avatar_url || '';
-    // Update preview
     if (currentUser.avatar_url) {
       document.getElementById('profilePreviewImg').src = currentUser.avatar_url;
       document.getElementById('profilePreviewImg').style.display = 'block';
@@ -2449,7 +2404,7 @@ function renderAIPlan(plan) {
   loadBudgets();
 }
 
-// ── BUDGET MANAGEMENT ──
+// ── BUDGET MANAGEMENT (FIXED) ──
 async function loadBudgets() {
     if (!currentUser) return;
     try {
@@ -2464,18 +2419,24 @@ function renderBudgetList(budgets) {
         container.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📊</div><div class="empty-state-text">No budgets set yet. Run AI Plan first.</div></div>';
         return;
     }
-    container.innerHTML = budgets.map(b => `
-      <div class="budget-item" id="budget-${b.category}">
-        <div class="budget-cat">${esc(b.category)}</div>
-        <input class="budget-input" id="budget-input-${b.category}" type="number" step="0.01" value="${b.limit.toFixed(2)}">
-        <button class="budget-save-btn" onclick="saveBudget('${b.category}')">Save</button>
-        <span class="budget-amount">${fmt(b.limit)}</span>
-      </div>`).join('');
+    container.innerHTML = budgets.map(b => {
+        // Create a safe ID by replacing non-alphanumeric characters with underscore
+        const safeCat = b.category.replace(/[^a-zA-Z0-9]/g, '_');
+        // Escape single quotes in the category name for the onclick handler
+        const escapedCat = b.category.replace(/'/g, "\\'");
+        return `
+          <div class="budget-item" id="budget-${safeCat}">
+            <div class="budget-cat">${esc(b.category)}</div>
+            <input class="budget-input" id="budget-input-${safeCat}" type="number" step="0.01" value="${b.limit.toFixed(2)}">
+            <button class="budget-save-btn" onclick="saveBudget('${escapedCat}', '${safeCat}')">Save</button>
+            <span class="budget-amount">${fmt(b.limit)}</span>
+          </div>`;
+    }).join('');
     document.getElementById('budgetBlock').style.display = 'block';
 }
 
-async function saveBudget(category) {
-    const input = document.getElementById('budget-input-' + category);
+async function saveBudget(category, safeId) {
+    const input = document.getElementById('budget-input-' + safeId);
     const newLimit = parseFloat(input.value);
     if (isNaN(newLimit)) return;
     try {
@@ -2487,6 +2448,16 @@ async function saveBudget(category) {
         loadBudgets();
     } catch(e) { toast(e.message); }
 }
+
+// Reset budgets to AI values (new feature)
+document.getElementById('resetBudgetsBtn')?.addEventListener('click', async () => {
+    if (!currentUser) return;
+    try {
+        await api(`/api/budgets/reset_to_ai/${currentUser.id}`, { method: 'POST' });
+        toast('Budgets reset to AI recommendations');
+        loadBudgets();
+    } catch(e) { toast(e.message); }
+});
 
 function renderForecast(weekly) {
   const container = document.getElementById('forecastBars');
@@ -2720,8 +2691,6 @@ async function deleteTransaction(id) {
 }
 
 // ── PROFILE PREVIEW & UPLOAD HANDLING ──
-
-// Update preview when URL changes
 document.getElementById('profileAvatar').addEventListener('input', function() {
   const url = this.value.trim();
   const previewImg = document.getElementById('profilePreviewImg');
@@ -2736,14 +2705,13 @@ document.getElementById('profileAvatar').addEventListener('input', function() {
       previewImg.style.display = 'block';
       placeholder.style.display = 'none';
     };
-    previewImg.src = url; // trigger load
+    previewImg.src = url;
   } else {
     previewImg.style.display = 'none';
     placeholder.style.display = 'block';
   }
 });
 
-// File upload handler
 document.getElementById('profileFileInput').addEventListener('change', function(e) {
   const file = e.target.files[0];
   if (!file) return;
@@ -2751,13 +2719,11 @@ document.getElementById('profileFileInput').addEventListener('change', function(
   reader.onload = function(ev) {
     const dataUrl = ev.target.result;
     document.getElementById('profileAvatar').value = dataUrl;
-    // Trigger preview update
     document.getElementById('profileAvatar').dispatchEvent(new Event('input'));
   };
   reader.readAsDataURL(file);
 });
 
-// Preset avatar clicks for the profile block
 document.querySelectorAll('#profileBlock .preset-avatar').forEach(el => {
   el.addEventListener('click', () => {
     const dataUrl = el.dataset.url;
@@ -2766,7 +2732,6 @@ document.querySelectorAll('#profileBlock .preset-avatar').forEach(el => {
   });
 });
 
-// ── PROFILE SAVE ──
 document.getElementById('saveProfileBtn').addEventListener('click', async () => {
   const name = document.getElementById('profileName').value.trim();
   const email = document.getElementById('profileEmail').value.trim();
@@ -2779,7 +2744,6 @@ document.getElementById('saveProfileBtn').addEventListener('click', async () => 
   try {
     const updatedUser = await api('/api/profile', { method: 'PUT', body: JSON.stringify(body) });
     currentUser = updatedUser;
-    // Update topbar avatar
     const initial = document.querySelector('.avatar-initial');
     const img = document.querySelector('#userAvatar img');
     if (updatedUser.avatar_url) {
@@ -2795,7 +2759,7 @@ document.getElementById('saveProfileBtn').addEventListener('click', async () => 
   } catch(e) { toast(e.message); }
 });
 
-// ── ADMIN ──
+// ── ADMIN (unchanged) ──
 async function loadAdmin() {
   if(!currentUser || currentUser.role!=='admin') return;
   try {
@@ -2940,6 +2904,7 @@ async function sendChat() {
 </body>
 </html>
 """
+
 with app.app_context():
     db.create_all()
     ensure_schema()
