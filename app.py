@@ -1,21 +1,3 @@
-"""
-SmartSpend / Makamandag — AI Personal Finance
-==============================================
-FIXES APPLIED:
-  1. SECRET_KEY   — removed hardcode, reads from env var (required)
-  2. DATABASE_URL — removed hardcode, reads from env var (required)
-  3. GEMINI_API_KEY — removed hardcode, reads from env var (required)
-  4. postgres:// → postgresql:// auto-fix for Render
-  5. SESSION_COOKIE_SECURE / SAMESITE / HTTPONLY — added for proper login on HTTPS
-  6. CORS — added flask_cors so browser sessions work cross-origin
-  7. ensure_schema() — every ALTER wrapped in individual try/except (safe on re-deploy)
-  8. Password migration in ensure_schema — guarded so it never crashes on fresh DB
-  9. create_transaction validation — amount must be >= 1, no negatives
-  10. Expense budget guard — blocks expense if budget is zero or would exceed income
-  11. requirements.txt — Flask 3.x + SQLAlchemy 2.x compatible, removed unused deps
-  12. render.yaml — fixed generateValue syntax, fixed plan: free newline bug
-"""
-
 import json, csv, io, os, re, base64, requests
 import google.generativeai as genai
 
