@@ -4,47 +4,29 @@ import io
 import os
 import requests
 import base64
-from zoneinfo import ZoneInfo
-import google.generativeai as genai
+import re
+import numpy as np
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 from functools import wraps
-import re
-import numpy as np
-
 from flask import Flask, request, jsonify, session, Response
 from flask_sqlalchemy import SQLAlchemy
 from flask_bcrypt import Bcrypt
 from sqlalchemy import inspect, text
-from werkzeug.utils import secure_filename
+import google.generativeai as genai
 
 # ----------------------------------------------------------------------
 # App configuration
 # ----------------------------------------------------------------------
 app = Flask(__name__)
-
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY')
-if not app.config['SECRET_KEY']:
-    raise RuntimeError("SECRET_KEY environment variable is not set!")
-
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL')
-if not app.config['SQLALCHEMY_DATABASE_URI']:
-    raise RuntimeError("DATABASE_URL environment variable is not set!")
-
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'change-this-secret-key-in-production')
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///smartspend.db')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['UPLOAD_FOLDER'] = '/tmp'
-app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-    'pool_size': 10,
-    'max_overflow': 20,
-    'pool_timeout': 30,
-    'pool_recycle': 3600,
-    'pool_pre_ping': True,
-}
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-if not GEMINI_API_KEY:
-    raise RuntimeError("GEMINI_API_KEY environment variable is not set!")
-genai.configure(api_key=GEMINI_API_KEY)
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -53,55 +35,49 @@ from flask_cors import CORS
 CORS(app, supports_credentials=True)
 
 # ----------------------------------------------------------------------
-# Multi-AI Router (unchanged)
+# Multi-AI Router
 # ----------------------------------------------------------------------
 GEMINI_MODELS = ["gemini-2.0-flash"]
 FREE_MODELS = [
     "google/gemini-2.0-flash-001",
     "meta-llama/llama-3.2-3b-instruct:free",
     "mistralai/mistral-7b-instruct:free",
-    "microsoft/phi-3-mini-128k-instruct:free",
 ]
+
 def route_ai_request(prompt, max_tokens=400):
     if OPENROUTER_API_KEY:
         for model in FREE_MODELS:
             try:
                 resp = requests.post(
                     OPENROUTER_URL,
-                    headers={
-                        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": model,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": max_tokens,
-                    },
+                    headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"},
+                    json={"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens},
                     timeout=15,
                 )
                 if resp.status_code == 200:
                     data = resp.json()
                     if "choices" in data and len(data["choices"]) > 0:
-                        print(f"✅ Used OpenRouter model: {model}")
+                        print(f"✅ Used OpenRouter: {model}")
                         return data["choices"][0]["message"]["content"].strip()
             except Exception:
                 continue
-    for model_name in GEMINI_MODELS:
-        try:
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content(prompt)
-            if response and response.text:
-                print(f"✅ Used Gemini model: {model_name}")
-                return response.text.strip()
-        except Exception as e:
-            print(f"Gemini {model_name} failed: {e}")
+    if GEMINI_API_KEY:
+        for model_name in GEMINI_MODELS:
+            try:
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(prompt)
+                if response and response.text:
+                    print(f"✅ Used Gemini: {model_name}")
+                    return response.text.strip()
+            except Exception as e:
+                print(f"Gemini {model_name} failed: {e}")
     return "⚠️ All AI services unavailable."
 
 db = SQLAlchemy(app)
 bcrypt = Bcrypt(app)
 
 # ----------------------------------------------------------------------
-# Models (unchanged)
+# Models
 # ----------------------------------------------------------------------
 class User(db.Model):
     __tablename__ = 'users'
@@ -114,7 +90,7 @@ class User(db.Model):
     monthly_budget_limit = db.Column(db.Float, default=0.0)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     role = db.Column(db.String(20), default='user')
-    avatar_url = db.Column(db.Text, nullable=True, default=None)
+    avatar_url = db.Column(db.Text, nullable=True)
 
     transactions = db.relationship('Transaction', backref='user', lazy=True)
     budgets = db.relationship('Budget', backref='user', lazy=True)
@@ -139,8 +115,8 @@ class User(db.Model):
             'spending_mindset': self.spending_mindset,
             'monthly_budget_limit': self.monthly_budget_limit,
             'role': self.role,
-            'created_at': self.created_at.isoformat() if self.created_at else None,
-            'avatar_url': self.avatar_url
+            'avatar_url': self.avatar_url,
+            'created_at': self.created_at.isoformat() if self.created_at else None
         }
 
 class Transaction(db.Model):
@@ -207,12 +183,10 @@ class UserAllocation(db.Model):
     __table_args__ = (db.UniqueConstraint('user_id', 'category_name', name='unique_user_category_allocation'),)
 
 # ----------------------------------------------------------------------
-# Schema migration helper (unchanged)
+# Schema migration
 # ----------------------------------------------------------------------
 def ensure_schema():
     inspector = inspect(db.engine)
-    dialect = db.engine.dialect.name
-
     if inspector.has_table('users'):
         existing_columns = [col['name'] for col in inspector.get_columns('users')]
         if 'password' in existing_columns and 'password_hash' in existing_columns:
@@ -231,14 +205,6 @@ def ensure_schema():
                 with db.engine.connect() as conn:
                     conn.execute(text(f'ALTER TABLE users ADD COLUMN {col} {defn}'))
                     conn.commit()
-
-        if dialect == 'postgresql':
-            avatar_col_info = next((col for col in inspector.get_columns('users') if col['name'] == 'avatar_url'), None)
-            if avatar_col_info and 'varchar' in str(avatar_col_info['type']).lower():
-                with db.engine.connect() as conn:
-                    conn.execute(text('ALTER TABLE users ALTER COLUMN avatar_url TYPE TEXT'))
-                    conn.commit()
-
     if inspector.has_table('transactions'):
         tx_columns = [col['name'] for col in inspector.get_columns('transactions')]
         if 'is_need' not in tx_columns:
@@ -249,9 +215,7 @@ def ensure_schema():
             with db.engine.connect() as conn:
                 conn.execute(text('ALTER TABLE transactions ADD COLUMN priority INTEGER DEFAULT 1'))
                 conn.commit()
-
     db.create_all()
-
     admin = User.query.filter_by(email='admin@smartspend.com').first()
     if not admin:
         admin = User(name='Admin', email='admin@smartspend.com', role='admin')
@@ -259,12 +223,9 @@ def ensure_schema():
         db.session.add(admin)
         db.session.commit()
         print("✅ Admin user created: admin@smartspend.com / admin123")
-    elif admin.role != 'admin':
-        admin.role = 'admin'
-        db.session.commit()
 
 # ----------------------------------------------------------------------
-# Authentication helpers (unchanged)
+# Auth helpers
 # ----------------------------------------------------------------------
 def login_required(f):
     @wraps(f)
@@ -289,8 +250,10 @@ def get_current_user():
     return User.query.get(session.get('user_id')) if 'user_id' in session else None
 
 # ----------------------------------------------------------------------
-# Transaction validation helper
+# Validation helper
 # ----------------------------------------------------------------------
+needs_set = {'Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage'}
+
 def validate_transaction(user_id, amount, tx_type):
     if amount < 1:
         raise ValueError("Transaction amount must be at least 1.")
@@ -314,7 +277,7 @@ def validate_transaction(user_id, amount, tx_type):
             raise ValueError("This expense would exceed your monthly income. Add more income first.")
 
 # ----------------------------------------------------------------------
-# Analytics helpers (unchanged)
+# Analytics helpers
 # ----------------------------------------------------------------------
 def compute_health_score(user_id):
     thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
@@ -406,82 +369,6 @@ def get_monthly_summary(user_id):
         'monthly': {m: monthly[m] for m in sorted_months}
     }
 
-def compute_savings_rate(user_id):
-    summary = get_monthly_summary(user_id)
-    total_income = summary['income']
-    total_expense = summary['expense']
-    if total_income == 0:
-        return 0
-    return round((total_income - total_expense) / total_income * 100, 1)
-
-def compute_net_change(user_id):
-    summary = get_monthly_summary(user_id)
-    return round(summary['income'] - summary['expense'], 2)
-
-def compute_budget_used(user_id):
-    now = datetime.now(timezone.utc)
-    first_of_month = datetime(now.year, now.month, 1)
-    expenses = Transaction.query.filter(
-        Transaction.user_id == user_id,
-        Transaction.tx_type == 'expense',
-        Transaction.tx_date >= first_of_month
-    ).all()
-    total_expense = sum(e.amount for e in expenses)
-    budgets = Budget.query.filter_by(user_id=user_id).all()
-    total_budget = sum(b.limit_amount for b in budgets)
-    if total_budget == 0:
-        return 0
-    used = (total_expense / total_budget) * 100
-    return round(min(used, 100), 1)
-
-def get_score_components(user_id):
-    thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
-    expenses = Transaction.query.filter(
-        Transaction.user_id == user_id,
-        Transaction.tx_type == 'expense',
-        Transaction.tx_date >= thirty_days_ago
-    ).all()
-    income = Transaction.query.filter(
-        Transaction.user_id == user_id,
-        Transaction.tx_type == 'income',
-        Transaction.tx_date >= thirty_days_ago
-    ).all()
-    total_expense = sum(e.amount for e in expenses)
-    total_income = sum(i.amount for i in income)
-    savings_rate = max(0, (total_income - total_expense) / total_income) if total_income > 0 else 0
-    want_expense = sum(e.amount for e in expenses if not e.is_need)
-    total_exp = total_expense or 1
-    need_want_ratio = 1 - (want_expense / total_exp)
-    budgets = {b.category: b.limit_amount for b in Budget.query.filter_by(user_id=user_id).all()}
-    overspend_penalty = 0.0
-    for cat, limit in budgets.items():
-        if limit == 0:
-            continue
-        spent = sum(e.amount for e in expenses if e.category == cat)
-        if spent > limit:
-            overspend_penalty += (spent - limit) / limit
-    budget_adherence = max(0, 1 - min(overspend_penalty, 1))
-    monthly_income = defaultdict(float)
-    for t in income:
-        key = t.tx_date.strftime('%Y-%m')
-        monthly_income[key] += t.amount
-    values = list(monthly_income.values())
-    if len(values) > 1:
-        cv = np.std(values) / np.mean(values) if np.mean(values) != 0 else 0
-        income_stability = max(0, 1 - cv)
-    else:
-        income_stability = 0.5
-    return {
-        'savings_rate': round(savings_rate * 100, 1),
-        'need_want_ratio': round(need_want_ratio * 100, 1),
-        'budget_adherence': round(budget_adherence * 100, 1),
-        'income_stability': round(income_stability * 100, 1),
-    }
-
-def get_score_history(user_id):
-    now = datetime.now(timezone.utc)
-    return [{'month': (now - timedelta(days=30*i)).strftime('%b %Y'), 'score': compute_health_score(user_id)} for i in range(6)]
-
 def compute_longevity(user_id):
     summary = get_monthly_summary(user_id)
     thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
@@ -495,7 +382,7 @@ def compute_longevity(user_id):
     return {'balance': summary['balance'], 'avg_daily_spend': avg_daily, 'days': days}
 
 # ----------------------------------------------------------------------
-# Auth routes (unchanged)
+# Auth routes
 # ----------------------------------------------------------------------
 @app.route('/api/register', methods=['POST'])
 def register():
@@ -566,7 +453,7 @@ def update_profile():
     return jsonify(user.to_dict()), 200
 
 # ----------------------------------------------------------------------
-# Transaction routes (updated to accept tx_date)
+# Transaction routes
 # ----------------------------------------------------------------------
 @app.route('/api/transactions', methods=['GET'])
 @login_required
@@ -588,18 +475,13 @@ def create_transaction():
     is_need = data.get('is_need', True)
     priority = data.get('priority', 1)
     note = data.get('note', '')
+    tx_date_str = data.get('tx_date')
+    tx_date = datetime.fromisoformat(tx_date_str) if tx_date_str else datetime.now(timezone.utc)
 
     try:
         validate_transaction(user.id, amount, tx_type)
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
-
-    # Allow client to set the transaction date (otherwise use current time)
-    tx_date_str = data.get('tx_date')
-    if tx_date_str:
-        tx_date = datetime.fromisoformat(tx_date_str)
-    else:
-        tx_date = datetime.now(timezone.utc)
 
     tx = Transaction(
         user_id=user.id,
@@ -610,70 +492,6 @@ def create_transaction():
         priority=priority,
         note=note,
         tx_date=tx_date
-    )
-    db.session.add(tx)
-    db.session.commit()
-
-    # Auto‑process future expenses when salary is added (use the transaction's date)
-    if tx.tx_type == 'income' and tx.category.lower() == 'salary':
-        today = tx_date.date()
-        for exp in FutureExpense.query.filter(
-            FutureExpense.user_id == user.id,
-            FutureExpense.expense_date <= today,
-            FutureExpense.cycle == 'One-time'
-        ).all():
-            try:
-                validate_transaction(user.id, exp.amount, 'expense')
-                db.session.add(Transaction(
-                    user_id=user.id, amount=exp.amount, category=exp.category,
-                    tx_type='expense', is_need=(exp.category in needs_set),
-                    priority=1, note=f"Auto: {exp.description}",
-                    tx_date=tx_date
-                ))
-                db.session.delete(exp)
-            except ValueError as ve:
-                print(f"Skipping future expense {exp.description}: {ve}")
-                continue
-        db.session.commit()
-
-    return jsonify(tx.to_dict()), 201
-
-needs_set = {'Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage'}
-
-@app.route('/api/transactions/quick', methods=['POST'])
-@login_required
-def quick_transaction():
-    user = get_current_user()
-    data = request.json
-    amount = data.get('amount')
-    tx_type = data.get('tx_type')
-    category = data.get('category')
-    note = data.get('note', '')
-    is_need = data.get('is_need', True)
-
-    if not category and note:
-        prompt = f"Categorize '{note}' as one of: Food & Dining, Transport, Groceries, Entertainment, Health, Debt repayment, Mortgage, Subscription, Hobbies, Salary, Savings, Other. Return only the category name."
-        category = route_ai_request(prompt, max_tokens=20).strip()
-        if not category or category not in needs_set | {'Salary', 'Savings', 'Subscription', 'Hobbies', 'Entertainment', 'Other'}:
-            category = 'Other'
-        is_need = category in needs_set
-
-    if not category:
-        category = 'Other'
-
-    try:
-        validate_transaction(user.id, amount, tx_type)
-    except ValueError as e:
-        return jsonify({'error': str(e)}), 400
-
-    tx = Transaction(
-        user_id=user.id,
-        amount=amount,
-        category=category,
-        tx_type=tx_type,
-        is_need=is_need,
-        priority=2 if is_need else 1,
-        note=note
     )
     db.session.add(tx)
     db.session.commit()
@@ -689,6 +507,38 @@ def delete_transaction(tx_id):
     db.session.delete(tx)
     db.session.commit()
     return jsonify({'message': 'Deleted'}), 200
+
+# ----------------------------------------------------------------------
+# Summary / Predict / Longevity
+# ----------------------------------------------------------------------
+@app.route('/api/summary/<int:user_id>')
+@login_required
+def summary(user_id):
+    if get_current_user().id != user_id:
+        return jsonify({'error': 'Forbidden'}), 403
+    return jsonify(get_monthly_summary(user_id))
+
+@app.route('/api/predict/<int:user_id>')
+@login_required
+def predict(user_id):
+    if get_current_user().id != user_id:
+        return jsonify({'error': 'Forbidden'}), 403
+    has_data = Transaction.query.filter_by(user_id=user_id, tx_type='expense').count() > 0
+    if not has_data:
+        return jsonify({'has_data': False, 'score': None, 'predictions': {'weekly': {}, 'categories': {}}, 'advice': []})
+    return jsonify({
+        'has_data': True,
+        'score': compute_health_score(user_id),
+        'predictions': {'weekly': generate_weekly_forecast(user_id), 'categories': get_category_totals(user_id)},
+        'advice': []
+    })
+
+@app.route('/api/longevity/<int:user_id>')
+@login_required
+def longevity(user_id):
+    if get_current_user().id != user_id:
+        return jsonify({'error': 'Forbidden'}), 403
+    return jsonify(compute_longevity(user_id))
 
 # ----------------------------------------------------------------------
 # Budget routes
@@ -759,56 +609,6 @@ def reset_budgets_to_ai(user_id):
             db.session.add(Budget(user_id=user_id, category=alloc.category_name, limit_amount=new_limit))
     db.session.commit()
     return jsonify({'message': 'Budgets reset to AI recommendations'}), 200
-
-# ----------------------------------------------------------------------
-# Summary / Predict / Longevity (merged)
-# ----------------------------------------------------------------------
-@app.route('/api/summary/<int:user_id>')
-@login_required
-def summary(user_id):
-    if get_current_user().id != user_id:
-        return jsonify({'error': 'Forbidden'}), 403
-    base = get_monthly_summary(user_id)
-    base['savings_rate'] = compute_savings_rate(user_id)
-    base['net_change'] = compute_net_change(user_id)
-    base['budget_used'] = compute_budget_used(user_id)
-    return jsonify(base)
-
-@app.route('/api/health_score/<int:user_id>')
-@login_required
-def health_score_detail(user_id):
-    if get_current_user().id != user_id:
-        return jsonify({'error': 'Forbidden'}), 403
-    overall = compute_health_score(user_id)
-    components = get_score_components(user_id)
-    history = get_score_history(user_id)
-    return jsonify({
-        'overall': overall,
-        'components': components,
-        'history': history
-    })
-
-@app.route('/api/predict/<int:user_id>')
-@login_required
-def predict(user_id):
-    if get_current_user().id != user_id:
-        return jsonify({'error': 'Forbidden'}), 403
-    has_data = Transaction.query.filter_by(user_id=user_id, tx_type='expense').count() > 0
-    if not has_data:
-        return jsonify({'has_data': False, 'score': None, 'predictions': {'weekly': {}, 'categories': {}}, 'advice': []})
-    return jsonify({
-        'has_data': True,
-        'score': compute_health_score(user_id),
-        'predictions': {'weekly': generate_weekly_forecast(user_id), 'categories': get_category_totals(user_id)},
-        'advice': []
-    })
-
-@app.route('/api/longevity/<int:user_id>')
-@login_required
-def longevity(user_id):
-    if get_current_user().id != user_id:
-        return jsonify({'error': 'Forbidden'}), 403
-    return jsonify(compute_longevity(user_id))
 
 # ----------------------------------------------------------------------
 # Future expenses
@@ -895,6 +695,36 @@ def export_csv():
     return resp
 
 # ----------------------------------------------------------------------
+# Apply future expenses
+# ----------------------------------------------------------------------
+@app.route('/api/apply_future_expenses', methods=['POST'])
+@login_required
+def apply_future_expenses():
+    user = get_current_user()
+    today = datetime.now(timezone.utc).date()
+    onetime = FutureExpense.query.filter(
+        FutureExpense.user_id == user.id,
+        FutureExpense.expense_date <= today,
+        FutureExpense.cycle == 'One-time'
+    ).all()
+    applied = []
+    for exp in onetime:
+        tx = Transaction(
+            user_id=user.id,
+            amount=exp.amount,
+            category=exp.category,
+            tx_type='expense',
+            is_need=(exp.category in needs_set),
+            priority=1,
+            note=f"Auto-deducted future expense: {exp.description}"
+        )
+        db.session.add(tx)
+        applied.append(exp.description)
+        db.session.delete(exp)
+    db.session.commit()
+    return jsonify({'applied': applied, 'count': len(applied)}), 200
+
+# ----------------------------------------------------------------------
 # ADMIN API ROUTES
 # ----------------------------------------------------------------------
 @app.route('/api/admin/stats', methods=['GET'])
@@ -920,65 +750,6 @@ def admin_users():
     users = User.query.all()
     return jsonify([u.to_dict() for u in users])
 
-@app.route('/api/admin/users/<int:user_id>', methods=['PUT'])
-@admin_required
-def admin_update_user(user_id):
-    data = request.json
-    user = User.query.get(user_id)
-    if not user:
-        return jsonify({'error': 'User not found'}), 404
-    if 'role' in data:
-        user.role = data['role']
-    if 'name' in data:
-        user.name = data['name']
-    db.session.commit()
-    return jsonify(user.to_dict())
-
-@app.route('/api/admin/users/<int:user_id>/full', methods=['PUT'])
-@admin_required
-def admin_update_user_full(user_id):
-    user = User.query.get(user_id)
-    if not user:
-        return jsonify({'error': 'User not found'}), 404
-    data = request.json
-    if 'name' in data:
-        user.name = data['name']
-    if 'email' in data:
-        if User.query.filter(User.email == data['email'], User.id != user.id).first():
-            return jsonify({'error': 'Email already in use'}), 400
-        user.email = data['email']
-    if 'password' in data and data['password'].strip():
-        if len(data['password']) < 6:
-            return jsonify({'error': 'Password must be at least 6 characters'}), 400
-        user.set_password(data['password'])
-    if 'monthly_budget_limit' in data:
-        user.monthly_budget_limit = data['monthly_budget_limit']
-    if 'role' in data:
-        user.role = data['role']
-    if 'avatar_url' in data:
-        url = data['avatar_url'].strip()
-        if url and not (url.startswith('http://') or url.startswith('https://') or url.startswith('data:image/')):
-            return jsonify({'error': 'Invalid avatar URL'}), 400
-        user.avatar_url = url if url else None
-    db.session.commit()
-    return jsonify(user.to_dict()), 200
-
-@app.route('/api/admin/users/<int:user_id>', methods=['DELETE'])
-@admin_required
-def admin_delete_user(user_id):
-    user = User.query.get(user_id)
-    if not user:
-        return jsonify({'error': 'User not found'}), 404
-    if user.id == session['user_id']:
-        return jsonify({'error': 'You cannot delete your own admin account'}), 403
-    Transaction.query.filter_by(user_id=user.id).delete()
-    Budget.query.filter_by(user_id=user.id).delete()
-    FutureExpense.query.filter_by(user_id=user.id).delete()
-    UserAllocation.query.filter_by(user_id=user.id).delete()
-    db.session.delete(user)
-    db.session.commit()
-    return jsonify({'message': 'User deleted'})
-
 @app.route('/api/admin/transactions', methods=['GET'])
 @admin_required
 def admin_transactions():
@@ -989,62 +760,8 @@ def admin_transactions():
     transactions = query.order_by(Transaction.tx_date.desc()).all()
     return jsonify([t.to_dict() for t in transactions])
 
-@app.route('/api/admin/allocations/<int:user_id>', methods=['GET'])
-@admin_required
-def admin_allocations(user_id):
-    allocs = UserAllocation.query.filter_by(user_id=user_id).all()
-    return jsonify([{'category_name': a.category_name, 'type': a.type, 'percentage': a.percentage} for a in allocs])
-
-@app.route('/api/admin/budgets/<int:user_id>', methods=['GET'])
-@admin_required
-def admin_budgets(user_id):
-    budgets = Budget.query.filter_by(user_id=user_id).all()
-    return jsonify([{'category': b.category, 'limit': b.limit_amount} for b in budgets])
-
-@app.route('/api/admin/future_expenses/<int:user_id>', methods=['GET'])
-@admin_required
-def admin_future_expenses(user_id):
-    exps = FutureExpense.query.filter_by(user_id=user_id).all()
-    return jsonify([e.to_dict() for e in exps])
-
 # ----------------------------------------------------------------------
-# Anomaly detection
-# ----------------------------------------------------------------------
-@app.route('/api/anomalies/<int:user_id>')
-@login_required
-def detect_anomalies(user_id):
-    if get_current_user().id != user_id:
-        return jsonify({'error': 'Forbidden'}), 403
-    transactions = Transaction.query.filter_by(user_id=user_id, tx_type='expense').order_by(Transaction.tx_date.desc()).all()
-    if len(transactions) < 5:
-        return jsonify({'anomalies': []})
-    category_amounts = defaultdict(list)
-    for t in transactions:
-        category_amounts[t.category].append(t.amount)
-    anomalies = []
-    for cat, amounts in category_amounts.items():
-        if len(amounts) < 3:
-            continue
-        mean = np.mean(amounts)
-        std = np.std(amounts)
-        if std == 0:
-            continue
-        for t in transactions:
-            if t.category == cat:
-                z = (t.amount - mean) / std
-                if abs(z) > 2.5:
-                    anomalies.append({
-                        'id': t.id,
-                        'category': t.category,
-                        'amount': t.amount,
-                        'note': t.note,
-                        'date': t.tx_date.isoformat(),
-                        'deviation': round(z, 2)
-                    })
-    return jsonify({'anomalies': anomalies})
-
-# ----------------------------------------------------------------------
-# OCR endpoints
+# OCR endpoint
 # ----------------------------------------------------------------------
 @app.route('/api/ocr_income', methods=['POST'])
 @login_required
@@ -1065,31 +782,16 @@ Return ONLY a JSON array of objects. Each object must have:
 - amount: number (no currency symbols)
 - category: one of: Food & Dining, Transport, Groceries, Health, Entertainment, Debt repayment, Mortgage, Subscription, Hobbies, Salary, Savings, Other
 - note: short description (e.g., "Paycheck #1")
-
-Do NOT wrap in markdown. Do NOT add any text before or after the JSON array.
-Example:
-[{"type":"income","amount":1150,"category":"Salary","note":"Paycheck #1"}]"""
-
+Do NOT wrap in markdown."""
     raw = None
     if OPENROUTER_API_KEY:
         try:
             resp = requests.post(
                 OPENROUTER_URL,
-                headers={
-                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                    "Content-Type": "application/json",
-                },
+                headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"},
                 json={
                     "model": "google/gemini-2.0-flash-001",
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": prompt},
-                                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_image}"}}
-                            ]
-                        }
-                    ],
+                    "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_image}"}}]}],
                     "max_tokens": 1000
                 },
                 timeout=30
@@ -1099,26 +801,18 @@ Example:
                 print("✅ Vision extraction via OpenRouter")
         except Exception as e:
             print("OpenRouter vision failed:", e)
-
-    if raw is None:
-        vision_models = ["gemini-2.0-flash"]
-        for model_name in vision_models:
-            try:
-                model = genai.GenerativeModel(model_name)
-                response = model.generate_content(
-                    [{'mime_type': 'image/png', 'data': b64_image}, prompt]
-                )
-                if response and response.text:
-                    raw = response.text.strip()
-                    print(f"✅ Vision extraction with {model_name}")
-                    break
-            except Exception as e:
-                print(f"Vision model {model_name} failed: {e}")
-
+    if raw is None and GEMINI_API_KEY:
+        try:
+            model = genai.GenerativeModel("gemini-2.0-flash")
+            response = model.generate_content([{'mime_type': 'image/png', 'data': b64_image}, prompt])
+            if response and response.text:
+                raw = response.text.strip()
+                print("✅ Vision extraction via Gemini")
+        except Exception as e:
+            print("Gemini vision failed:", e)
     if not raw:
         return jsonify({'error': 'Could not extract transactions from image'}), 500
 
-    # JSON extraction
     items = None
     try:
         cleaned = raw.strip()
@@ -1137,9 +831,8 @@ Example:
                 items = json.loads(match.group(0))
         except Exception:
             items = None
-
     if not items:
-        return jsonify({'error': 'Failed to parse AI output', 'raw_output': raw[:200]}), 500
+        return jsonify({'error': 'Failed to parse AI output'}), 500
 
     created_txs = []
     errors = []
@@ -1153,13 +846,11 @@ Example:
         category = item.get('category', 'Other')
         note = item.get('note', '')
         is_need = category in needs_set
-
         try:
             validate_transaction(user.id, amount, tx_type)
         except ValueError as e:
             errors.append(f"{category}: {str(e)}")
             continue
-
         tx = Transaction(
             user_id=user.id,
             amount=amount,
@@ -1171,15 +862,12 @@ Example:
         )
         db.session.add(tx)
         created_txs.append(tx)
-
     if errors:
         db.session.rollback()
         return jsonify({'error': 'Some transactions could not be added', 'details': errors}), 400
-
     db.session.flush()
     created = [tx.to_dict() for tx in created_txs]
     db.session.commit()
-
     total_income = sum(t['amount'] for t in created if t['tx_type']=='income')
     total_expense = sum(t['amount'] for t in created if t['tx_type']=='expense')
     return jsonify({
@@ -1188,62 +876,6 @@ Example:
         'total_expense': total_expense,
         'count': len(created)
     })
-
-@app.route('/api/ocr_multi', methods=['POST'])
-@login_required
-def ocr_multi():
-    user = get_current_user()
-    if 'images' not in request.files:
-        return jsonify({'error': 'No image files'}), 400
-    files = request.files.getlist('images')
-    if not files:
-        return jsonify({'error': 'No files selected'}), 400
-
-    all_items = []
-    for file in files:
-        if file.filename == '':
-            continue
-        image_bytes = file.read()
-        b64_image = base64.b64encode(image_bytes).decode('utf-8')
-        prompt = """You are a budget OCR AI. Extract all income and expense items from the image.
-Return ONLY a JSON array of objects. Each object must have:
-- type: "income" or "expense"
-- amount: number (no currency symbols)
-- category: one of: Food & Dining, Transport, Groceries, Health, Entertainment, Debt repayment, Mortgage, Subscription, Hobbies, Salary, Savings, Other
-- note: short description (e.g., "Paycheck #1")
-Do NOT wrap in markdown."""
-        raw = None
-        if OPENROUTER_API_KEY:
-            try:
-                resp = requests.post(
-                    OPENROUTER_URL,
-                    headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"},
-                    json={
-                        "model": "google/gemini-2.0-flash-001",
-                        "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_image}"}}]}],
-                        "max_tokens": 1000
-                    },
-                    timeout=30
-                )
-                if resp.status_code == 200:
-                    raw = resp.json()["choices"][0]["message"]["content"].strip()
-            except Exception:
-                pass
-        if raw:
-            try:
-                items = json.loads(raw.strip())
-                if isinstance(items, list):
-                    all_items.extend(items)
-            except:
-                pass
-    unique_items = []
-    seen = set()
-    for item in all_items:
-        key = (item.get('type'), item.get('amount'), item.get('category'), item.get('note'))
-        if key not in seen:
-            seen.add(key)
-            unique_items.append(item)
-    return jsonify({'transactions': unique_items, 'count': len(unique_items)})
 
 # ----------------------------------------------------------------------
 # AI full setup
@@ -1274,23 +906,17 @@ def ai_full_setup():
     categories_str = ', '.join(selected_categories)
     prompt = f"""
 You are an expert financial planner AI for a Filipino user.
-
-User profile:
-- Monthly income: ₱{monthly_income:,.2f}
-- Spending mindset: {mindset}
-- Social status: {social_status}
-- Recent category spending (last 30 days): {dict(recent_spending)}
-
+Monthly income: ₱{monthly_income:,.2f}
+Spending mindset: {mindset}
+Social status: {social_status}
+Recent spending (30 days): {dict(recent_spending)}
 Selected categories: {categories_str}
-
 Rules:
-- Saver mindset: give higher weight to needs and savings.
-- Spender mindset: allow more wants.
-- All categories sum to exactly 100%.
-- Return ONLY a valid JSON object with category names as keys and numeric percentages as values, summing to 100.
-- No extra text, no markdown.
-
-Example output: {{"Food & Dining": 45.0, "Transport": 15.0, "Savings": 40.0}}
+- Saver mindset: higher needs & savings.
+- Spender mindset: more wants.
+- Sum to exactly 100%.
+Return ONLY valid JSON with category names as keys and percentages as values.
+Example: {{"Food & Dining": 45.0, "Transport": 15.0, "Savings": 40.0}}
 """
     raw = route_ai_request(prompt, max_tokens=600)
 
@@ -1300,40 +926,11 @@ Example output: {{"Food & Dining": 45.0, "Transport": 15.0, "Savings": 40.0}}
             if raw.startswith('json'):
                 raw = raw[4:]
         allocation = json.loads(raw.strip())
+        allocation = {k: v for k, v in allocation.items() if k in selected_categories}
     except Exception as e:
-        print(f"AI full_setup parse error: {e}")
-        needs_count = sum(1 for c in selected_categories if c in {'Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage'})
-        wants_count = sum(1 for c in selected_categories if c in {'Entertainment','Hobbies','Subscription'})
-        savings_count = sum(1 for c in selected_categories if c == 'Savings')
+        print(f"Parse error: {e}, using fallback")
+        allocation = {cat: 100.0 / len(selected_categories) for cat in selected_categories}
 
-        if needs_count == 0 and wants_count == 0 and savings_count == 0:
-            allocation = {cat: 100.0 / len(selected_categories) for cat in selected_categories}
-        else:
-            if mindset.lower() == 'saver':
-                need_weight, want_weight, saving_weight = 1.5, 0.5, 1.2
-            elif mindset.lower() == 'spender':
-                need_weight, want_weight, saving_weight = 1.0, 1.5, 0.7
-            else:
-                need_weight, want_weight, saving_weight = 1.0, 1.0, 1.0
-
-            total_weight = needs_count * need_weight + wants_count * want_weight + savings_count * saving_weight
-            allocation = {}
-            for cat in selected_categories:
-                if cat in {'Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage'}:
-                    allocation[cat] = round((need_weight / total_weight) * 100, 1)
-                elif cat in {'Entertainment','Hobbies','Subscription'}:
-                    allocation[cat] = round((want_weight / total_weight) * 100, 1)
-                elif cat == 'Savings':
-                    allocation[cat] = round((saving_weight / total_weight) * 100, 1)
-                else:
-                    allocation[cat] = round((1.0 / total_weight) * 100, 1)
-
-            diff = 100.0 - sum(allocation.values())
-            if abs(diff) > 0.1:
-                max_cat = max(allocation, key=allocation.get)
-                allocation[max_cat] = round(allocation[max_cat] + diff, 1)
-
-    allocation = {k: v for k, v in allocation.items() if k in selected_categories}
     total = sum(allocation.values())
     if total > 0 and abs(total - 100) > 0.1:
         factor = 100 / total
@@ -1341,9 +938,8 @@ Example output: {{"Food & Dining": 45.0, "Transport": 15.0, "Savings": 40.0}}
 
     # Savings plan
     savings_prompt = f"""
-User monthly income: ₱{monthly_income:.2f}, monthly expenses: ₱{sum(recent_spending.values()):.2f}, current balance: ₱{get_monthly_summary(user.id)['balance']:.2f}.
-Spending mindset: {mindset}.
-Recommend how much they should save per day, per week, and per month.
+User income: ₱{monthly_income:.2f}, expenses: ₱{sum(recent_spending.values()):.2f}, balance: ₱{get_monthly_summary(user.id)['balance']:.2f}.
+Mindset: {mindset}. Recommend daily, weekly, monthly savings.
 Return JSON: {{"daily": float, "weekly": float, "monthly": float, "tip": "string"}}.
 """
     try:
@@ -1364,8 +960,8 @@ Return JSON: {{"daily": float, "weekly": float, "monthly": float, "tip": "string
 
     # Advice
     advice_prompt = f"""
-User has budget allocations: {allocation}. Recent spending: {dict(recent_spending)}.
-Provide 3 short pieces of financial advice as JSON array:
+Allocation: {allocation}. Spending: {dict(recent_spending)}.
+Give 3 short financial advice items as JSON array:
 [{{"title":"...","body":"...","type":"info|warning|success"}}]
 """
     try:
@@ -1385,14 +981,14 @@ Provide 3 short pieces of financial advice as JSON array:
         ]
 
     # Financial summary
-    summary_prompt = f"Based on monthly income ₱{monthly_income}, mindset {mindset}, and allocations {allocation}, give a one‑sentence overall financial health assessment."
+    summary_prompt = f"Based on income ₱{monthly_income}, mindset {mindset}, and allocation {allocation}, give a one‑sentence financial health assessment."
     try:
         raw_summary = route_ai_request(summary_prompt, max_tokens=100)
         financial_summary = raw_summary.strip()
     except Exception:
-        financial_summary = "Your AI plan is ready. Start by logging your expenses to get personalized insights."
+        financial_summary = "Your AI plan is ready. Start logging your expenses to get personalised insights."
 
-    # Save allocations
+    # Save allocations & budgets
     UserAllocation.query.filter_by(user_id=user.id).delete()
     needs = {'Food & Dining', 'Transport', 'Groceries', 'Health', 'Debt repayment', 'Mortgage'}
     savings_cats = {'Savings'}
@@ -1406,18 +1002,17 @@ Provide 3 short pieces of financial advice as JSON array:
 
     db.session.commit()
 
-    result = {
+    return jsonify({
         'allocation': allocation,
         'allocation_amounts': {cat: round(monthly_income * pct / 100, 2) for cat, pct in allocation.items()},
         'savings_plan': savings_plan,
         'advice': advice,
         'financial_summary': financial_summary,
         'monthly_income': monthly_income
-    }
-    return jsonify(result), 200
+    }), 200
 
 # ----------------------------------------------------------------------
-# Classify transaction / AI chat
+# AI classification & chat
 # ----------------------------------------------------------------------
 @app.route('/api/ai/classify_transaction', methods=['POST'])
 @login_required
@@ -1443,91 +1038,17 @@ def ai_chat():
     data = request.json
     summary = get_monthly_summary(user.id)
     score = compute_health_score(user.id)
-    future_cnt = FutureExpense.query.filter_by(user_id=user.id).count()
-    allocs = UserAllocation.query.filter_by(user_id=user.id).all()
-    alloc_str = ', '.join([f"{a.category_name}: {a.percentage}%" for a in allocs]) or 'Not set'
-    recent = Transaction.query.filter_by(user_id=user.id).order_by(Transaction.tx_date.desc()).limit(8).all()
-    recent_str = '\n'.join([f"{t.category}: ₱{t.amount:.2f} ({t.tx_type}) on {t.tx_date.strftime('%b %d')}" for t in recent]) or 'None'
     prompt = f"""
 You are SmartSpend AI for {user.name}.
 Balance: ₱{summary['balance']:,.2f}, Income: ₱{summary['income']:,.2f}, Expenses: ₱{summary['expense']:,.2f}, Health: {score}/100.
-Allocation: {alloc_str}. Pinned future: {future_cnt}.
-Recent: {recent_str}
 User asks: "{data.get('message','')}"
 Reply in 3-5 sentences, warm, actionable, use ₱.
 """
     reply = route_ai_request(prompt, max_tokens=400)
     return jsonify({'reply': reply})
 
-# ----------------------------------------------------------------------
-# Apply future expenses (FIXED indentation + Asia/Manila timezone)
-# ----------------------------------------------------------------------
-@app.route('/api/apply_future_expenses', methods=['POST'])
-@login_required
-def apply_future_expenses():
-    user = get_current_user()
-    today = datetime.now(ZoneInfo("Asia/Manila")).date()
-    applied = []
-
-    # 1. One-time expenses
-    onetime = FutureExpense.query.filter(
-        FutureExpense.user_id == user.id,
-        FutureExpense.expense_date <= today,
-        FutureExpense.cycle == 'One-time'
-    ).all()
-    for exp in onetime:
-        tx = Transaction(
-            user_id=user.id,
-            amount=exp.amount,
-            category=exp.category,
-            tx_type='expense',
-            is_need=(exp.category in ['Food & Dining', 'Debt repayment', 'Mortgage', 'Transport']),
-            priority=1,
-            note=f"Auto-deducted future expense: {exp.description}"
-        )
-        db.session.add(tx)
-        applied.append(exp.description)
-        db.session.delete(exp)
-
-    # 2. Recurring expenses
-    recurring = FutureExpense.query.filter(
-        FutureExpense.user_id == user.id,
-        FutureExpense.expense_date <= today,
-        FutureExpense.cycle.in_(['Weekly', 'Monthly'])
-    ).all()
-    for exp in recurring:
-        tx = Transaction(
-            user_id=user.id,
-            amount=exp.amount,
-            category=exp.category,
-            tx_type='expense',
-            is_need=(exp.category in ['Food & Dining', 'Debt repayment', 'Mortgage', 'Transport']),
-            priority=1,
-            note=f"Auto-deducted recurring: {exp.description} ({exp.cycle})"
-        )
-        db.session.add(tx)
-        applied.append(f"{exp.description} (recurring)")
-
-        if exp.cycle == 'Weekly':
-            next_date = exp.expense_date + timedelta(weeks=1)
-        else:
-            next_date = exp.expense_date + timedelta(days=30)
-
-        while next_date <= today:
-            if exp.cycle == 'Weekly':
-                next_date += timedelta(weeks=1)
-            else:
-                next_date += timedelta(days=30)
-
-        exp.expense_date = next_date
-
-    db.session.commit()
-    return jsonify({'applied': applied, 'count': len(applied)}), 200
-
-# ----------------------------------------------------------------------
-# Frontend HTML – FINAL MERGED VERSION (all features included)
-# ----------------------------------------------------------------------
 HTML_PAGE = r"""<!DOCTYPE html>
+
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -1536,425 +1057,468 @@ HTML_PAGE = r"""<!DOCTYPE html>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@300;400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+
 <style>
-*{margin:0;padding:0;box-sizing:border-box;}
-:root{
-  --void:#060A10;--bg:#0B1120;--bg2:#111928;--bg3:#17223A;--bg4:#1E2E4A;
-  --green:#00E5A0;--green-dim:rgba(0,229,160,0.1);--green-glow:rgba(0,229,160,0.35);
-  --red:#FF3B5C;--red-dim:rgba(255,59,92,0.12);
-  --amber:#F5A623;--blue:#3B8BFF;--purple:#9B59F5;
-  --muted:#4A6080;--muted2:#6B88A8;--text:#D8EAF8;--text2:#B0C8E0;
-  --border:rgba(0,229,160,0.15);--border2:rgba(255,255,255,0.06);
-  --r:14px;--r2:20px;
+/* ───────── RESET & BASE ───────── */
+* { margin:0; padding:0; box-sizing:border-box; }
+:root {
+  --void:#060A10; --bg:#0B1120; --bg2:#111928; --bg3:#17223A; --bg4:#1E2E4A;
+  --green:#00E5A0; --green-dim:rgba(0,229,160,0.1); --green-glow:rgba(0,229,160,0.35);
+  --red:#FF3B5C; --red-dim:rgba(255,59,92,0.12);
+  --amber:#F5A623; --blue:#3B8BFF; --purple:#9B59F5;
+  --muted:#4A6080; --muted2:#6B88A8; --text:#D8EAF8; --text2:#B0C8E0;
+  --border:rgba(0,229,160,0.15); --border2:rgba(255,255,255,0.06);
+  --r:14px; --r2:20px;
   --font-display:'Syne',sans-serif;
   --font-mono:'IBM Plex Mono',monospace;
 }
-body{font-family:var(--font-display);background:var(--void);color:var(--text);min-height:100vh;overflow-x:hidden;}
-::selection{background:var(--green-dim);color:var(--green);}
-body::before{
-  content:'';position:fixed;inset:0;
-  background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.03'/%3E%3C/svg%3E");
-  pointer-events:none;z-index:0;opacity:0.4;
+body {
+  font-family:var(--font-display); background:var(--void); color:var(--text);
+  min-height:100vh; overflow-x:hidden;
 }
-.sidebar{
-  position:fixed;left:0;top:0;bottom:0;width:72px;
-  background:rgba(11,17,32,0.95);backdrop-filter:blur(20px);
+::selection { background:var(--green-dim); color:var(--green); }
+body::before {
+  content:''; position:fixed; inset:0;
+  background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.03'/%3E%3C/svg%3E");
+  pointer-events:none; z-index:0; opacity:0.4;
+}
+
+/* ───────── SIDEBAR ───────── */
+.sidebar {
+  position:fixed; left:0; top:0; bottom:0; width:72px;
+  background:rgba(11,17,32,0.95); backdrop-filter:blur(20px);
   border-right:1px solid var(--border2);
-  display:flex;flex-direction:column;align-items:center;
-  padding:20px 0;gap:6px;z-index:200;
+  display:flex; flex-direction:column; align-items:center;
+  padding:20px 0; gap:6px; z-index:200;
   transition:width 0.3s cubic-bezier(0.4,0,0.2,1);
 }
-.sidebar:hover{width:220px;}
-.logo{
-  width:44px;height:44px;border-radius:12px;margin-bottom:20px;
+.sidebar:hover { width:220px; }
+.logo {
+  width:44px; height:44px; border-radius:12px; margin-bottom:20px;
   background:linear-gradient(135deg,var(--green),#009e6a);
-  display:flex;align-items:center;justify-content:center;
-  font-size:1.4rem;cursor:pointer;flex-shrink:0;
+  display:flex; align-items:center; justify-content:center;
+  font-size:1.4rem; cursor:pointer; flex-shrink:0;
   box-shadow:0 0 24px var(--green-glow);
 }
-.nav-item{
-  width:calc(100% - 16px);display:flex;align-items:center;gap:14px;
-  padding:12px 14px;border-radius:10px;cursor:pointer;
-  border:none;background:transparent;color:var(--muted2);
-  font-family:var(--font-display);font-size:0.875rem;font-weight:500;
-  white-space:nowrap;overflow:hidden;transition:all 0.2s;text-align:left;
+.nav-item {
+  width:calc(100% - 16px); display:flex; align-items:center; gap:14px;
+  padding:12px 14px; border-radius:10px; cursor:pointer;
+  border:none; background:transparent; color:var(--muted2);
+  font-family:var(--font-display); font-size:0.875rem; font-weight:500;
+  white-space:nowrap; overflow:hidden; transition:all 0.2s; text-align:left;
 }
-.nav-item:hover{background:var(--green-dim);color:var(--text);}
-.nav-item.active{background:var(--green-dim);color:var(--green);box-shadow:inset 2px 0 0 var(--green);}
-.nav-icon{font-size:1.1rem;flex-shrink:0;width:20px;text-align:center;}
-.nav-label{opacity:0;transition:opacity 0.2s;font-size:0.85rem;}
-.sidebar:hover .nav-label{opacity:1;}
-.sidebar-sep{width:40px;height:1px;background:var(--border2);margin:8px 0;}
-.sidebar:hover .sidebar-sep{width:calc(100% - 28px);}
-.main{margin-left:72px;padding:28px 36px;min-height:100vh;position:relative;z-index:1;}
-@media(max-width:768px){.main{margin-left:0;padding:16px;}.sidebar{display:none;}}
-.topbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:32px;gap:16px;flex-wrap:wrap;}
-.page-title{font-size:1.6rem;font-weight:800;letter-spacing:-0.5px;}
-.topbar-right{display:flex;align-items:center;gap:12px;}
-.health-pill{
-  display:flex;align-items:center;gap:8px;
-  padding:7px 16px;border-radius:99px;
-  background:var(--green-dim);border:1px solid var(--border);
-  font-family:var(--font-mono);font-size:0.8rem;color:var(--green);
+.nav-item:hover { background:var(--green-dim); color:var(--text); }
+.nav-item.active { background:var(--green-dim); color:var(--green); box-shadow:inset 2px 0 0 var(--green); }
+.nav-icon { font-size:1.1rem; flex-shrink:0; width:20px; text-align:center; }
+.nav-label { opacity:0; transition:opacity 0.2s; font-size:0.85rem; }
+.sidebar:hover .nav-label { opacity:1; }
+.sidebar-sep { width:40px; height:1px; background:var(--border2); margin:8px 0; }
+.sidebar:hover .sidebar-sep { width:calc(100% - 28px); }
+
+/* ───────── MAIN ───────── */
+.main { margin-left:72px; padding:28px 36px; min-height:100vh; position:relative; z-index:1; }
+@media(max-width:768px) {
+  .main { margin-left:0; padding:16px; }
+  .sidebar { display:none; }
 }
-.health-dot{width:8px;height:8px;border-radius:50%;background:var(--green);animation:pulse 2s infinite;}
-@keyframes pulse{0%,100%{opacity:1;box-shadow:0 0 0 0 var(--green-glow);}50%{opacity:0.8;box-shadow:0 0 0 6px transparent;}}
-.avatar{
-  width:40px;height:40px;border-radius:10px;
+.topbar { display:flex; justify-content:space-between; align-items:center; margin-bottom:32px; gap:16px; flex-wrap:wrap; }
+.page-title { font-size:1.6rem; font-weight:800; letter-spacing:-0.5px; }
+.topbar-right { display:flex; align-items:center; gap:12px; }
+.health-pill {
+  display:flex; align-items:center; gap:8px;
+  padding:7px 16px; border-radius:99px;
+  background:var(--green-dim); border:1px solid var(--border);
+  font-family:var(--font-mono); font-size:0.8rem; color:var(--green);
+}
+.health-dot { width:8px; height:8px; border-radius:50%; background:var(--green); animation:pulse 2s infinite; }
+@keyframes pulse {
+  0%,100%{ opacity:1; box-shadow:0 0 0 0 var(--green-glow); }
+  50%{ opacity:0.8; box-shadow:0 0 0 6px transparent; }
+}
+.avatar {
+  width:40px; height:40px; border-radius:10px;
   background:linear-gradient(135deg,var(--blue),var(--purple));
-  display:flex;align-items:center;justify-content:center;
-  font-weight:700;font-size:0.9rem;cursor:pointer;position:relative;
+  display:flex; align-items:center; justify-content:center;
+  font-weight:700; font-size:0.9rem; cursor:pointer; position:relative;
 }
 .avatar img { width:100%; height:100%; border-radius:10px; object-fit:cover; }
-.avatar-dropdown{
-  position:absolute; top:50px; right:0;
-  background:var(--bg2);border:1px solid var(--border);border-radius:12px;
-  padding:16px;width:240px;z-index:300;
-  box-shadow:0 12px 32px rgba(0,0,0,0.4);
+.btn-signout {
+  background:var(--red-dim); border:1px solid rgba(255,59,92,0.2);
+  color:var(--red); padding:8px 16px; border-radius:10px; cursor:pointer;
+  font-family:var(--font-display); font-weight:600; font-size:0.85rem;
 }
-.dropdown-user-info{margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid var(--border2);}
-.dropdown-section-title{font-size:0.75rem;color:var(--muted2);margin-bottom:6px;}
-.preset-avatar{cursor:pointer;transition:transform 0.2s;width:36px;height:36px;border-radius:50%;display:inline-block;}
-.preset-avatar:hover{transform:scale(1.15);}
-.btn-signout{background:var(--red-dim);border:1px solid rgba(255,59,92,0.2);color:var(--red);padding:8px 16px;border-radius:10px;cursor:pointer;font-family:var(--font-display);font-weight:600;font-size:0.85rem;}
-.screen{display:none;animation:fadeIn 0.3s ease;}
-.screen.active{display:block;}
-@keyframes fadeIn{from{opacity:0;transform:translateY(12px);}to{opacity:1;transform:translateY(0);}}
-.card{background:var(--bg2);border:1px solid var(--border2);border-radius:var(--r2);padding:24px;margin-bottom:20px;transition:border-color 0.2s;}
-.card:hover{border-color:var(--border);}
-.card-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;flex-wrap:wrap;gap:12px;}
-.card-title{font-size:0.95rem;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;}
-.ai-badge{background:linear-gradient(90deg,var(--purple),var(--blue));color:#fff;padding:3px 10px;border-radius:99px;font-size:0.68rem;font-weight:600;letter-spacing:0.5px;}
-.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:24px;}
-.stat-card{
-  background:var(--bg2);border:1px solid var(--border2);border-radius:var(--r2);padding:22px;
-  position:relative;overflow:hidden;transition:all 0.25s;cursor:default;
+
+/* ───────── SCREENS ───────── */
+.screen { display:none; animation:fadeIn 0.3s ease; }
+.screen.active { display:block; }
+@keyframes fadeIn { from{opacity:0;transform:translateY(12px);} to{opacity:1;transform:translateY(0);} }
+
+/* ───────── CARDS ───────── */
+.card {
+  background:var(--bg2); border:1px solid var(--border2); border-radius:var(--r2);
+  padding:24px; margin-bottom:20px; transition:border-color 0.2s;
 }
-.stat-card::before{
-  content:'';position:absolute;top:0;right:0;width:80px;height:80px;
+.card:hover { border-color:var(--border); }
+.card-header {
+  display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;
+  flex-wrap:wrap; gap:12px;
+}
+.card-title {
+  font-size:0.95rem; font-weight:600; color:var(--text2);
+  text-transform:uppercase; letter-spacing:0.5px;
+}
+.ai-badge {
+  background:linear-gradient(90deg,var(--purple),var(--blue)); color:#fff;
+  padding:3px 10px; border-radius:99px; font-size:0.68rem; font-weight:600;
+  letter-spacing:0.5px;
+}
+
+/* ───────── STATS GRID ───────── */
+.stats-grid {
+  display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:16px; margin-bottom:24px;
+}
+.stat-card {
+  background:var(--bg2); border:1px solid var(--border2); border-radius:var(--r2); padding:22px;
+  position:relative; overflow:hidden; transition:all 0.25s; cursor:default;
+}
+.stat-card::before {
+  content:''; position:absolute; top:0; right:0; width:80px; height:80px;
   background:radial-gradient(circle,var(--green-dim),transparent 70%);
-  border-radius:50%;transform:translate(30px,-30px);
+  border-radius:50%; transform:translate(30px,-30px);
 }
-.stat-card.neg::before{background:radial-gradient(circle,var(--red-dim),transparent 70%);}
-.stat-card.blue-glow::before{background:radial-gradient(circle,rgba(59,139,255,0.1),transparent 70%);}
-.stat-value{font-family:var(--font-mono);font-size:1.7rem;font-weight:600;margin-bottom:6px;letter-spacing:-1px;}
-.stat-label{font-size:0.72rem;color:var(--muted2);text-transform:uppercase;letter-spacing:0.5px;}
-.stat-sub{font-size:0.75rem;color:var(--muted);font-family:var(--font-mono);margin-top:4px;}
-.income-hero{
+.stat-card.neg::before { background:radial-gradient(circle,var(--red-dim),transparent 70%); }
+.stat-card.blue-glow::before { background:radial-gradient(circle,rgba(59,139,255,0.1),transparent 70%); }
+.stat-value { font-family:var(--font-mono); font-size:1.7rem; font-weight:600; margin-bottom:6px; letter-spacing:-1px; }
+.stat-label { font-size:0.72rem; color:var(--muted2); text-transform:uppercase; letter-spacing:0.5px; }
+.stat-sub { font-size:0.75rem; color:var(--muted); font-family:var(--font-mono); margin-top:4px; }
+
+/* ───────── INCOME HERO ───────── */
+.income-hero {
   background:linear-gradient(135deg,var(--bg2) 0%,rgba(0,229,160,0.05) 100%);
-  border:1px solid var(--border);border-radius:var(--r2);padding:32px;
-  margin-bottom:24px;position:relative;overflow:hidden;
+  border:1px solid var(--border); border-radius:var(--r2); padding:32px;
+  margin-bottom:24px; position:relative; overflow:hidden;
 }
-.income-hero::after{
-  content:'';position:absolute;top:-60px;right:-60px;
-  width:200px;height:200px;border-radius:50%;
+.income-hero::after {
+  content:''; position:absolute; top:-60px; right:-60px;
+  width:200px; height:200px; border-radius:50%;
   background:radial-gradient(circle,var(--green-glow),transparent 70%);
 }
-.income-label{font-size:0.8rem;color:var(--muted2);text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;}
-.income-tool-row{
-  display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin-bottom:16px;
+.income-label { font-size:0.8rem; color:var(--muted2); text-transform:uppercase; letter-spacing:1px; margin-bottom:12px; }
+.income-tool-row {
+  display:flex; gap:16px; align-items:center; flex-wrap:wrap; margin-bottom:16px;
 }
-.tool-picker{
-  background:var(--bg3);border:1px solid var(--border2);border-radius:10px;
-  padding:8px 12px;font-family:var(--font-display);font-size:0.9rem;
-  cursor:pointer;color:var(--text);
+.tool-picker {
+  background:var(--bg3); border:1px solid var(--border2); border-radius:10px;
+  padding:8px 12px; font-family:var(--font-display); font-size:0.9rem;
+  cursor:pointer; color:var(--text);
 }
-.income-input-row{
-  display:flex;gap:12px;align-items:stretch;flex-wrap:wrap;
+
+/* ───────── FORMS ───────── */
+.income-input-row { display:flex; gap:12px; align-items:stretch; flex-wrap:wrap; }
+.income-peso { font-family:var(--font-mono); font-size:2rem; font-weight:500; color:var(--green); display:flex; align-items:center; padding:0 8px; }
+.income-input {
+  flex:2; min-width:200px; font-family:var(--font-mono); font-size:1.8rem; font-weight:500;
+  background:transparent; border:none; border-bottom:2px solid var(--border);
+  color:var(--text); outline:none; padding:8px 4px; transition:border-color 0.2s;
 }
-.income-peso{
-  font-family:var(--font-mono);font-size:2rem;font-weight:500;
-  color:var(--green);display:flex;align-items:center;padding:0 8px;
-}
-.income-input{
-  flex:2;min-width:200px;
-  font-family:var(--font-mono);font-size:1.8rem;font-weight:500;
-  background:transparent;border:none;border-bottom:2px solid var(--border);
-  color:var(--text);outline:none;padding:8px 4px;
-  transition:border-color 0.2s;
-}
-.income-input:focus{border-color:var(--green);}
-.income-image-upload{display:none;margin-top:12px;}
-.income-image-upload input{background:var(--bg3);padding:8px;border-radius:8px;}
-.ocr-hint{font-size:0.7rem;color:var(--muted2);margin-top:4px;}
-.mindset-row{display:flex;gap:10px;margin-top:20px;flex-wrap:wrap;}
-.mindset-btn{
-  padding:8px 20px;border-radius:99px;border:1px solid var(--border2);
-  background:transparent;color:var(--muted2);cursor:pointer;
-  font-family:var(--font-display);font-size:0.85rem;font-weight:500;
+.income-input:focus { border-color:var(--green); }
+
+.mindset-row { display:flex; gap:10px; margin-top:20px; flex-wrap:wrap; }
+.mindset-btn {
+  padding:8px 20px; border-radius:99px; border:1px solid var(--border2);
+  background:transparent; color:var(--muted2); cursor:pointer;
+  font-family:var(--font-display); font-size:0.85rem; font-weight:500;
   transition:all 0.2s;
 }
-.mindset-btn.active{background:var(--green-dim);border-color:var(--green);color:var(--green);}
-.btn-analyze{
-  background:linear-gradient(135deg,var(--green),#00b87a);color:#000;
-  border:none;border-radius:12px;padding:14px 28px;cursor:pointer;
-  font-family:var(--font-display);font-weight:700;font-size:0.95rem;
-  display:flex;align-items:center;gap:10px;transition:all 0.2s;flex-shrink:0;
+.mindset-btn.active { background:var(--green-dim); border-color:var(--green); color:var(--green); }
+
+.btn-analyze {
+  background:linear-gradient(135deg,var(--green),#00b87a); color:#000;
+  border:none; border-radius:12px; padding:14px 28px; cursor:pointer;
+  font-family:var(--font-display); font-weight:700; font-size:0.95rem;
+  display:flex; align-items:center; gap:10px; transition:all 0.2s; flex-shrink:0;
   box-shadow:0 4px 20px var(--green-glow);
 }
-.btn-analyze:hover{transform:translateY(-2px);box-shadow:0 8px 28px var(--green-glow);}
-.btn-analyze:disabled{opacity:0.5;cursor:not-allowed;transform:none;}
-.ai-checklist{
-  background:var(--bg3);border-radius:12px;padding:20px;margin-top:20px;
+.btn-analyze:hover { transform:translateY(-2px); box-shadow:0 8px 28px var(--green-glow); }
+.btn-analyze:disabled { opacity:0.5; cursor:not-allowed; transform:none; }
+
+.btn-add {
+  background:linear-gradient(135deg,var(--green),#00b87a); color:#000;
+  border:none; border-radius:10px; padding:12px 20px; cursor:pointer;
+  font-family:var(--font-display); font-weight:700; font-size:0.9rem;
+  transition:all 0.2s; white-space:nowrap;
 }
-.checklist-section{margin-bottom:16px;}
-.checklist-section-title{font-size:0.85rem;font-weight:600;color:var(--green);margin-bottom:8px;}
-.checklist-item{display:flex;align-items:center;gap:12px;margin-bottom:8px;flex-wrap:wrap;}
-.checklist-item label{display:flex;align-items:center;gap:6px;cursor:pointer;}
-.checklist-item .cat-percent{font-family:var(--font-mono);font-size:0.8rem;color:var(--muted2);min-width:45px;}
-.total-warning{color:var(--red);font-size:0.75rem;margin-top:8px;}
-.ai-feed{margin-bottom:24px;}
-.ai-feed-header{display:flex;align-items:center;gap:10px;margin-bottom:14px;}
-.ai-pulse{width:10px;height:10px;border-radius:50%;background:var(--green);animation:pulse 1.5s infinite;}
-.ai-feed-title{font-family:var(--font-mono);font-size:0.8rem;color:var(--green);text-transform:uppercase;letter-spacing:1px;}
-.ai-event{
-  display:flex;align-items:flex-start;gap:12px;
-  padding:10px 0;border-bottom:1px solid var(--border2);
-  animation:slideIn 0.4s ease;
-}
-@keyframes slideIn{from{opacity:0;transform:translateX(-10px);}to{opacity:1;transform:translateX(0);}}
-.ai-event:last-child{border-bottom:none;}
-.ai-event-icon{font-size:1rem;flex-shrink:0;margin-top:1px;}
-.ai-event-text{font-size:0.83rem;color:var(--text2);line-height:1.5;}
-.ai-event-time{font-family:var(--font-mono);font-size:0.7rem;color:var(--muted);margin-left:auto;flex-shrink:0;}
-.alloc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;}
-.alloc-item{background:var(--bg3);border-radius:12px;padding:16px;position:relative;overflow:hidden;}
-.alloc-item-bar{position:absolute;bottom:0;left:0;height:3px;background:var(--green);transition:width 1s ease;}
-.alloc-item-bar.want{background:var(--amber);}
-.alloc-item-bar.savings{background:var(--blue);}
-.alloc-cat{font-size:0.78rem;color:var(--muted2);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.3px;}
-.alloc-pct{font-family:var(--font-mono);font-size:1.4rem;font-weight:600;color:var(--text);}
-.alloc-amount{font-family:var(--font-mono);font-size:0.8rem;color:var(--muted2);margin-top:4px;}
-.alloc-type{font-size:0.65rem;padding:2px 8px;border-radius:99px;display:inline-block;margin-top:6px;font-weight:600;}
-.alloc-type.need{background:var(--green-dim);color:var(--green);}
-.alloc-type.want{background:rgba(245,166,35,0.12);color:var(--amber);}
-.alloc-type.savings{background:rgba(59,139,255,0.12);color:var(--blue);}
-.savings-cards{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:16px;}
-.savings-card{background:var(--bg3);border-radius:12px;padding:16px;text-align:center;}
-.savings-period{font-size:0.72rem;color:var(--muted2);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px;}
-.savings-amount{font-family:var(--font-mono);font-size:1.3rem;font-weight:600;color:var(--green);}
-.advice-list{display:flex;flex-direction:column;gap:10px;}
-.advice-card{background:var(--bg3);border-radius:12px;padding:16px;display:flex;gap:12px;align-items:flex-start;border-left:3px solid var(--muted);}
-.advice-card.info{border-color:var(--blue);}
-.advice-card.warning{border-color:var(--amber);}
-.advice-card.success{border-color:var(--green);}
-.advice-icon{font-size:1.1rem;flex-shrink:0;}
-.advice-title{font-size:0.85rem;font-weight:600;margin-bottom:4px;}
-.advice-body{font-size:0.8rem;color:var(--text2);line-height:1.5;}
-.tx-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;align-items:end;}
-.form-group{display:flex;flex-direction:column;gap:6px;}
-.form-label{font-size:0.72rem;color:var(--muted2);text-transform:uppercase;letter-spacing:0.5px;}
-.form-input,.form-select{
-  background:var(--bg3);color:var(--text);
-  border:1px solid var(--border2);border-radius:10px;
-  padding:11px 14px;outline:none;
-  font-family:var(--font-display);font-size:0.9rem;
-  transition:border-color 0.2s;width:100%;
-}
-.form-input:focus,.form-select:focus{border-color:var(--green);}
-.form-select option{background:var(--bg2);}
-.btn-add{
-  background:linear-gradient(135deg,var(--green),#00b87a);color:#000;
-  border:none;border-radius:10px;padding:12px 20px;cursor:pointer;
-  font-family:var(--font-display);font-weight:700;font-size:0.9rem;
-  transition:all 0.2s;white-space:nowrap;
-}
-.btn-add:hover{transform:translateY(-1px);}
-.btn-add:disabled{opacity:0.5;cursor:not-allowed;}
-.ai-classify-result{
-  display:inline-flex;align-items:center;gap:6px;
-  background:var(--green-dim);border:1px solid var(--border);
-  color:var(--green);border-radius:8px;padding:6px 12px;
-  font-family:var(--font-mono);font-size:0.75rem;margin-top:8px;
-  animation:fadeIn 0.3s ease;
-}
-.tx-list{display:flex;flex-direction:column;gap:8px;}
-.tx-item{
-  display:flex;align-items:center;gap:14px;
-  background:var(--bg3);border-radius:12px;padding:14px 16px;
-  transition:background 0.15s;
-}
-.tx-item:hover{background:var(--bg4);}
-.tx-cat-icon{width:36px;height:36px;border-radius:10px;background:var(--bg4);display:flex;align-items:center;justify-content:center;font-size:1rem;flex-shrink:0;}
-.tx-info{flex:1;}
-.tx-cat{font-size:0.88rem;font-weight:500;}
-.tx-meta{font-size:0.72rem;color:var(--muted);margin-top:2px;font-family:var(--font-mono);}
-.tx-amount{font-family:var(--font-mono);font-weight:600;font-size:0.95rem;flex-shrink:0;}
-.tx-amount.income{color:var(--green);}
-.tx-amount.expense{color:var(--red);}
-.tx-badge{font-size:0.65rem;padding:2px 7px;border-radius:99px;margin-left:6px;font-weight:600;}
-.tx-badge.need{background:var(--green-dim);color:var(--green);}
-.tx-badge.want{background:rgba(245,166,35,0.12);color:var(--amber);}
-.btn-del{background:none;border:none;color:var(--muted);cursor:pointer;font-size:1rem;padding:4px;border-radius:6px;transition:all 0.15s;}
-.btn-del:hover{color:var(--red);background:var(--red-dim);}
-.future-item{display:flex;align-items:center;gap:14px;background:var(--bg3);border-radius:12px;padding:14px 16px;margin-bottom:8px;}
-.future-info{flex:1;}
-.future-desc{font-size:0.88rem;font-weight:500;}
-.future-meta{font-size:0.72rem;color:var(--muted);margin-top:2px;font-family:var(--font-mono);}
-.future-amount{font-family:var(--font-mono);font-weight:600;font-size:0.9rem;color:var(--amber);}
-.forecast-bar-row{display:flex;align-items:center;gap:14px;margin-bottom:14px;}
-.forecast-week-label{font-family:var(--font-mono);font-size:0.75rem;color:var(--green);width:60px;flex-shrink:0;}
-.forecast-track{flex:1;height:6px;background:var(--bg3);border-radius:99px;overflow:hidden;}
-.forecast-fill{height:100%;background:linear-gradient(90deg,var(--green),#00b87a);border-radius:99px;width:0;transition:width 1.2s cubic-bezier(0.4,0,0.2,1);}
-.forecast-val{font-family:var(--font-mono);font-size:0.75rem;color:var(--text2);width:90px;text-align:right;flex-shrink:0;}
-.longevity-display{display:flex;align-items:center;gap:24px;padding:20px 0;flex-wrap:wrap;}
-.longevity-days{font-family:var(--font-mono);font-size:3rem;font-weight:600;color:var(--green);line-height:1;}
-.longevity-label{color:var(--muted2);font-size:0.85rem;margin-top:6px;}
-.longevity-sep{width:1px;height:60px;background:var(--border2);}
-.longevity-stat{text-align:center;}
-.longevity-stat-val{font-family:var(--font-mono);font-size:1.1rem;font-weight:600;}
-.longevity-stat-label{font-size:0.72rem;color:var(--muted);margin-top:4px;}
-#totalWarning, #needsWantsSummary { display: none; }
-.btn{
-  background:var(--bg3);color:var(--text);border:1px solid var(--border2);
-  border-radius:10px;padding:10px 16px;cursor:pointer;
-  font-family:var(--font-display);font-weight:600;font-size:0.85rem;
+.btn-add:hover { transform:translateY(-1px); }
+.btn-add:disabled { opacity:0.5; cursor:not-allowed; }
+
+.btn {
+  background:var(--bg3); color:var(--text); border:1px solid var(--border2);
+  border-radius:10px; padding:10px 16px; cursor:pointer;
+  font-family:var(--font-display); font-weight:600; font-size:0.85rem;
   transition:all 0.2s;
 }
-.btn:hover{border-color:var(--border);background:var(--bg4);}
-.btn-primary{background:var(--green-dim);border-color:var(--border);color:var(--green);}
-.btn-danger{background:var(--red-dim);border-color:rgba(255,59,92,0.2);color:var(--red);}
-#toast{
-  position:fixed;bottom:28px;left:50%;transform:translateX(-50%) translateY(80px);
-  background:var(--bg2);border:1px solid var(--border);border-radius:12px;
-  padding:12px 24px;font-size:0.875rem;
-  opacity:0;transition:all 0.3s cubic-bezier(0.4,0,0.2,1);
-  z-index:9999;white-space:nowrap;
-  box-shadow:0 8px 32px rgba(0,0,0,0.4);
+.btn:hover { border-color:var(--border); background:var(--bg4); }
+.btn-primary { background:var(--green-dim); border-color:var(--border); color:var(--green); }
+.btn-danger { background:var(--red-dim); border-color:rgba(255,59,92,0.2); color:var(--red); }
+
+/* ───────── AI CHECKLIST ───────── */
+.ai-checklist {
+  background:var(--bg3); border-radius:12px; padding:20px; margin-top:20px;
 }
-#toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
-.empty-state{text-align:center;padding:40px;color:var(--muted);}
-.empty-state-icon{font-size:2.5rem;margin-bottom:12px;}
-.empty-state-text{font-size:0.9rem;line-height:1.6;}
-.auth-overlay{
-  position:fixed;inset:0;
-  background:rgba(6,10,16,0.97);backdrop-filter:blur(20px);
-  z-index:9000;display:flex;align-items:center;justify-content:center;
+.checklist-section { margin-bottom:16px; }
+.checklist-section-title { font-size:0.85rem; font-weight:600; color:var(--green); margin-bottom:8px; }
+.checklist-item { display:flex; align-items:center; gap:12px; margin-bottom:8px; flex-wrap:wrap; }
+.checklist-item label { display:flex; align-items:center; gap:6px; cursor:pointer; }
+.checklist-item .cat-percent { font-family:var(--font-mono); font-size:0.8rem; color:var(--muted2); min-width:45px; }
+.total-warning { color:var(--red); font-size:0.75rem; margin-top:8px; }
+.add-cat-btn {
+  background:var(--green-dim); border:1px solid var(--border); color:var(--green);
+  border-radius:6px; width:26px; height:26px; display:flex; align-items:center;
+  justify-content:center; cursor:pointer; font-size:1.2rem;
 }
-.auth-card{
-  background:var(--bg2);border:1px solid var(--border);border-radius:24px;
-  padding:40px;width:420px;max-width:90%;
-  box-shadow:0 24px 80px rgba(0,0,0,0.5);
+
+/* ───────── FORM ELEMENTS ───────── */
+.form-group { display:flex; flex-direction:column; gap:6px; }
+.form-label { font-size:0.72rem; color:var(--muted2); text-transform:uppercase; letter-spacing:0.5px; }
+.form-input, .form-select {
+  background:var(--bg3); color:var(--text);
+  border:1px solid var(--border2); border-radius:10px;
+  padding:11px 14px; outline:none;
+  font-family:var(--font-display); font-size:0.9rem;
+  transition:border-color 0.2s; width:100%;
 }
-.auth-logo{font-size:2rem;margin-bottom:4px;}
-.auth-title{font-size:1.6rem;font-weight:800;margin-bottom:4px;}
-.auth-sub{font-size:0.85rem;color:var(--muted2);margin-bottom:28px;}
-.auth-input{
-  display:block;width:100%;
-  background:var(--bg3);color:var(--text);
-  border:1px solid var(--border2);border-radius:12px;
-  padding:13px 16px;outline:none;font-family:var(--font-display);
-  font-size:0.9rem;margin-bottom:12px;transition:border-color 0.2s;
-}
-.auth-input:focus{border-color:var(--green);}
-.btn-auth{
-  width:100%;background:linear-gradient(135deg,var(--green),#00b87a);
-  color:#000;border:none;border-radius:12px;
-  padding:14px;font-family:var(--font-display);font-weight:700;
-  font-size:1rem;cursor:pointer;margin-top:8px;
-  box-shadow:0 4px 20px var(--green-glow);transition:all 0.2s;
-}
-.btn-auth:hover{transform:translateY(-2px);}
-.auth-toggle{text-align:center;margin-top:16px;font-size:0.85rem;color:var(--muted2);cursor:pointer;}
-.auth-toggle span{color:var(--green);font-weight:600;}
-.auth-error{color:var(--red);font-size:0.8rem;margin-top:8px;min-height:18px;}
-.auth-checkbox{display:flex;align-items:center;gap:8px;margin-bottom:12px;font-size:0.85rem;color:var(--muted2);cursor:pointer;}
-.chatbot{
-  position:fixed;bottom:20px;right:20px;
-  width:360px;height:460px;
-  min-width:280px;min-height:300px;max-width:85vw;max-height:70vh;
-  resize:both;overflow:auto;
-  z-index:8000;
-}
-.chat-window{
-  width:100%;height:100%;
-  background:var(--bg2);border:1px solid var(--border);border-radius:20px;
-  display:flex;flex-direction:column;overflow:hidden;
-  box-shadow:0 12px 48px rgba(0,0,0,0.4);
-}
-.chat-header{
-  padding:14px 16px;background:var(--bg3);
-  border-bottom:1px solid var(--border2);
-  display:flex;align-items:center;gap:10px;cursor:move;user-select:none;
-  flex-shrink:0;
-}
-.chat-header-title{font-size:0.875rem;font-weight:600;}
-.chat-msgs{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:8px;}
-.msg{max-width:84%;padding:10px 14px;border-radius:16px;font-size:0.82rem;line-height:1.5;}
-.msg.user{align-self:flex-end;background:var(--green-dim);color:var(--green);border-bottom-right-radius:4px;}
-.msg.bot{align-self:flex-start;background:var(--bg3);color:var(--text2);border-bottom-left-radius:4px;}
-.chat-input-row{display:flex;padding:12px;gap:8px;background:var(--bg3);border-top:1px solid var(--border2);flex-shrink:0;}
-.chat-inp{flex:1;background:var(--bg4);border:1px solid var(--border2);color:var(--text);border-radius:10px;padding:9px 12px;font-family:var(--font-display);font-size:0.82rem;outline:none;transition:border-color 0.2s;}
-.chat-inp:focus{border-color:var(--green);}
-.chat-send{background:var(--green-dim);border:1px solid var(--border);color:var(--green);border-radius:10px;padding:8px 14px;cursor:pointer;font-weight:600;font-size:0.82rem;transition:all 0.15s;}
-.chat-send:hover{background:var(--green);color:#000;}
-.chat-toggle-btn{background:none;border:none;color:var(--muted2);cursor:pointer;font-size:1.2rem;padding:0 4px;line-height:1;transition:color 0.2s;margin-left:auto;}
-.chat-toggle-btn:hover{color:var(--green);}
-.chatbot.minimized .chat-msgs,
-.chatbot.minimized .chat-input-row{display:none;}
-.chatbot.minimized .chat-window{height:auto !important;border-radius:20px;}
-.spinner{display:inline-block;width:16px;height:16px;border:2px solid rgba(0,229,160,0.3);border-top-color:var(--green);border-radius:50%;animation:spin 0.7s linear infinite;}
-@keyframes spin{to{transform:rotate(360deg);}}
-.financial-summary-text{font-size:0.875rem;color:var(--text2);line-height:1.6;font-style:italic;border-left:3px solid var(--green);padding-left:14px;margin-bottom:20px;}
-.chart-wrapper{position:relative;height:220px;}
-.tabs{display:flex;gap:4px;background:var(--bg3);border-radius:12px;padding:4px;margin-bottom:20px;}
-.tab{flex:1;padding:8px;border:none;background:transparent;color:var(--muted2);border-radius:8px;cursor:pointer;font-family:var(--font-display);font-size:0.82rem;font-weight:500;transition:all 0.2s;}
-.tab.active{background:var(--bg2);color:var(--text);box-shadow:0 2px 8px rgba(0,0,0,0.3);}
-::-webkit-scrollbar{width:6px;}
-::-webkit-scrollbar-track{background:transparent;}
-::-webkit-scrollbar-thumb{background:var(--bg4);border-radius:99px;}
-.modal-overlay{
-  position:fixed;inset:0;
-  background:rgba(6,10,16,0.92);backdrop-filter:blur(16px);
-  z-index:10000;display:flex;align-items:center;justify-content:center;
-}
-.scenario-bar-row {
-  display:flex; align-items:center; gap:14px; margin-bottom:14px;
-}
-.scenario-label {
-  font-family:var(--font-mono); font-size:0.75rem; color:var(--green); width:70px; flex-shrink:0;
-}
-.scenario-track {
-  flex:1; height:6px; background:var(--bg3); border-radius:99px; overflow:hidden;
-}
-.scenario-fill {
-  height:100%; border-radius:99px; width:0; transition:width 1.2s ease;
-}
-.saver-fill { background:linear-gradient(90deg, var(--blue), var(--green)); }
-.neutral-fill { background:linear-gradient(90deg, var(--green), #00b87a); }
-.spender-fill { background:linear-gradient(90deg, var(--amber), var(--red)); }
-.scenario-val {
-  font-family:var(--font-mono); font-size:0.75rem; color:var(--text2); width:90px; text-align:right; flex-shrink:0;
-}
-.budget-item {
-    display: flex; align-items: center; gap: 12px;
-    background: var(--bg3); border-radius: 10px; padding: 10px 14px;
-    margin-bottom: 8px;
-}
-.budget-cat { font-size: 0.82rem; width: 130px; }
-.budget-input {
-    width: 80px; background: var(--bg4); border: 1px solid var(--border2);
-    color: var(--text); border-radius: 6px; padding: 6px 8px;
-    font-family: var(--font-mono); font-size: 0.8rem;
-}
-.budget-save-btn {
-    background: var(--green-dim); border: 1px solid var(--border);
-    color: var(--green); border-radius: 6px; padding: 6px 10px;
-    cursor: pointer; font-size: 0.75rem; font-weight: 600;
-}
-.budget-amount { font-family: var(--font-mono); font-size: 0.8rem; color: var(--muted2); margin-left: auto; }
-.profile-block .form-group {
-    margin-bottom: 12px;
-}
-.profile-block .avatar-row {
-    display: flex; gap: 10px; align-items: center;
-}
+.form-input:focus, .form-select:focus { border-color:var(--green); }
+.form-select option { background:var(--bg2); }
 .needwant-group { display:flex; gap:16px; align-items:center; margin-top:8px; }
 .needwant-group label { font-size:0.82rem; display:flex; align-items:center; gap:4px; cursor:pointer; }
 .needwant-group input[type="radio"] { accent-color:var(--green); }
+
+/* ───────── SAVINGS CARDS ───────── */
+.savings-cards { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-top:16px; }
+.savings-card { background:var(--bg3); border-radius:12px; padding:16px; text-align:center; }
+.savings-period { font-size:0.72rem; color:var(--muted2); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:6px; }
+.savings-amount { font-family:var(--font-mono); font-size:1.3rem; font-weight:600; color:var(--green); }
+
+/* ───────── ALLOCATION GRID ───────── */
+.alloc-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:12px; }
+.alloc-item { background:var(--bg3); border-radius:12px; padding:16px; position:relative; overflow:hidden; }
+.alloc-item-bar { position:absolute; bottom:0; left:0; height:3px; background:var(--green); transition:width 1s ease; }
+.alloc-item-bar.want { background:var(--amber); }
+.alloc-item-bar.savings { background:var(--blue); }
+.alloc-cat { font-size:0.78rem; color:var(--muted2); margin-bottom:6px; text-transform:uppercase; letter-spacing:0.3px; }
+.alloc-pct { font-family:var(--font-mono); font-size:1.4rem; font-weight:600; color:var(--text); }
+.alloc-amount { font-family:var(--font-mono); font-size:0.8rem; color:var(--muted2); margin-top:4px; }
+.alloc-type { font-size:0.65rem; padding:2px 8px; border-radius:99px; display:inline-block; margin-top:6px; font-weight:600; }
+.alloc-type.need { background:var(--green-dim); color:var(--green); }
+.alloc-type.want { background:rgba(245,166,35,0.12); color:var(--amber); }
+.alloc-type.savings { background:rgba(59,139,255,0.12); color:var(--blue); }
+
+/* ───────── ADVICE ───────── */
+.advice-list { display:flex; flex-direction:column; gap:10px; }
+.advice-card {
+  background:var(--bg3); border-radius:12px; padding:16px; display:flex; gap:12px;
+  align-items:flex-start; border-left:3px solid var(--muted);
+}
+.advice-card.info { border-color:var(--blue); }
+.advice-card.warning { border-color:var(--amber); }
+.advice-card.success { border-color:var(--green); }
+.advice-icon { font-size:1.1rem; flex-shrink:0; }
+.advice-title { font-size:0.85rem; font-weight:600; margin-bottom:4px; }
+.advice-body { font-size:0.8rem; color:var(--text2); line-height:1.5; }
+
+/* ───────── BUDGET LIST ───────── */
+.budget-item {
+  display:flex; align-items:center; gap:12px; background:var(--bg3);
+  border-radius:10px; padding:10px 14px; margin-bottom:8px;
+}
+.budget-cat { font-size:0.82rem; width:130px; }
+.budget-input {
+  width:80px; background:var(--bg4); border:1px solid var(--border2);
+  color:var(--text); border-radius:6px; padding:6px 8px;
+  font-family:var(--font-mono); font-size:0.8rem;
+}
+.budget-save-btn {
+  background:var(--green-dim); border:1px solid var(--border); color:var(--green);
+  border-radius:6px; padding:6px 10px; cursor:pointer; font-size:0.75rem; font-weight:600;
+}
+.budget-amount { font-family:var(--font-mono); font-size:0.8rem; color:var(--muted2); margin-left:auto; }
+
+/* ───────── TRANSACTION LIST ───────── */
+.tx-list { display:flex; flex-direction:column; gap:8px; }
+.tx-item {
+  display:flex; align-items:center; gap:14px; background:var(--bg3);
+  border-radius:12px; padding:14px 16px; transition:background 0.15s;
+}
+.tx-item:hover { background:var(--bg4); }
+.tx-cat-icon { width:36px; height:36px; border-radius:10px; background:var(--bg4); display:flex; align-items:center; justify-content:center; font-size:1rem; flex-shrink:0; }
+.tx-info { flex:1; }
+.tx-cat { font-size:0.88rem; font-weight:500; }
+.tx-meta { font-size:0.72rem; color:var(--muted); margin-top:2px; font-family:var(--font-mono); }
+.tx-amount { font-family:var(--font-mono); font-weight:600; font-size:0.95rem; flex-shrink:0; }
+.tx-amount.income { color:var(--green); }
+.tx-amount.expense { color:var(--red); }
+.tx-badge { font-size:0.65rem; padding:2px 7px; border-radius:99px; margin-left:6px; font-weight:600; }
+.tx-badge.need { background:var(--green-dim); color:var(--green); }
+.tx-badge.want { background:rgba(245,166,35,0.12); color:var(--amber); }
+.btn-del { background:none; border:none; color:var(--muted); cursor:pointer; font-size:1rem; padding:4px; border-radius:6px; transition:all 0.15s; }
+.btn-del:hover { color:var(--red); background:var(--red-dim); }
+
+/* ───────── FUTURE EXPENSES ───────── */
+.future-item {
+  display:flex; align-items:center; gap:14px; background:var(--bg3);
+  border-radius:12px; padding:14px 16px; margin-bottom:8px;
+}
+.future-info { flex:1; }
+.future-desc { font-size:0.88rem; font-weight:500; }
+.future-meta { font-size:0.72rem; color:var(--muted); margin-top:2px; font-family:var(--font-mono); }
+.future-amount { font-family:var(--font-mono); font-weight:600; font-size:0.9rem; color:var(--amber); }
+
+/* ───────── FORECAST BARS ───────── */
+.forecast-bar-row { display:flex; align-items:center; gap:14px; margin-bottom:14px; }
+.forecast-week-label { font-family:var(--font-mono); font-size:0.75rem; color:var(--green); width:60px; flex-shrink:0; }
+.forecast-track { flex:1; height:6px; background:var(--bg3); border-radius:99px; overflow:hidden; }
+.forecast-fill { height:100%; background:linear-gradient(90deg,var(--green),#00b87a); border-radius:99px; width:0; transition:width 1.2s cubic-bezier(0.4,0,0.2,1); }
+.forecast-val { font-family:var(--font-mono); font-size:0.75rem; color:var(--text2); width:90px; text-align:right; flex-shrink:0; }
+
+/* ───────── LONGEVITY ───────── */
+.longevity-display { display:flex; align-items:center; gap:24px; padding:20px 0; flex-wrap:wrap; }
+.longevity-days { font-family:var(--font-mono); font-size:3rem; font-weight:600; color:var(--green); line-height:1; }
+.longevity-label { color:var(--muted2); font-size:0.85rem; margin-top:6px; }
+.longevity-sep { width:1px; height:60px; background:var(--border2); }
+.longevity-stat { text-align:center; }
+.longevity-stat-val { font-family:var(--font-mono); font-size:1.1rem; font-weight:600; }
+.longevity-stat-label { font-size:0.72rem; color:var(--muted); margin-top:4px; }
+
+/* ───────── SCENARIO BARS ───────── */
+.scenario-bar-row { display:flex; align-items:center; gap:14px; margin-bottom:14px; }
+.scenario-label { font-family:var(--font-mono); font-size:0.75rem; color:var(--green); width:70px; flex-shrink:0; }
+.scenario-track { flex:1; height:6px; background:var(--bg3); border-radius:99px; overflow:hidden; }
+.scenario-fill { height:100%; border-radius:99px; width:0; transition:width 1.2s ease; }
+.saver-fill { background:linear-gradient(90deg,var(--blue),var(--green)); }
+.neutral-fill { background:linear-gradient(90deg,var(--green),#00b87a); }
+.spender-fill { background:linear-gradient(90deg,var(--amber),var(--red)); }
+.scenario-val { font-family:var(--font-mono); font-size:0.75rem; color:var(--text2); width:90px; text-align:right; flex-shrink:0; }
+
+/* ───────── CHARTS ───────── */
+.chart-wrapper { position:relative; height:220px; }
+.vs-chart-container { position:relative; height:280px; width:100%; }
+
+/* ───────── TOAST ───────── */
+#toast {
+  position:fixed; bottom:28px; left:50%; transform:translateX(-50%) translateY(80px);
+  background:var(--bg2); border:1px solid var(--border); border-radius:12px;
+  padding:12px 24px; font-size:0.875rem;
+  opacity:0; transition:all 0.3s cubic-bezier(0.4,0,0.2,1);
+  z-index:9999; white-space:nowrap;
+  box-shadow:0 8px 32px rgba(0,0,0,0.4);
+}
+#toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
+
+/* ───────── AUTH ───────── */
+.auth-overlay {
+  position:fixed; inset:0;
+  background:rgba(6,10,16,0.97); backdrop-filter:blur(20px);
+  z-index:9000; display:flex; align-items:center; justify-content:center;
+}
+.auth-card {
+  background:var(--bg2); border:1px solid var(--border); border-radius:24px;
+  padding:40px; width:420px; max-width:90%;
+  box-shadow:0 24px 80px rgba(0,0,0,0.5);
+}
+.auth-logo { font-size:2rem; margin-bottom:4px; }
+.auth-title { font-size:1.6rem; font-weight:800; margin-bottom:4px; }
+.auth-sub { font-size:0.85rem; color:var(--muted2); margin-bottom:28px; }
+.auth-input {
+  display:block; width:100%;
+  background:var(--bg3); color:var(--text);
+  border:1px solid var(--border2); border-radius:12px;
+  padding:13px 16px; outline:none; font-family:var(--font-display);
+  font-size:0.9rem; margin-bottom:12px; transition:border-color 0.2s;
+}
+.auth-input:focus { border-color:var(--green); }
+.btn-auth {
+  width:100%; background:linear-gradient(135deg,var(--green),#00b87a);
+  color:#000; border:none; border-radius:12px;
+  padding:14px; font-family:var(--font-display); font-weight:700;
+  font-size:1rem; cursor:pointer; margin-top:8px;
+  box-shadow:0 4px 20px var(--green-glow); transition:all 0.2s;
+}
+.btn-auth:hover { transform:translateY(-2px); }
+.auth-toggle { text-align:center; margin-top:16px; font-size:0.85rem; color:var(--muted2); cursor:pointer; }
+.auth-toggle span { color:var(--green); font-weight:600; }
+.auth-error { color:var(--red); font-size:0.8rem; margin-top:8px; min-height:18px; }
+.auth-checkbox { display:flex; align-items:center; gap:8px; margin-bottom:12px; font-size:0.85rem; color:var(--muted2); cursor:pointer; }
+
+/* ───────── CHATBOT ───────── */
+.chatbot {
+  position:fixed; bottom:20px; right:20px;
+  width:360px; height:460px;
+  min-width:280px; min-height:300px; max-width:85vw; max-height:70vh;
+  resize:both; overflow:auto; z-index:8000;
+}
+.chat-window {
+  width:100%; height:100%;
+  background:var(--bg2); border:1px solid var(--border); border-radius:20px;
+  display:flex; flex-direction:column; overflow:hidden;
+  box-shadow:0 12px 48px rgba(0,0,0,0.4);
+}
+.chat-header {
+  padding:14px 16px; background:var(--bg3); border-bottom:1px solid var(--border2);
+  display:flex; align-items:center; gap:10px; cursor:move; user-select:none; flex-shrink:0;
+}
+.chat-header-title { font-size:0.875rem; font-weight:600; }
+.chat-msgs { flex:1; overflow-y:auto; padding:14px; display:flex; flex-direction:column; gap:8px; }
+.msg { max-width:84%; padding:10px 14px; border-radius:16px; font-size:0.82rem; line-height:1.5; }
+.msg.user { align-self:flex-end; background:var(--green-dim); color:var(--green); border-bottom-right-radius:4px; }
+.msg.bot { align-self:flex-start; background:var(--bg3); color:var(--text2); border-bottom-left-radius:4px; }
+.chat-input-row { display:flex; padding:12px; gap:8px; background:var(--bg3); border-top:1px solid var(--border2); flex-shrink:0; }
+.chat-inp { flex:1; background:var(--bg4); border:1px solid var(--border2); color:var(--text); border-radius:10px; padding:9px 12px; font-family:var(--font-display); font-size:0.82rem; outline:none; transition:border-color 0.2s; }
+.chat-inp:focus { border-color:var(--green); }
+.chat-send { background:var(--green-dim); border:1px solid var(--border); color:var(--green); border-radius:10px; padding:8px 14px; cursor:pointer; font-weight:600; font-size:0.82rem; transition:all 0.15s; }
+.chat-send:hover { background:var(--green); color:#000; }
+.chat-toggle-btn { background:none; border:none; color:var(--muted2); cursor:pointer; font-size:1.2rem; padding:0 4px; line-height:1; transition:color 0.2s; margin-left:auto; }
+.chat-toggle-btn:hover { color:var(--green); }
+.chatbot.minimized .chat-msgs, .chatbot.minimized .chat-input-row { display:none; }
+.chatbot.minimized .chat-window { height:auto !important; border-radius:20px; }
+
+/* ───────── EMPTY STATE ───────── */
+.empty-state { text-align:center; padding:40px; color:var(--muted); }
+.empty-state-icon { font-size:2.5rem; margin-bottom:12px; }
+.empty-state-text { font-size:0.9rem; line-height:1.6; }
+
+/* ───────── TABS ───────── */
+.tabs { display:flex; gap:4px; background:var(--bg3); border-radius:12px; padding:4px; margin-bottom:20px; }
+.tab { flex:1; padding:8px; border:none; background:transparent; color:var(--muted2); border-radius:8px; cursor:pointer; font-family:var(--font-display); font-size:0.82rem; font-weight:500; transition:all 0.2s; }
+.tab.active { background:var(--bg2); color:var(--text); box-shadow:0 2px 8px rgba(0,0,0,0.3); }
+
+/* ───────── MODAL ───────── */
+.modal-overlay {
+  position:fixed; inset:0;
+  background:rgba(6,10,16,0.92); backdrop-filter:blur(16px);
+  z-index:10000; display:flex; align-items:center; justify-content:center;
+}
+
+/* ───────── ADMIN TABLE ───────── */
+table { width:100%; border-collapse:collapse; margin-top:8px; }
+table th, table td { padding:10px 12px; text-align:left; border-bottom:1px solid var(--border2); }
+table th { color:var(--muted2); font-size:0.75rem; text-transform:uppercase; letter-spacing:0.5px; }
+table td { color:var(--text2); font-size:0.85rem; }
+
+/* ───────── SCROLLBAR ───────── */
+::-webkit-scrollbar { width:6px; }
+::-webkit-scrollbar-track { background:transparent; }
+::-webkit-scrollbar-thumb { background:var(--bg4); border-radius:99px; }
+
+.spinner {
+  display:inline-block; width:16px; height:16px; border:2px solid rgba(0,229,160,0.3);
+  border-top-color:var(--green); border-radius:50%; animation:spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform:rotate(360deg); } }
 </style>
 </head>
 <body>
+
+<!-- ───── SIDEBAR ───── -->
 <nav class="sidebar">
   <div class="logo">💚</div>
   <button class="nav-item active" data-nav="dashboard"><span class="nav-icon">⚡</span><span class="nav-label">Dashboard</span></button>
@@ -1965,20 +1529,19 @@ body::before{
   <div class="sidebar-sep"></div>
   <button class="nav-item" id="exportBtn"><span class="nav-icon">⬇</span><span class="nav-label">Export CSV</span></button>
 </nav>
+
+<!-- ───── MAIN ───── -->
 <main class="main">
   <div class="topbar">
     <div class="page-title" id="pageTitle">Dashboard</div>
     <div class="topbar-right">
-      <div class="health-pill"><div class="health-dot"></div><span id="topScore" style="font-family:var(--font-mono)">—</span>&nbsp;/ 100</div>
-      <div class="avatar" id="userAvatar">
-        <span class="avatar-initial">—</span>
-        <img src="" style="display:none;">
-      </div>
+      <div class="health-pill"><div class="health-dot"></div><span id="topScore" style="font-family:var(--font-mono)">—</span> / 100</div>
+      <div class="avatar" id="userAvatar"><span class="avatar-initial">—</span><img src="" style="display:none;"></div>
       <button class="btn-signout" id="signoutBtn">Sign Out</button>
     </div>
   </div>
 
-  <!-- DASHBOARD SCREEN -->
+  <!-- ─── DASHBOARD ─── -->
   <div class="screen active" id="screen-dashboard">
     <div class="income-hero">
       <div class="income-label">Monthly Income & Expenses — Tell ML, it handles the rest</div>
@@ -1991,7 +1554,7 @@ body::before{
         <div style="margin-left:auto;"><span class="ai-badge">ML</span></div>
       </div>
 
-      <!-- Manual Block (Income / Expense switch) -->
+      <!-- Manual Block -->
       <div id="manualBlock">
         <div class="income-input-row" style="align-items:center; gap:16px; margin-bottom:16px;">
           <span style="font-size:0.9rem; color:var(--muted2);">Transaction type:</span>
@@ -2012,18 +1575,14 @@ body::before{
           <div style="display:flex; gap:12px; align-items:stretch; flex-wrap:wrap;">
             <div class="income-peso">₱</div>
             <input class="income-input" id="incomeInput" type="number" placeholder="0.00" step="100" min="0">
-            <button class="btn-add" id="addIncomeBtn" style="background:var(--green-dim); color:var(--green); border:1px solid var(--border);">
-              Add Income
-            </button>
+            <button class="btn-add" id="addIncomeBtn" style="background:var(--green-dim); color:var(--green); border:1px solid var(--border);">Add Income</button>
           </div>
-          <div id="incomeDateWarning" style="display:none; color:var(--red); font-size:0.75rem; margin-top:8px;">
-            Cannot add past income
-          </div>
+          <div id="incomeDateWarning" style="display:none; color:var(--red); font-size:0.75rem; margin-top:8px;">Cannot add past income</div>
         </div>
 
-        <!-- Expense fields (hidden initially) -->
+        <!-- Expense fields -->
         <div id="expenseFields" style="display:none;">
-          <div class="tx-form">
+          <div class="tx-form" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; align-items:end;">
             <div class="form-group"><label class="form-label">Amount (₱)</label><input class="form-input" id="expenseAmount" type="number" placeholder="0.00" step="0.01" min="1"></div>
             <div class="form-group"><label class="form-label">Category</label>
               <select class="form-select" id="expenseCategory">
@@ -2041,10 +1600,9 @@ body::before{
               <button class="btn-add" id="addExpenseBtn">Add Expense →</button>
             </div>
           </div>
-          <div id="expenseClassifyResult" style="display:none;margin-top:8px;"></div>
         </div>
 
-        <!-- Spending style (only visible when Income mode) -->
+        <!-- Spending style -->
         <div class="mindset-row" id="mindsetRow" style="margin-top:20px;">
           <span style="font-size:0.78rem;color:var(--muted);align-self:center;">Spending style:</span>
           <button class="mindset-btn" data-mindset="Saver">🏦 Saver</button>
@@ -2057,39 +1615,29 @@ body::before{
           <div style="font-weight:600;margin-bottom:12px;">🧠 ML Autonomous Allocation (100% Sum Rule)</div>
           <div class="checklist-section">
             <div class="checklist-section-title" style="display:flex; align-items:center; gap:10px;">
-              Custom ▼
-              <button class="add-cat-btn" data-type="want" title="Add custom category" style="background:var(--green-dim); border:1px solid var(--border); color:var(--green); border-radius:6px; width:26px; height:26px; display:flex; align-items:center; justify-content:center; cursor:pointer; font-size:1.2rem;">+</button>
+              Custom Categories
+              <button class="add-cat-btn" data-type="want" title="Add custom category">+</button>
             </div>
             <div id="needsChecklist" class="checklist-item"></div>
             <div id="wantsChecklist" class="checklist-item"></div>
           </div>
           <div id="totalWarning" class="total-warning" style="display:none;">⚠️ Total allocation must be 100% – ML will normalise.</div>
           <div style="margin-top:12px;"><button class="btn-analyze" id="analyzeBtn"><span id="analyzeBtnContent">🤖 Let ML Plan</span></button></div>
-          <div id="needsWantsSummary" style="margin-top:12px;font-size:0.8rem;color:var(--text2);"></div>
         </div>
       </div>
 
-      <!-- OCR Upload Block -->
+      <!-- OCR Upload -->
       <div id="incomeImageUpload" class="income-image-upload" style="display:none;">
         <input type="file" id="incomeImage" accept="image/*" capture="environment">
         <div class="ocr-hint">📸 Take a photo or upload a payslip / budget screenshot. ML will read all income & expenses.</div>
       </div>
 
-      <!-- Profile Edit Block -->
+      <!-- Profile Edit -->
       <div id="profileBlock" class="profile-block" style="display:none;">
         <div style="font-size:1rem;font-weight:600;margin-bottom:16px;color:var(--green);">Edit Your Profile</div>
-        <div class="form-group">
-          <label class="form-label">Name</label>
-          <input class="form-input" id="profileName" value="">
-        </div>
-        <div class="form-group">
-          <label class="form-label">Email</label>
-          <input class="form-input" id="profileEmail" type="email" value="">
-        </div>
-        <div class="form-group">
-          <label class="form-label">New Password (leave blank to keep current)</label>
-          <input class="form-input" id="profilePass" type="password" placeholder="●●●●●●">
-        </div>
+        <div class="form-group"><label class="form-label">Name</label><input class="form-input" id="profileName" value=""></div>
+        <div class="form-group"><label class="form-label">Email</label><input class="form-input" id="profileEmail" type="email" value=""></div>
+        <div class="form-group"><label class="form-label">New Password (leave blank to keep current)</label><input class="form-input" id="profilePass" type="password" placeholder="●●●●●●"></div>
         <div class="form-group">
           <label class="form-label">Profile Picture</label>
           <div style="display:flex; gap:20px; align-items:flex-start;">
@@ -2098,17 +1646,14 @@ body::before{
               <span id="profilePreviewPlaceholder" style="font-size:2rem; color:var(--muted);">👤</span>
             </div>
             <div style="flex:1; display:flex; flex-direction:column; gap:10px;">
-              <label class="btn" style="display:inline-block; width:fit-content; cursor:pointer; font-size:0.8rem; padding:6px 14px;">
-                📁 Upload Photo
-                <input type="file" id="profileFileInput" accept="image/*" style="display:none;">
-              </label>
+              <label class="btn" style="display:inline-block; width:fit-content; cursor:pointer; font-size:0.8rem; padding:6px 14px;">📁 Upload Photo<input type="file" id="profileFileInput" accept="image/*" style="display:none;"></label>
               <span style="font-size:0.7rem; color:var(--muted2);">or paste a URL below</span>
               <input class="form-input" id="profileAvatar" placeholder="https://example.com/photo.jpg" style="margin-top:4px;">
               <div class="preset-avatars" style="display:flex; gap:8px; margin-top:4px;">
-                <div class="preset-avatar" style="background:linear-gradient(135deg,#00E5A0,#009e6a);" data-url="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect width='100' height='100' fill='%2300E5A0'/%3E%3C/svg%3E" title="Green"></div>
-                <div class="preset-avatar" style="background:linear-gradient(135deg,#3B8BFF,#9B59F5);" data-url="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect width='100' height='100' fill='%233B8BFF'/%3E%3C/svg%3E" title="Blue"></div>
-                <div class="preset-avatar" style="background:linear-gradient(135deg,#FF3B5C,#F5A623);" data-url="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect width='100' height='100' fill='%23FF3B5C'/%3E%3C/svg%3E" title="Red"></div>
-                <div class="preset-avatar" style="background:linear-gradient(135deg,#F5A623,#FF3B5C);" data-url="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect width='100' height='100' fill='%23F5A623'/%3E%3C/svg%3E" title="Orange"></div>
+                <div class="preset-avatar" style="background:linear-gradient(135deg,#00E5A0,#009e6a);" data-url="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect width='100' height='100' fill='%2300E5A0'/%3E%3C/svg%3E"></div>
+                <div class="preset-avatar" style="background:linear-gradient(135deg,#3B8BFF,#9B59F5);" data-url="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect width='100' height='100' fill='%233B8BFF'/%3E%3C/svg%3E"></div>
+                <div class="preset-avatar" style="background:linear-gradient(135deg,#FF3B5C,#F5A623);" data-url="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect width='100' height='100' fill='%23FF3B5C'/%3E%3C/svg%3E"></div>
+                <div class="preset-avatar" style="background:linear-gradient(135deg,#F5A623,#FF3B5C);" data-url="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Crect width='100' height='100' fill='%23F5A623'/%3E%3C/svg%3E"></div>
               </div>
             </div>
           </div>
@@ -2117,6 +1662,7 @@ body::before{
       </div>
     </div>
 
+    <!-- Stats -->
     <div class="stats-grid">
       <div class="stat-card"><div class="stat-value" id="sBalance">—</div><div class="stat-label">Balance</div></div>
       <div class="stat-card neg"><div class="stat-value" id="sExpense" style="color:var(--red)">—</div><div class="stat-label">Month Expenses</div></div>
@@ -2124,16 +1670,24 @@ body::before{
       <div class="stat-card blue-glow"><div class="stat-value" id="sScore" style="color:var(--blue)">—</div><div class="stat-label">Health Score</div><div class="stat-sub" id="scoreLabel">awaiting data</div></div>
     </div>
 
-    <div class="card ai-feed">
-      <div class="ai-feed-header"><div class="ai-pulse"></div><div class="ai-feed-title">ML Activity Feed</div><div class="ai-badge" style="margin-left:auto;">SMART</div></div>
-      <div id="aiFeed"><div class="empty-state"><div class="empty-state-icon">🤖</div><div class="empty-state-text">Enter your income above and click<br><strong style="color:var(--green)">Let ML Plan</strong> — SmartSpend will build your entire financial plan automatically.</div></div></div>
+    <!-- Income vs Expense Chart -->
+    <div class="card chart-card" id="incomeExpenseChartCard" style="display:none;">
+      <div class="card-header"><span class="card-title">📊 Income vs Expenses (Current Month)</span><span class="ai-badge">Real-time</span></div>
+      <div class="vs-chart-container"><canvas id="incomeExpenseChart"></canvas></div>
     </div>
 
-    <!-- Show Plan Details Toggle -->
+    <!-- ML Feed -->
+    <div class="card ai-feed">
+      <div class="ai-feed-header"><div class="ai-pulse"></div><div class="ai-feed-title">ML Activity Feed</div><div class="ai-badge" style="margin-left:auto;">SMART</div></div>
+      <div id="aiFeed"><div class="empty-state"><div class="empty-state-icon">🤖</div><div class="empty-state-text">Enter your income above and click <strong style="color:var(--green)">Let ML Plan</strong> — SmartSpend will build your entire financial plan automatically.</div></div></div>
+    </div>
+
+    <!-- Plan Toggle -->
     <div id="showPlanToggle" style="display:none; margin-bottom:16px;">
       <button class="btn btn-primary" id="togglePlanBtn">📊 Show Plan Details</button>
     </div>
 
+    <!-- ML Assessment -->
     <div id="financialSummaryBlock" style="display:none" class="card">
       <div class="card-header"><span class="card-title">ML Assessment</span><span class="ai-badge">ML</span></div>
       <div class="financial-summary-text" id="financialSummaryText"></div>
@@ -2146,41 +1700,42 @@ body::before{
       <div id="savingsTip" style="font-size:0.8rem;color:var(--muted2);margin-top:12px;font-style:italic;"></div>
     </div>
 
+    <!-- Allocation -->
     <div id="allocationBlock" style="display:none" class="card">
       <div class="card-header"><span class="card-title">ML Budget Allocation</span><span class="ai-badge">100% Autonomous</span></div>
       <div class="alloc-grid" id="allocGrid"></div>
     </div>
 
-    <!-- Budget Management Card (with Reset button) -->
+    <!-- Budgets -->
     <div id="budgetBlock" style="display:none" class="card">
-      <div class="card-header">
-        <span class="card-title">Manage Budgets</span>
-        <button class="btn btn-primary" id="resetBudgetsBtn" style="font-size:0.8rem;">⟳ Reset to AI Budgets</button>
-      </div>
+      <div class="card-header"><span class="card-title">Manage Budgets</span><button class="btn btn-primary" id="resetBudgetsBtn" style="font-size:0.8rem;">⟳ Reset to AI Budgets</button></div>
       <div id="budgetList"></div>
     </div>
 
+    <!-- Advice -->
     <div id="adviceBlock" style="display:none" class="card">
       <div class="card-header"><span class="card-title">ML Insights</span></div>
       <div class="advice-list" id="adviceList"></div>
     </div>
 
+    <!-- Trend Chart -->
     <div class="card" id="chartBlock" style="display:none">
       <div class="card-header"><span class="card-title">Income vs Expense Trend</span></div>
       <div class="chart-wrapper"><canvas id="trendChart"></canvas></div>
     </div>
 
+    <!-- Forecast -->
     <div class="card" id="forecastBlock" style="display:none">
       <div class="card-header"><span class="card-title">ML Spending Forecast (4 weeks)</span></div>
       <div id="forecastBars"></div>
     </div>
   </div>
 
-  <!-- FUTURE SCREEN -->
+  <!-- ─── FUTURE ─── -->
   <div class="screen" id="screen-future">
     <div class="card">
       <div class="card-header"><span class="card-title">Pin Future Expense</span></div>
-      <div class="tx-form">
+      <div class="tx-form" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; align-items:end;">
         <div class="form-group" style="flex:2;min-width:200px;"><label class="form-label">Description</label><input class="form-input" id="futureDesc" placeholder="e.g. Rent"></div>
         <div class="form-group"><label class="form-label">Amount (₱)</label><input class="form-input" id="futureAmt" type="number" min="0" step="0.01"></div>
         <div class="form-group"><label class="form-label">Category</label><select class="form-select" id="futureCat"><option>Food & Dining</option><option>Transport</option><option>Groceries</option><option>Health</option><option>Entertainment</option><option>Mortgage</option><option>Debt repayment</option><option>Other</option></select></div>
@@ -2195,7 +1750,7 @@ body::before{
     </div>
   </div>
 
-  <!-- INSIGHTS SCREEN -->
+  <!-- ─── INSIGHTS ─── -->
   <div class="screen" id="screen-insights">
     <div class="card">
       <div class="card-header"><span class="card-title">Budget Longevity (3 Scenarios)</span></div>
@@ -2217,26 +1772,21 @@ body::before{
     </div>
   </div>
 
-  <!-- HISTORY SCREEN -->
+  <!-- ─── HISTORY ─── -->
   <div class="screen" id="screen-history">
     <div class="card">
-      <div class="card-header">
-        <span class="card-title">Transaction History</span>
-        <button class="btn btn-primary" id="toggleHistoryViewBtn" style="font-size:0.8rem;padding:8px 14px;">🙈 Hide History</button>
-      </div>
+      <div class="card-header"><span class="card-title">Transaction History</span><button class="btn btn-primary" id="toggleHistoryViewBtn" style="font-size:0.8rem;padding:8px 14px;">🙈 Hide History</button></div>
       <div id="historyContent">
         <div style="display:flex; gap:8px; margin-bottom:12px; align-items:center;">
           <input class="form-input" id="historySearch" placeholder="Search…" style="width:180px;padding:8px 12px;font-size:0.82rem;">
-          <label style="font-size:0.78rem; color:var(--muted2); display:flex; align-items:center; gap:6px;">
-            <input type="checkbox" id="showNeedWantBadges" checked> Show Need/Want badges
-          </label>
+          <label style="font-size:0.78rem; color:var(--muted2); display:flex; align-items:center; gap:6px;"><input type="checkbox" id="showNeedWantBadges" checked> Show Need/Want badges</label>
         </div>
         <div class="tx-list" id="historyList"></div>
       </div>
     </div>
   </div>
 
-  <!-- ADMIN SCREEN -->
+  <!-- ─── ADMIN ─── -->
   <div class="screen" id="screen-admin">
     <div class="card">
       <div class="card-header">👑 Admin Dashboard</div>
@@ -2247,21 +1797,20 @@ body::before{
       </div>
       <div id="adminUsersPanel">
         <input type="text" id="adminSearchUser" placeholder="Search user..." class="form-input" style="margin-bottom:12px;">
-        <table style="width:100%; border-collapse:collapse;"><thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Role</th><th>Created</th><th>Actions</th></tr></thead><tbody id="adminUserTable">
-  <!-- rows will be dynamically inserted here -->
-</tbody></table>
+        <table><thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Role</th><th>Created</th></tr></thead><tbody id="adminUserTable"></tbody></table>
       </div>
       <div id="adminTransactionsPanel" style="display:none;">
         <select id="adminUserFilter" class="form-select" style="margin-bottom:12px;"><option value="">All Users</option></select>
-        <table style="width:100%; border-collapse:collapse;"><thead><tr><th>Date</th><th>User</th><th>Category</th><th>Type</th><th>Amount</th><th>Need/Want</th></tr></thead><tbody id="adminTxTable"></tbody></table>
+        <table><thead><tr><th>Date</th><th>User</th><th>Category</th><th>Type</th><th>Amount</th><th>Need/Want</th></tr></thead><tbody id="adminTxTable"></tbody></table>
       </div>
     </div>
   </div>
 </main>
 
+<!-- ───── TOAST ───── -->
 <div id="toast"></div>
 
-<!-- Auth Overlay -->
+<!-- ───── AUTH ───── -->
 <div id="authOverlay" class="auth-overlay">
   <div class="auth-card">
     <div class="auth-logo">💚</div>
@@ -2278,36 +1827,7 @@ body::before{
   </div>
 </div>
 
-<!-- Sign‑out / Switch account modal -->
-<div id="signoutModal" class="modal-overlay" style="display:none;">
-  <div class="auth-card" style="width:320px; padding:28px;">
-    <div class="auth-logo" style="text-align:center; margin-bottom:12px;">💚</div>
-    <div style="text-align:center; margin-bottom:20px; font-size:1rem; font-weight:600;">Sign out or switch account?</div>
-    <button class="btn-auth" id="confirmLogoutBtn" style="margin-bottom:10px;">Sign Out</button>
-    <button class="btn-auth" id="switchAccountBtn" style="background:var(--bg3); color:var(--text); box-shadow:none; border:1px solid var(--border2); margin-bottom:10px;">Switch Account</button>
-    <button class="btn-auth" id="cancelSignoutBtn" style="background:transparent; color:var(--muted2); box-shadow:none; border:1px solid var(--border2);">Cancel</button>
-  </div>
-</div>
-
-<!-- Avatar Dropdown -->
-<div id="avatarDropdown" class="avatar-dropdown" style="display:none;">
-  <div class="dropdown-user-info">
-    <div id="dropdownUserName" style="font-weight:600;"></div>
-    <div id="dropdownUserEmail" style="font-size:0.8rem; color:var(--muted2);"></div>
-  </div>
-  <div class="dropdown-section">
-    <div class="dropdown-section-title">Change Avatar</div>
-    <input type="text" id="avatarUrlInput" class="form-input" placeholder="Paste image URL (https://…)" style="width:100%; margin-bottom:8px;">
-    <button class="btn btn-primary" id="saveAvatarBtn" style="width:100%;">Save Avatar</button>
-    <div class="preset-avatars" style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;">
-      <div class="preset-avatar" style="background:linear-gradient(135deg,#00E5A0,#009e6a);"></div>
-      <div class="preset-avatar" style="background:linear-gradient(135deg,#3B8BFF,#9B59F5);"></div>
-      <div class="preset-avatar" style="background:linear-gradient(135deg,#FF3B5C,#F5A623);"></div>
-      <div class="preset-avatar" style="background:linear-gradient(135deg,#F5A623,#FF3B5C);"></div>
-    </div>
-  </div>
-</div>
-
+<!-- ───── CHATBOT ───── -->
 <div class="chatbot" id="chatbot">
   <div class="chat-window">
     <div class="chat-header" id="chatHeader"><div class="ai-pulse"></div><div class="chat-header-title">SmartSpend ML <span class="ai-badge">Smart</span></div><button class="chat-toggle-btn" id="chatToggleBtn" title="Minimize">–</button></div>
@@ -2322,9 +1842,10 @@ let currentUser = null;
 let allTransactions = [];
 let currentMindset = 'Neutral';
 let aiPlan = null;
-let trendChart = null, catChartInst = null;
+let trendChart = null, catChartInst = null, incomeExpenseChart = null;
 let isLogin = true;
 let historyVisible = true;
+let customCategories = [];
 
 const CAT_ICONS = {
   'Food & Dining':'🍜','Transport':'🚗','Groceries':'🛒','Entertainment':'🎬',
@@ -2351,120 +1872,53 @@ function esc(s){ return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&
 
 function toast(msg, color=''){
   const t = document.getElementById('toast');
-  t.textContent = msg;
-  t.style.borderColor = color || 'var(--border)';
-  t.classList.add('show');
-  setTimeout(()=>t.classList.remove('show'), 2800);
+  t.textContent = msg; t.style.borderColor = color || 'var(--border)';
+  t.classList.add('show'); setTimeout(()=>t.classList.remove('show'), 2800);
 }
 
 async function api(url, opts={}){
-  const res = await fetch(url, {
-    ...opts,
-    credentials:'include',
-    headers:{'Content-Type':'application/json',...(opts.headers||{})}
-  });
-  if(!res.ok){
-    const err = await res.json().catch(()=>({error:'Request failed'}));
-    throw new Error(err.error || 'Request failed');
-  }
+  const res = await fetch(url, { ...opts, credentials:'include', headers:{'Content-Type':'application/json',...(opts.headers||{})} });
+  if(!res.ok){ const err = await res.json().catch(()=>({error:'Request failed'})); throw new Error(err.error || 'Request failed'); }
   return res.json();
 }
 
-// ── CUSTOM CATEGORIES ──
-let customCategories = [];
-
+// ── CHECKLIST ──
 function renderChecklist() {
   const needsCont = document.getElementById('needsChecklist');
   const wantsCont = document.getElementById('wantsChecklist');
-  needsCont.innerHTML = '';
-  wantsCont.innerHTML = '';
-
+  needsCont.innerHTML = ''; wantsCont.innerHTML = '';
   categoryConfig.forEach(cat => addCategoryCheckbox(cat));
   customCategories.forEach(cat => addCategoryCheckbox(cat));
-
-  document.querySelectorAll('.add-cat-btn').forEach(btn => {
-    btn.removeEventListener('click', handleAddCategory);
-    btn.addEventListener('click', handleAddCategory);
-  });
 }
 
 function addCategoryCheckbox(cat) {
   const target = (cat.type === 'need' || cat.type === 'savings') ?
-    document.getElementById('needsChecklist') :
-    document.getElementById('wantsChecklist');
-
+    document.getElementById('needsChecklist') : document.getElementById('wantsChecklist');
   const div = document.createElement('div');
-  div.style.display = 'flex';
-  div.style.alignItems = 'center';
-  div.style.gap = '6px';
-  div.style.marginBottom = '6px';
-
+  div.style.display = 'flex'; div.style.alignItems = 'center'; div.style.gap = '6px'; div.style.marginBottom = '6px';
   const checkbox = document.createElement('input');
-  checkbox.type = 'checkbox';
-  checkbox.className = 'cat-checkbox';
-  checkbox.dataset.cat = cat.name;
-  checkbox.checked = true;
-
+  checkbox.type = 'checkbox'; checkbox.className = 'cat-checkbox'; checkbox.dataset.cat = cat.name; checkbox.checked = true;
   const label = document.createElement('label');
-  label.style.fontSize = '0.82rem';
-  label.style.color = 'var(--text2)';
-  label.textContent = cat.name;
-
+  label.style.fontSize = '0.82rem'; label.style.color = 'var(--text2)'; label.textContent = cat.name;
   const percentSpan = document.createElement('span');
-  percentSpan.className = 'cat-percent';
-  percentSpan.id = 'pct-' + cat.name.replace(/\s/g,'');
-  percentSpan.textContent = '';
-
-  if (cat.custom) {
-    const removeBtn = document.createElement('button');
-    removeBtn.textContent = '✕';
-    removeBtn.style.background = 'transparent';
-    removeBtn.style.border = 'none';
-    removeBtn.style.color = 'var(--muted)';
-    removeBtn.style.cursor = 'pointer';
-    removeBtn.style.fontSize = '0.8rem';
-    removeBtn.style.padding = '0 4px';
-    removeBtn.onclick = () => {
-      customCategories = customCategories.filter(c => c.name !== cat.name);
-      renderChecklist();
-    };
-    div.appendChild(removeBtn);
-  }
-
-  div.appendChild(checkbox);
-  div.appendChild(label);
-  div.appendChild(percentSpan);
+  percentSpan.className = 'cat-percent'; percentSpan.id = 'pct-'+cat.name.replace(/\s/g,''); percentSpan.textContent = '';
+  div.appendChild(checkbox); div.appendChild(label); div.appendChild(percentSpan);
   target.appendChild(div);
 }
 
-function handleAddCategory(e) {
-  const type = e.currentTarget.dataset.type;
-  const name = prompt(`Enter a custom ${type} category name:`);
-  if (!name || name.trim() === '') return;
-  const trimmed = name.trim();
-  const exists = categoryConfig.concat(customCategories).some(c => c.name.toLowerCase() === trimmed.toLowerCase());
-  if (exists) {
-    toast('Category already exists');
-    return;
-  }
-  customCategories.push({ name: trimmed, type: type, defaultPct: 0, custom: true });
-  renderChecklist();
-}
-
-function updateChecklistPercentages(allocation) {
-  categoryConfig.forEach(cat => {
-    const pct = allocation[cat.name];
-    const span = document.getElementById('pct-' + cat.name.replace(/\s/g,''));
-    if (span) span.textContent = pct !== undefined ? `${pct.toFixed(1)}%` : '';
+document.querySelectorAll('.add-cat-btn').forEach(btn => {
+  btn.addEventListener('click', function() {
+    const name = prompt('Enter a custom category name:');
+    if (!name || name.trim() === '') return;
+    const trimmed = name.trim();
+    const exists = categoryConfig.concat(customCategories).some(c => c.name.toLowerCase() === trimmed.toLowerCase());
+    if (exists) { toast('Category already exists'); return; }
+    customCategories.push({ name: trimmed, type: 'want', defaultPct: 0 });
+    renderChecklist();
   });
-  customCategories.forEach(cat => {
-    const pct = allocation[cat.name];
-    const span = document.getElementById('pct-' + cat.name.replace(/\s/g,''));
-    if (span) span.textContent = pct !== undefined ? `${pct.toFixed(1)}%` : '';
-  });
-}
+});
 
-// ── TX MODE SWITCH ──
+// ── TX MODE ──
 function switchTxMode() {
   const mode = document.querySelector('input[name="txMode"]:checked').value;
   document.getElementById('incomeFields').style.display = mode === 'income' ? 'block' : 'none';
@@ -2472,56 +1926,24 @@ function switchTxMode() {
   document.getElementById('mindsetRow').style.display = mode === 'income' ? 'flex' : 'none';
 }
 
-// ── DATE & INCOME VALIDATION ──
-function updateAddIncomeButtonState() {
-  const dateInput = document.getElementById('incomeDate');
-  const amountInput = document.getElementById('incomeInput');
-  const addBtn = document.getElementById('addIncomeBtn');
-  const warning = document.getElementById('incomeDateWarning');
-
+// ── DATE VALIDATION ──
+document.getElementById('incomeDate').addEventListener('change', function() {
   const today = new Date().toISOString().slice(0,10);
-  const isPast = dateInput.value < today;
-  const amount = parseFloat(amountInput.value) || 0;
-
-  if (isPast && dateInput.value !== '') {
-    addBtn.disabled = true;
-    addBtn.style.opacity = '0.5';
-    addBtn.style.cursor = 'not-allowed';
-    warning.style.display = 'inline';
-  } else {
-    addBtn.disabled = false;
-    addBtn.style.opacity = '1';
-    addBtn.style.cursor = 'pointer';
-    warning.style.display = 'none';
-  }
-
-  if (amount <= 0) {
-    addBtn.disabled = true;
-  }
-}
-
-document.getElementById('incomeDate').addEventListener('change', updateAddIncomeButtonState);
-document.getElementById('incomeInput').addEventListener('input', function() {
-  updateAddIncomeButtonState();
-  // Auto‑suggest spending style based on income level
-  const income = parseFloat(this.value) || 0;
-  if (income <= 10000) {
-    setActiveMindset('Saver');
-  } else if (income <= 50000) {
-    setActiveMindset('Neutral');
-  } else {
-    setActiveMindset('Spender');
-  }
+  const warning = document.getElementById('incomeDateWarning');
+  warning.style.display = (this.value < today && this.value !== '') ? 'block' : 'none';
 });
-
+document.getElementById('incomeInput').addEventListener('input', function() {
+  const income = parseFloat(this.value) || 0;
+  if (income <= 10000) setActiveMindset('Saver');
+  else if (income <= 50000) setActiveMindset('Neutral');
+  else setActiveMindset('Spender');
+});
 function setActiveMindset(mindset) {
   document.querySelectorAll('.mindset-btn').forEach(b => b.classList.remove('active'));
   const btn = document.querySelector(`.mindset-btn[data-mindset="${mindset}"]`);
   if (btn) btn.classList.add('active');
   currentMindset = mindset;
 }
-
-// Restore user override when clicking mindset buttons
 document.querySelectorAll('.mindset-btn').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.mindset-btn').forEach(b => b.classList.remove('active'));
@@ -2547,76 +1969,40 @@ const authSub = document.getElementById('authSub');
 toggleAuth.addEventListener('click', () => {
   isLogin = !isLogin;
   if(isLogin) {
-    authTitle.textContent = 'Welcome back';
-    authSub.textContent = 'Sign in to your SmartSpend account';
-    authBtn.textContent = 'Sign In';
-    regName.style.display='none';
-    authConfirm.style.display='none';
-    termsRow.style.display='none';
-    toggleAuth.innerHTML = 'No account? <span>Register here</span>';
+    authTitle.textContent = 'Welcome back'; authSub.textContent = 'Sign in to your SmartSpend account';
+    authBtn.textContent = 'Sign In'; regName.style.display='none'; authConfirm.style.display='none';
+    termsRow.style.display='none'; toggleAuth.innerHTML = 'No account? <span>Register here</span>';
   } else {
-    authTitle.textContent = 'Create account';
-    authSub.textContent = 'Start your ML‑powered financial journey';
-    authBtn.textContent = 'Register';
-    regName.style.display='block';
-    authConfirm.style.display='block';
-    termsRow.style.display='flex';
-    toggleAuth.innerHTML = 'Already registered? <span>Sign in</span>';
+    authTitle.textContent = 'Create account'; authSub.textContent = 'Start your ML‑powered financial journey';
+    authBtn.textContent = 'Register'; regName.style.display='block'; authConfirm.style.display='block';
+    termsRow.style.display='flex'; toggleAuth.innerHTML = 'Already registered? <span>Sign in</span>';
   }
   authMsg.textContent = '';
 });
 
 authBtn.addEventListener('click', async () => {
   authMsg.textContent = '';
-  if(!isLogin && authPass.value !== authConfirm.value) {
-    authMsg.textContent = 'Passwords do not match';
-    return;
-  }
-  if(!isLogin && !termsCheck.checked) {
-    authMsg.textContent = 'You must accept the terms';
-    return;
-  }
+  if(!isLogin && authPass.value !== authConfirm.value) { authMsg.textContent = 'Passwords do not match'; return; }
+  if(!isLogin && !termsCheck.checked) { authMsg.textContent = 'You must accept the terms'; return; }
   try {
     const endpoint = isLogin ? '/api/login' : '/api/register';
     const body = isLogin ? { email: authEmail.value, password: authPass.value } :
       { name: regName.value, email: authEmail.value, password: authPass.value };
     const data = await api(endpoint, { method:'POST', body: JSON.stringify(body) });
-    currentUser = data;
-    authOverlay.style.display = 'none';
-    initApp();
-  } catch(e) {
-    authMsg.textContent = e.message;
-  }
+    currentUser = data; authOverlay.style.display = 'none'; initApp();
+  } catch(e) { authMsg.textContent = e.message; }
 });
 
-// ── SIGN OUT / SWITCH ACCOUNT ──
-document.getElementById('signoutBtn').addEventListener('click', () => {
-  document.getElementById('signoutModal').style.display = 'flex';
-});
-
-document.getElementById('confirmLogoutBtn').addEventListener('click', async () => {
+// ── SIGN OUT ──
+document.getElementById('signoutBtn').addEventListener('click', async () => {
   await api('/api/logout', { method:'POST' });
-  currentUser = null;
-  document.getElementById('signoutModal').style.display = 'none';
-  authOverlay.style.display = 'flex';
+  currentUser = null; authOverlay.style.display = 'flex';
   document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
   document.getElementById('screen-dashboard').classList.add('active');
   toast('Signed out');
 });
 
-document.getElementById('switchAccountBtn').addEventListener('click', async () => {
-  await api('/api/logout', { method:'POST' });
-  currentUser = null;
-  document.getElementById('signoutModal').style.display = 'none';
-  authOverlay.style.display = 'flex';
-  toast('Switching account – please sign in');
-});
-
-document.getElementById('cancelSignoutBtn').addEventListener('click', () => {
-  document.getElementById('signoutModal').style.display = 'none';
-});
-
-// ── NAVIGATION ──
+// ── NAV ──
 document.querySelectorAll('.nav-item[data-nav]').forEach(btn => {
   btn.addEventListener('click', ()=>{
     const nav = btn.dataset.nav;
@@ -2633,78 +2019,12 @@ document.querySelectorAll('.nav-item[data-nav]').forEach(btn => {
   });
 });
 
-// ── INIT ──
-async function initApp() {
-  if(!currentUser) return;
-  const avatar = document.getElementById('userAvatar');
-  const initialSpan = avatar.querySelector('.avatar-initial');
-  const imgEl = avatar.querySelector('img');
-  if (currentUser.avatar_url) {
-    imgEl.src = currentUser.avatar_url;
-    imgEl.style.display = 'block';
-    initialSpan.style.display = 'none';
-  } else {
-    imgEl.style.display = 'none';
-    initialSpan.style.display = 'block';
-    initialSpan.textContent = currentUser.name?.charAt(0)?.toUpperCase() || '?';
-  }
-  if(currentUser.role === 'admin') document.getElementById('adminNavBtn').style.display = 'flex';
-  else document.getElementById('adminNavBtn').style.display = 'none';
-  document.getElementById('incomeDate').value = new Date().toISOString().slice(0,10);
-  renderChecklist();
-  loadDashboard();
-}
-
-// ── AVATAR DROPDOWN ──
-(function(){
-  const avatar = document.getElementById('userAvatar');
-  const dropdown = document.getElementById('avatarDropdown');
-  let visible = false;
-
-  avatar.addEventListener('click', (e) => {
-    e.stopPropagation();
-    visible = !visible;
-    dropdown.style.display = visible ? 'block' : 'none';
-    if (visible && currentUser) {
-      document.getElementById('dropdownUserName').textContent = currentUser.name;
-      document.getElementById('dropdownUserEmail').textContent = currentUser.email;
-      document.getElementById('avatarUrlInput').value = currentUser.avatar_url || '';
-    }
-  });
-  document.addEventListener('click', () => {
-    visible = false;
-    dropdown.style.display = 'none';
-  });
-})();
-
-document.getElementById('saveAvatarBtn').addEventListener('click', async () => {
-  const url = document.getElementById('avatarUrlInput').value.trim();
-  try {
-    const res = await api('/api/me/avatar', { method:'PUT', body: JSON.stringify({ avatar_url: url }) });
-    currentUser.avatar_url = res.avatar_url;
-    const initial = document.querySelector('.avatar-initial');
-    const img = document.querySelector('#userAvatar img');
-    if (res.avatar_url) {
-      img.src = res.avatar_url;
-      img.style.display = 'block';
-      initial.style.display = 'none';
-    } else {
-      img.style.display = 'none';
-      initial.style.display = 'block';
-      initial.textContent = currentUser.name?.charAt(0)?.toUpperCase() || '?';
-    }
-    toast('Avatar updated');
-  } catch(e) { toast(e.message); }
-  document.getElementById('avatarDropdown').style.display = 'none';
-});
-
-// ── TOOL PICKER TOGGLES ──
+// ── TOOL PICKER ──
 document.getElementById('incomeTool').addEventListener('change', function(){
   const val = this.value;
   document.getElementById('manualBlock').style.display = (val === 'manual') ? 'block' : 'none';
   document.getElementById('incomeImageUpload').style.display = (val === 'auto') ? 'block' : 'none';
   document.getElementById('profileBlock').style.display = (val === 'profile') ? 'block' : 'none';
-
   if (val === 'profile' && currentUser) {
     document.getElementById('profileName').value = currentUser.name || '';
     document.getElementById('profileEmail').value = currentUser.email || '';
@@ -2721,37 +2041,27 @@ document.getElementById('incomeTool').addEventListener('change', function(){
   }
 });
 
-// ── AUTO RUN PLAN AFTER INCOME ──
-async function autoRunPlanAndUpdateDashboard() {
-  if (!currentUser) return;
-  try {
-    const summary = await api(`/api/summary/${currentUser.id}`);
-    const totalIncome = summary.income || 0;
-    document.getElementById('incomeInput').value = totalIncome;
-    if (totalIncome <= 0) { loadDashboard(); return; }
-    const selectedCategories = [];
-    document.querySelectorAll('.cat-checkbox:checked').forEach(chk => selectedCategories.push(chk.dataset.cat));
-    if (selectedCategories.length === 0) {
-      ['Food & Dining', 'Transport', 'Groceries', 'Health', 'Entertainment', 'Debt repayment', 'Savings']
-        .forEach(c => selectedCategories.push(c));
-    }
-    const result = await api('/api/ai/full_setup', {
-      method: 'POST',
-      body: JSON.stringify({ monthly_income: totalIncome, mindset: currentMindset, selected_categories })
-    });
-    aiPlan = result;
-    if (result.allocation) {
-      addFeedEvent('✅', `AI categorised ${Object.keys(result.allocation).length} categories into needs & wants`);
-      addFeedEvent('💰', `Savings target set: ${fmt(result.savings_plan.monthly)}/month`);
-      addFeedEvent('🧠', `Financial summary: "${result.financial_summary.substring(0,60)}…"`);
-      addFeedEvent('📋', `${result.advice.length} personalised insights ready`);
-      renderAIPlan(result);
-    }
-  } catch(e) { console.error('Auto plan error:', e); }
+// ── INIT ──
+async function initApp() {
+  if(!currentUser) return;
+  const avatar = document.getElementById('userAvatar');
+  const initialSpan = avatar.querySelector('.avatar-initial');
+  const imgEl = avatar.querySelector('img');
+  if (currentUser.avatar_url) {
+    imgEl.src = currentUser.avatar_url; imgEl.style.display = 'block';
+    initialSpan.style.display = 'none';
+  } else {
+    imgEl.style.display = 'none'; initialSpan.style.display = 'block';
+    initialSpan.textContent = currentUser.name?.charAt(0)?.toUpperCase() || '?';
+  }
+  if(currentUser.role === 'admin') document.getElementById('adminNavBtn').style.display = 'flex';
+  else document.getElementById('adminNavBtn').style.display = 'none';
+  document.getElementById('incomeDate').value = new Date().toISOString().slice(0,10);
+  renderChecklist();
   loadDashboard();
 }
 
-// ── ADD INCOME BUTTON ──
+// ── ADD INCOME ──
 document.getElementById('addIncomeBtn').addEventListener('click', async ()=>{
   const amount = parseFloat(document.getElementById('incomeInput').value);
   if(!amount || amount < 1) { toast('Enter a valid amount (min 1)'); return; }
@@ -2767,7 +2077,7 @@ document.getElementById('addIncomeBtn').addEventListener('click', async ()=>{
   } catch(e) { toast(e.message); }
 });
 
-// ── MANUAL EXPENSE LOGIC ──
+// ── ADD EXPENSE ──
 document.getElementById('addExpenseBtn').addEventListener('click', async ()=>{
   const amount = parseFloat(document.getElementById('expenseAmount').value);
   if(!amount || amount < 1) { toast('Amount must be at least 1'); return; }
@@ -2796,12 +2106,12 @@ async function loadDashboard() {
     renderStats(summary, predict.score, longevity);
     renderForecast(predict.predictions?.weekly);
     renderTrendChart(summary.monthly);
+    renderIncomeExpenseChart(summary.income, summary.expense);
+    document.getElementById('incomeExpenseChartCard').style.display = 'block';
     document.getElementById('chartBlock').style.display = Object.keys(summary.monthly).length ? 'block' : 'none';
     document.getElementById('forecastBlock').style.display = Object.keys(predict.predictions?.weekly||{}).length ? 'block' : 'none';
   } catch(e) { toast(e.message); }
-  if (currentUser.monthly_budget_limit > 0 && !aiPlan) {
-    autoRunPlanAndUpdateDashboard();
-  }
+  if (currentUser.monthly_budget_limit > 0 && !aiPlan) { autoRunPlanAndUpdateDashboard(); }
 }
 
 function renderStats(summary, score, longevity) {
@@ -2811,6 +2121,35 @@ function renderStats(summary, score, longevity) {
   document.getElementById('sScore').textContent = score ?? '—';
   document.getElementById('scoreLabel').textContent = score ? 'Health Score' : 'awaiting data';
   document.getElementById('topScore').textContent = score ?? '—';
+}
+
+function renderIncomeExpenseChart(income, expense) {
+  const ctx = document.getElementById('incomeExpenseChart');
+  if(!ctx) return;
+  if(incomeExpenseChart) incomeExpenseChart.destroy();
+  incomeExpenseChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: ['Income', 'Expenses'],
+      datasets: [{
+        label: 'Amount (₱)',
+        data: [income || 0, expense || 0],
+        backgroundColor: ['rgba(0,229,160,0.7)', 'rgba(255,59,92,0.7)'],
+        borderColor: ['#00E5A0', '#FF3B5C'],
+        borderWidth: 1,
+        borderRadius: 8,
+        barPercentage: 0.6
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: true,
+      plugins: { legend: { labels: { color: '#B0C8E0' } } },
+      scales: {
+        y: { beginAtZero: true, grid: { color: 'rgba(107,136,168,0.2)' }, ticks: { color: '#B0C8E0', callback: (val) => '₱'+val.toLocaleString() } },
+        x: { ticks: { color: '#B0C8E0' } }
+      }
+    }
+  });
 }
 
 function addFeedEvent(icon, text) {
@@ -2824,9 +2163,38 @@ function addFeedEvent(icon, text) {
   feed.prepend(div);
 }
 
-// ── AI PLAN ──
-document.getElementById('analyzeBtn').addEventListener('click', runAIPlan);
-async function runAIPlan() {
+// ── AUTO PLAN ──
+async function autoRunPlanAndUpdateDashboard() {
+  if (!currentUser) return;
+  try {
+    const summary = await api(`/api/summary/${currentUser.id}`);
+    const totalIncome = summary.income || 0;
+    document.getElementById('incomeInput').value = totalIncome;
+    if (totalIncome <= 0) { loadDashboard(); return; }
+    const selectedCategories = [];
+    document.querySelectorAll('.cat-checkbox:checked').forEach(chk => selectedCategories.push(chk.dataset.cat));
+    if (selectedCategories.length === 0) {
+      ['Food & Dining','Transport','Groceries','Health','Entertainment','Debt repayment','Savings']
+        .forEach(c => selectedCategories.push(c));
+    }
+    const result = await api('/api/ai/full_setup', {
+      method: 'POST',
+      body: JSON.stringify({ monthly_income: totalIncome, mindset: currentMindset, selected_categories })
+    });
+    aiPlan = result;
+    if (result.allocation) {
+      addFeedEvent('✅', `AI categorised ${Object.keys(result.allocation).length} categories`);
+      addFeedEvent('💰', `Savings target: ${fmt(result.savings_plan.monthly)}/month`);
+      addFeedEvent('🧠', `Summary: "${result.financial_summary.substring(0,60)}…"`);
+      addFeedEvent('📋', `${result.advice.length} insights ready`);
+      renderAIPlan(result);
+    }
+  } catch(e) { console.error('Auto plan error:', e); }
+  loadDashboard();
+}
+
+// ── ML PLAN ──
+document.getElementById('analyzeBtn').addEventListener('click', async () => {
   const income = parseFloat(document.getElementById('incomeInput').value);
   if(!income || income <= 0){ toast('Enter a valid monthly income first'); return; }
   const selectedCategories = [];
@@ -2840,16 +2208,14 @@ async function runAIPlan() {
   try {
     const result = await api('/api/ai/full_setup', {
       method:'POST',
-      body: JSON.stringify({ monthly_income: income, mindset: currentMindset, selected_categories: selectedCategories })
+      body: JSON.stringify({ monthly_income: income, mindset: currentMindset, selected_categories })
     });
-    if (!result.allocation) {
-      throw new Error('No allocation returned from ML');
-    }
+    if (!result.allocation) throw new Error('No allocation returned from ML');
     aiPlan = result;
-    addFeedEvent('✅',`AI categorised ${Object.keys(result.allocation).length} categories into needs & wants`);
-    addFeedEvent('💰',`Savings target set: ${fmt(result.savings_plan.monthly)}/month`);
-    addFeedEvent('🧠',`Financial summary: "${result.financial_summary.substring(0,60)}…"`);
-    addFeedEvent('📋',`${result.advice.length} personalised insights ready`);
+    addFeedEvent('✅',`AI categorised ${Object.keys(result.allocation).length} categories`);
+    addFeedEvent('💰',`Savings target: ${fmt(result.savings_plan.monthly)}/month`);
+    addFeedEvent('🧠',`Summary: "${result.financial_summary.substring(0,60)}…"`);
+    addFeedEvent('📋',`${result.advice.length} insights ready`);
     renderAIPlan(result);
     toast('ML plan complete! 🎉', 'var(--green)');
   } catch(e){
@@ -2859,7 +2225,7 @@ async function runAIPlan() {
   }
   btn.disabled = false;
   btnContent.innerHTML = '🔄 Re‑Analyze';
-}
+});
 
 function renderAIPlan(plan) {
   document.getElementById('financialSummaryText').textContent = plan.financial_summary;
@@ -2867,7 +2233,6 @@ function renderAIPlan(plan) {
   document.getElementById('saveWeekly').textContent = fmt(plan.savings_plan.weekly);
   document.getElementById('saveMonthly').textContent = fmt(plan.savings_plan.monthly);
   document.getElementById('savingsTip').textContent = '💡 ' + (plan.savings_plan.tip || '');
-
   const grid = document.getElementById('allocGrid');
   const needsSet = new Set(['Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage']);
   const savingsSet = new Set(['Savings']);
@@ -2875,76 +2240,16 @@ function renderAIPlan(plan) {
     const type = savingsSet.has(cat) ? 'savings' : (needsSet.has(cat) ? 'need' : 'want');
     const amt = plan.allocation_amounts?.[cat] || (plan.monthly_income * pct / 100);
     return `<div class="alloc-item">
-      <div class="alloc-cat">${esc(cat)}</div>
-      <div class="alloc-pct">${pct.toFixed(0)}<span style="font-size:1rem;color:var(--muted)">%</span></div>
-      <div class="alloc-amount">${fmt(amt)}</div>
-      <div class="alloc-type ${type}">${type.toUpperCase()}</div>
-      <div class="alloc-item-bar ${type}" style="width:${Math.min(pct,100)}%"></div>
-    </div>`;
+      <div class="alloc-cat">${esc(cat)}</div><div class="alloc-pct">${pct.toFixed(0)}<span style="font-size:1rem;color:var(--muted)">%</span></div>
+      <div class="alloc-amount">${fmt(amt)}</div><div class="alloc-type ${type}">${type.toUpperCase()}</div>
+      <div class="alloc-item-bar ${type}" style="width:${Math.min(pct,100)}%"></div></div>`;
   }).join('');
-
   const adviceIcons = { info:'ℹ️', warning:'⚠️', success:'✅' };
   document.getElementById('adviceList').innerHTML = plan.advice.map(a=>
-    `<div class="advice-card ${esc(a.type)}">
-      <span class="advice-icon">${adviceIcons[a.type]||'💡'}</span>
-      <div><div class="advice-title">${esc(a.title)}</div><div class="advice-body">${esc(a.body)}</div></div>
-    </div>`).join('');
-
-  // ── REBUILD CHECKLIST WITH AI‑PRIORITISED NEEDS/WANTS ──
-  const categories = Object.keys(plan.allocation);
-  const needs = [];
-  const wants = [];
-  const savings = [];
-  categories.forEach(cat => {
-    if (savingsSet.has(cat)) savings.push(cat);
-    else if (needsSet.has(cat)) needs.push(cat);
-    else wants.push(cat);
-  });
-
-  const needsCont = document.getElementById('needsChecklist');
-  const wantsCont = document.getElementById('wantsChecklist');
-  needsCont.innerHTML = '<div class="checklist-section-title">NEEDS (High Priority)</div>';
-  wantsCont.innerHTML = '<div class="checklist-section-title">WANTS (Lower Priority)</div>';
-
-  let idx = 1;
-  [...needs, ...savings].forEach(cat => {
-    const pct = plan.allocation[cat] || 0;
-    const item = document.createElement('div');
-    item.className = 'checklist-item';
-    item.style.display = 'flex';
-    item.style.alignItems = 'center';
-    item.style.justifyContent = 'space-between';
-    item.innerHTML = `
-      <div style="display:flex; gap:8px; align-items:center;">
-        <span style="color:var(--green); font-weight:700;">${idx++}</span>
-        <label style="font-size:0.82rem; color:var(--text2);">${esc(cat)}</label>
-      </div>
-      <span style="font-family:var(--font-mono); font-size:0.85rem; color:var(--green);">${pct.toFixed(1)}%</span>
-    `;
-    needsCont.appendChild(item);
-  });
-
-  wants.forEach(cat => {
-    const pct = plan.allocation[cat] || 0;
-    const item = document.createElement('div');
-    item.className = 'checklist-item';
-    item.style.display = 'flex';
-    item.style.alignItems = 'center';
-    item.style.justifyContent = 'space-between';
-    item.innerHTML = `
-      <div style="display:flex; gap:8px; align-items:center;">
-        <span style="color:var(--amber); font-weight:700;">${idx++}</span>
-        <label style="font-size:0.82rem; color:var(--text2);">${esc(cat)}</label>
-      </div>
-      <span style="font-family:var(--font-mono); font-size:0.85rem; color:var(--amber);">${pct.toFixed(1)}%</span>
-    `;
-    wantsCont.appendChild(item);
-  });
-
-  const blocks = ['financialSummaryBlock', 'allocationBlock', 'adviceBlock'];
-  blocks.forEach(id => {
-    document.getElementById(id).style.display = 'block';
-  });
+    `<div class="advice-card ${esc(a.type)}"><span class="advice-icon">${adviceIcons[a.type]||'💡'}</span>
+      <div><div class="advice-title">${esc(a.title)}</div><div class="advice-body">${esc(a.body)}</div></div></div>`).join('');
+  const blocks = ['financialSummaryBlock','allocationBlock','adviceBlock'];
+  blocks.forEach(id => { document.getElementById(id).style.display = 'block'; });
   const toggleBtn = document.getElementById('showPlanToggle');
   const togglePlanBtn = document.getElementById('togglePlanBtn');
   toggleBtn.style.display = 'block';
@@ -2952,123 +2257,91 @@ function renderAIPlan(plan) {
   togglePlanBtn.textContent = '🔽 Hide Plan Details';
   togglePlanBtn.onclick = () => {
     detailsVisible = !detailsVisible;
-    blocks.forEach(id => {
-      document.getElementById(id).style.display = detailsVisible ? 'block' : 'none';
-    });
+    blocks.forEach(id => { document.getElementById(id).style.display = detailsVisible ? 'block' : 'none'; });
     togglePlanBtn.textContent = detailsVisible ? '🔽 Hide Plan Details' : '📊 Show Plan Details';
   };
-
   loadBudgets();
 }
 
-// ── BUDGET MANAGEMENT ──
+// ── BUDGETS ──
 async function loadBudgets() {
-    if (!currentUser) return;
-    try {
-        const budgets = await api(`/api/budgets/${currentUser.id}`);
-        renderBudgetList(budgets);
-    } catch(e) { toast(e.message); }
+  if (!currentUser) return;
+  try { const budgets = await api(`/api/budgets/${currentUser.id}`); renderBudgetList(budgets); } catch(e) { toast(e.message); }
 }
-
 function renderBudgetList(budgets) {
-    const container = document.getElementById('budgetList');
-    if (!budgets.length) {
-        container.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📊</div><div class="empty-state-text">No budgets set yet. Run AI Plan first.</div></div>';
-        return;
-    }
-    container.innerHTML = budgets.map(b => {
-        const safeId = b.category.replace(/[^a-zA-Z0-9]/g, '_');
-        return `
-          <div class="budget-item" id="budget-${safeId}">
-            <div class="budget-cat">${esc(b.category)}</div>
-            <input class="budget-input" id="budget-input-${safeId}" type="number" step="0.01" value="${b.limit.toFixed(2)}">
-            <button class="budget-save-btn" onclick="saveBudget('${b.category.replace(/'/g, "\\'")}', '${safeId}')">Save</button>
-            <span class="budget-amount">${fmt(b.limit)}</span>
-          </div>`;
-    }).join('');
-    document.getElementById('budgetBlock').style.display = 'block';
+  const container = document.getElementById('budgetList');
+  if (!budgets.length) { container.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📊</div><div class="empty-state-text">No budgets set yet. Run AI Plan first.</div></div>'; return; }
+  container.innerHTML = budgets.map(b => {
+    const safeId = b.category.replace(/[^a-zA-Z0-9]/g, '_');
+    return `<div class="budget-item" id="budget-${safeId}">
+      <div class="budget-cat">${esc(b.category)}</div>
+      <input class="budget-input" id="budget-input-${safeId}" type="number" step="0.01" value="${b.limit.toFixed(2)}">
+      <button class="budget-save-btn" onclick="saveBudget('${b.category.replace(/'/g, "\\'")}', '${safeId}')">Save</button>
+      <span class="budget-amount">${fmt(b.limit)}</span>
+    </div>`;
+  }).join('');
+  document.getElementById('budgetBlock').style.display = 'block';
 }
-
 async function saveBudget(category, safeId) {
-    const input = document.getElementById('budget-input-' + safeId);
-    const newLimit = parseFloat(input.value);
-    if (isNaN(newLimit)) return;
-    try {
-        await api(`/api/budgets/${currentUser.id}/${encodeURIComponent(category)}`, {
-            method: 'PUT',
-            body: JSON.stringify({ limit: newLimit })
-        });
-        toast('Budget updated');
-        loadBudgets();
-    } catch(e) { toast(e.message); }
+  const input = document.getElementById('budget-input-'+safeId);
+  const newLimit = parseFloat(input.value);
+  if (isNaN(newLimit)) return;
+  try { await api(`/api/budgets/${currentUser.id}/${encodeURIComponent(category)}`, { method:'PUT', body: JSON.stringify({ limit: newLimit }) }); toast('Budget updated'); loadBudgets(); } catch(e) { toast(e.message); }
 }
-
-document.getElementById('resetBudgetsBtn')?.addEventListener('click', async () => {
-    if (!currentUser) return;
-    try {
-        await api(`/api/budgets/reset_to_ai/${currentUser.id}`, { method: 'POST' });
-        toast('Budgets reset to AI recommendations');
-        loadBudgets();
-    } catch(e) { toast(e.message); }
+document.getElementById('resetBudgetsBtn').addEventListener('click', async () => {
+  if (!currentUser) return;
+  try { await api(`/api/budgets/reset_to_ai/${currentUser.id}`, { method:'POST' }); toast('Budgets reset to AI recommendations'); loadBudgets(); } catch(e) { toast(e.message); }
 });
 
+// ── FORECAST ──
 function renderForecast(weekly) {
   const container = document.getElementById('forecastBars');
   if(!weekly) { container.innerHTML = ''; return; }
   const maxVal = Math.max(...Object.values(weekly), 1);
   container.innerHTML = Object.entries(weekly).map(([week, val])=>{
     const pct = (val / maxVal * 100).toFixed(0);
-    return `<div class="forecast-bar-row">
-              <span class="forecast-week-label">${week}</span>
-              <div class="forecast-track"><div class="forecast-fill" style="width:${pct}%"></div></div>
-              <span class="forecast-val">${fmt(val)}</span>
-            </div>`;
+    return `<div class="forecast-bar-row"><span class="forecast-week-label">${week}</span><div class="forecast-track"><div class="forecast-fill" style="width:${pct}%"></div></div><span class="forecast-val">${fmt(val)}</span></div>`;
   }).join('');
 }
 
+// ── TREND CHART ──
 function renderTrendChart(monthly) {
   const ctx = document.getElementById('trendChart');
-  if(!ctx) return;
+  if(!ctx || !monthly) return;
   if(trendChart) trendChart.destroy();
   const labels = Object.keys(monthly);
   const incomeData = labels.map(m=>monthly[m].income);
   const expenseData = labels.map(m=>monthly[m].expense);
   trendChart = new Chart(ctx, {
     type: 'line',
-    data: {
-      labels,
-      datasets: [
-        { label: 'Income', data: incomeData, borderColor: '#00E5A0', backgroundColor: 'rgba(0,229,160,0.1)', tension:0.3 },
-        { label: 'Expense', data: expenseData, borderColor: '#FF3B5C', backgroundColor: 'rgba(255,59,92,0.1)', tension:0.3 }
-      ]
-    },
+    data: { labels, datasets: [
+      { label: 'Income', data: incomeData, borderColor: '#00E5A0', backgroundColor: 'rgba(0,229,160,0.1)', tension:0.3 },
+      { label: 'Expense', data: expenseData, borderColor: '#FF3B5C', backgroundColor: 'rgba(255,59,92,0.1)', tension:0.3 }
+    ] },
     options: { responsive:true, maintainAspectRatio:false, plugins:{legend:{labels:{color:'#B0C8E0'}}} }
   });
 }
 
-// ── OCR IMAGE UPLOAD ──
+// ── OCR ──
 document.getElementById('incomeImage').addEventListener('change', async function(){
   const file = this.files[0];
   if(!file) return;
+  const formData = new FormData();
+  formData.append('image', file);
   try {
-    const formData = new FormData();
-    formData.append('image', file);
     const resp = await fetch('/api/ocr_income', { method:'POST', body: formData, credentials:'include' });
     const data = await resp.json();
-    if(data.transactions){
+    if(data.transactions) {
       toast(`Extracted ${data.count} transactions`);
       loadDashboard();
     }
   } catch(e) { toast('OCR failed: '+e.message); }
 });
 
-// ── FUTURE EXPENSES ──
+// ── FUTURE ──
 async function loadFutureExpenses() {
   if(!currentUser) return;
-  try {
-    const exps = await api('/api/future_expenses');
-    renderFutureList(exps);
-  } catch(e) { toast(e.message); }
+  try { const exps = await api('/api/future_expenses'); renderFutureList(exps); } catch(e) { toast(e.message); }
 }
 function renderFutureList(exps) {
   const list = document.getElementById('futureList');
@@ -3087,26 +2360,11 @@ document.getElementById('pinFutureBtn').addEventListener('click', async ()=>{
   const cycle = document.getElementById('futureCycle').value;
   const date = document.getElementById('futureDate').value;
   if(!desc || !amount || !date) { toast('Please fill all fields'); return; }
-  try {
-    await api('/api/future_expenses', { method:'POST', body: JSON.stringify({ description:desc, amount, category, cycle, date }) });
-    toast('Pinned');
-    document.getElementById('futureDesc').value=''; document.getElementById('futureAmt').value='';
-    loadFutureExpenses();
-  } catch(e) { toast(e.message); }
+  try { await api('/api/future_expenses', { method:'POST', body: JSON.stringify({ description:desc, amount, category, cycle, date }) }); toast('Pinned'); document.getElementById('futureDesc').value=''; document.getElementById('futureAmt').value=''; loadFutureExpenses(); } catch(e) { toast(e.message); }
 });
-async function deleteFuture(id) {
-  if(!confirm('Remove this future expense?')) return;
-  try {
-    await api(`/api/future_expenses/${id}`, { method:'DELETE' });
-    toast('Removed'); loadFutureExpenses();
-  } catch(e) { toast(e.message); }
-}
+async function deleteFuture(id) { if(!confirm('Remove this future expense?')) return; try { await api(`/api/future_expenses/${id}`, { method:'DELETE' }); toast('Removed'); loadFutureExpenses(); } catch(e) { toast(e.message); } }
 document.getElementById('applyFutureBtn').addEventListener('click', async ()=>{
-  try {
-    const result = await api('/api/apply_future_expenses', { method:'POST' });
-    toast(`Processed ${result.count} pending expenses`);
-    loadFutureExpenses();
-  } catch(e) { toast(e.message); }
+  try { const result = await api('/api/apply_future_expenses', { method:'POST' }); toast(`Processed ${result.count} pending expenses`); loadFutureExpenses(); } catch(e) { toast(e.message); }
 });
 
 // ── INSIGHTS ──
@@ -3114,50 +2372,33 @@ async function loadInsights() {
   if(!currentUser) return;
   try {
     const longevity = await api(`/api/longevity/${currentUser.id}`);
-    const bal = longevity.balance;
-    const avgDaily = longevity.avg_daily_spend;
-
+    const bal = longevity.balance; const avgDaily = longevity.avg_daily_spend;
     const scenarios = [
-      { label: '🏦 Saver',   daily: avgDaily * 0.8,   cssClass: 'saver-fill' },
-      { label: '⚖️ Balanced', daily: avgDaily,         cssClass: 'neutral-fill' },
-      { label: '🛍️ Spender', daily: avgDaily * 1.2,   cssClass: 'spender-fill' }
+      { label: '🏦 Saver', daily: avgDaily * 0.8, cssClass: 'saver-fill' },
+      { label: '⚖️ Balanced', daily: avgDaily, cssClass: 'neutral-fill' },
+      { label: '🛍️ Spender', daily: avgDaily * 1.2, cssClass: 'spender-fill' }
     ];
-
     const maxDays = Math.max(...scenarios.map(s => bal / s.daily), 1);
-    let barsHTML = '';
-    scenarios.forEach(s => {
+    document.getElementById('scenarioBars').innerHTML = scenarios.map(s => {
       const days = Math.floor(bal / s.daily);
       const pct = Math.min((days / maxDays) * 100, 100);
-      barsHTML += `
-        <div class="scenario-bar-row">
-          <span class="scenario-label">${s.label}</span>
-          <div class="scenario-track"><div class="scenario-fill ${s.cssClass}" style="width:${pct}%"></div></div>
-          <span class="scenario-val">${days} days</span>
-        </div>`;
-    });
-    document.getElementById('scenarioBars').innerHTML = barsHTML;
-
+      return `<div class="scenario-bar-row"><span class="scenario-label">${s.label}</span><div class="scenario-track"><div class="scenario-fill ${s.cssClass}" style="width:${pct}%"></div></div><span class="scenario-val">${days} days</span></div>`;
+    }).join('');
     document.getElementById('longevityDays').textContent = scenarios[1].daily > 0 ? Math.floor(bal / scenarios[1].daily) : '—';
     document.getElementById('longevityBalance').textContent = fmt(bal);
     document.getElementById('longevityDaily').textContent = fmt(avgDaily);
-
     const predict = await api(`/api/predict/${currentUser.id}`);
     renderForecastInsights(predict.predictions?.weekly);
     renderCategoryChart(predict.predictions?.categories);
   } catch(e) { toast(e.message); }
 }
-
 function renderForecastInsights(weekly) {
   const container = document.getElementById('forecastBarsInsights');
   if(!weekly) { container.innerHTML = ''; return; }
   const maxVal = Math.max(...Object.values(weekly), 1);
   container.innerHTML = Object.entries(weekly).map(([week, val])=>{
     const pct = (val / maxVal * 100).toFixed(0);
-    return `<div class="forecast-bar-row">
-              <span class="forecast-week-label">${week}</span>
-              <div class="forecast-track"><div class="forecast-fill" style="width:${pct}%"></div></div>
-              <span class="forecast-val">${fmt(val)}</span>
-            </div>`;
+    return `<div class="forecast-bar-row"><span class="forecast-week-label">${week}</span><div class="forecast-track"><div class="forecast-fill" style="width:${pct}%"></div></div><span class="forecast-val">${fmt(val)}</span></div>`;
   }).join('');
 }
 function renderCategoryChart(categories) {
@@ -3168,10 +2409,7 @@ function renderCategoryChart(categories) {
   const data = Object.values(categories||{});
   catChartInst = new Chart(ctx, {
     type: 'doughnut',
-    data: {
-      labels,
-      datasets: [{ data, backgroundColor: ['#00E5A0','#3B8BFF','#F5A623','#FF3B5C','#9B59F5','#00b87a','#FF8C00'] }]
-    },
+    data: { labels, datasets: [{ data, backgroundColor: ['#00E5A0','#3B8BFF','#F5A623','#FF3B5C','#9B59F5','#00b87a','#FF8C00'] }] },
     options: { responsive:true, maintainAspectRatio:false, plugins:{legend:{labels:{color:'#B0C8E0'}}} }
   });
 }
@@ -3179,13 +2417,8 @@ function renderCategoryChart(categories) {
 // ── HISTORY ──
 async function loadHistory() {
   if(!currentUser) return;
-  try {
-    const txs = await api('/api/transactions');
-    allTransactions = txs;
-    renderHistory(txs);
-  } catch(e) { toast(e.message); }
+  try { const txs = await api('/api/transactions'); allTransactions = txs; renderHistory(txs); } catch(e) { toast(e.message); }
 }
-
 function renderHistory(txs) {
   const list = document.getElementById('historyList');
   const search = document.getElementById('historySearch').value.toLowerCase();
@@ -3196,111 +2429,51 @@ function renderHistory(txs) {
     const badgeHtml = showBadges ? (t.is_need ? '<span class="tx-badge need">Need</span>' : '<span class="tx-badge want">Want</span>') : '';
     return `<div class="tx-item">
       <div class="tx-cat-icon">${CAT_ICONS[t.category]||'📦'}</div>
-      <div class="tx-info">
-        <div class="tx-cat">${esc(t.category)} ${badgeHtml}</div>
-        <div class="tx-meta">${t.note?esc(t.note)+' · ':''}${fmtDate(t.tx_date)}</div>
-      </div>
+      <div class="tx-info"><div class="tx-cat">${esc(t.category)} ${badgeHtml}</div><div class="tx-meta">${t.note?esc(t.note)+' · ':''}${fmtDate(t.tx_date)}</div></div>
       <div class="tx-amount ${t.tx_type}">${t.tx_type==='income'?'+':'-'}${fmt(t.amount)}</div>
       <button class="btn-del" onclick="deleteTransaction(${t.id})">🗑</button>
     </div>`;
   }).join('');
 }
-
 document.getElementById('historySearch').addEventListener('input', ()=> renderHistory(allTransactions));
-
-document.getElementById('showNeedWantBadges').addEventListener('change', ()=> {
-  renderHistory(allTransactions);
-});
-
+document.getElementById('showNeedWantBadges').addEventListener('change', ()=> renderHistory(allTransactions));
 document.getElementById('toggleHistoryViewBtn').addEventListener('click', () => {
   const content = document.getElementById('historyContent');
-  const btn = document.getElementById('toggleHistoryViewBtn');
   historyVisible = !historyVisible;
-  if (historyVisible) {
-    content.style.display = 'block';
-    btn.textContent = '🙈 Hide History';
-  } else {
-    content.style.display = 'none';
-    btn.textContent = '👁 Show History';
-  }
+  content.style.display = historyVisible ? 'block' : 'none';
 });
-
 async function deleteTransaction(id) {
   if(!confirm('Delete this transaction?')) return;
-  try {
-    await api(`/api/transactions/${id}`, { method:'DELETE' });
-    toast('Deleted');
-    if(document.getElementById('screen-history').classList.contains('active')) loadHistory();
-  } catch(e) { toast(e.message); }
+  try { await api(`/api/transactions/${id}`, { method:'DELETE' }); toast('Deleted'); if(document.getElementById('screen-history').classList.contains('active')) loadHistory(); } catch(e) { toast(e.message); }
 }
 
-// ── PROFILE PREVIEW & UPLOAD HANDLING ──
+// ── PROFILE ──
 document.getElementById('profileAvatar').addEventListener('input', function() {
   const url = this.value.trim();
   const previewImg = document.getElementById('profilePreviewImg');
   const placeholder = document.getElementById('profilePreviewPlaceholder');
   if (url) {
-    previewImg.src = url;
-    previewImg.onerror = () => {
-      previewImg.style.display = 'none';
-      placeholder.style.display = 'block';
-    };
-    previewImg.onload = () => {
-      previewImg.style.display = 'block';
-      placeholder.style.display = 'none';
-    };
-    previewImg.src = url;
-  } else {
-    previewImg.style.display = 'none';
-    placeholder.style.display = 'block';
-  }
+    previewImg.src = url; previewImg.onload = () => { previewImg.style.display = 'block'; placeholder.style.display = 'none'; };
+    previewImg.onerror = () => { previewImg.style.display = 'none'; placeholder.style.display = 'block'; };
+  } else { previewImg.style.display = 'none'; placeholder.style.display = 'block'; }
 });
-
 document.getElementById('profileFileInput').addEventListener('change', function(e) {
-  const file = e.target.files[0];
-  if (!file) return;
+  const file = e.target.files[0]; if(!file) return;
   const reader = new FileReader();
   reader.onload = function(ev) {
-    const dataUrl = ev.target.result;
-    document.getElementById('profileAvatar').value = dataUrl;
+    document.getElementById('profileAvatar').value = ev.target.result;
     document.getElementById('profileAvatar').dispatchEvent(new Event('input'));
   };
   reader.readAsDataURL(file);
 });
-
-document.querySelectorAll('#profileBlock .preset-avatar').forEach(el => {
-  el.addEventListener('click', () => {
-    const dataUrl = el.dataset.url;
-    document.getElementById('profileAvatar').value = dataUrl;
-    document.getElementById('profileAvatar').dispatchEvent(new Event('input'));
-  });
-});
-
 document.getElementById('saveProfileBtn').addEventListener('click', async () => {
   const name = document.getElementById('profileName').value.trim();
   const email = document.getElementById('profileEmail').value.trim();
   const password = document.getElementById('profilePass').value;
   const avatar_url = document.getElementById('profileAvatar').value.trim();
-
   const body = { name, email, avatar_url };
   if (password) body.password = password;
-
-  try {
-    const updatedUser = await api('/api/profile', { method: 'PUT', body: JSON.stringify(body) });
-    currentUser = updatedUser;
-    const initial = document.querySelector('.avatar-initial');
-    const img = document.querySelector('#userAvatar img');
-    if (updatedUser.avatar_url) {
-      img.src = updatedUser.avatar_url;
-      img.style.display = 'block';
-      initial.style.display = 'none';
-    } else {
-      img.style.display = 'none';
-      initial.style.display = 'block';
-      initial.textContent = updatedUser.name?.charAt(0)?.toUpperCase() || '?';
-    }
-    toast('Profile updated!');
-  } catch(e) { toast(e.message); }
+  try { const updatedUser = await api('/api/profile', { method:'PUT', body: JSON.stringify(body) }); currentUser = updatedUser; toast('Profile updated!'); } catch(e) { toast(e.message); }
 });
 
 // ── ADMIN ──
@@ -3314,8 +2487,7 @@ async function loadAdmin() {
       <div class="stat-card"><div class="stat-value">${fmt(stats.total_income)}</div><div class="stat-label">Total Income</div></div>
       <div class="stat-card"><div class="stat-value">${fmt(stats.total_expense)}</div><div class="stat-label">Total Expense</div></div>
       <div class="stat-card blue-glow"><div class="stat-value">${stats.avg_health_score}</div><div class="stat-label">Avg Health Score</div></div>`;
-    loadAdminUsers();
-    loadAdminTransactions();
+    loadAdminUsers(); loadAdminTransactions();
   } catch(e) { toast(e.message); }
 }
 document.getElementById('adminSearchUser').addEventListener('input', loadAdminUsers);
@@ -3338,37 +2510,22 @@ async function loadAdminUsers() {
     const users = await api('/api/admin/users');
     const search = document.getElementById('adminSearchUser').value.toLowerCase();
     const filtered = users.filter(u => u.name.toLowerCase().includes(search) || u.email.toLowerCase().includes(search));
-    const tbody = document.getElementById('adminUserTable');
-    tbody.innerHTML = filtered.map(u => `
+    document.getElementById('adminUserTable').innerHTML = filtered.map(u => `
       <tr id="userRow-${u.id}">
-        <td>${u.id}</td>
-        <td>${esc(u.name)}</td>
-        <td>${esc(u.email)}</td>
-        <td>${esc(u.role)}</td>
+        <td>${u.id}</td><td>${esc(u.name)}</td><td>${esc(u.email)}</td><td>${esc(u.role)}</td>
         <td>${fmtDate(u.created_at)}</td>
-        <td>
-          <button onclick="adminDeleteUser(${u.id})" class="btn btn-danger" style="padding:4px 8px;font-size:0.7rem;">Del</button>
-        </td>
-      </tr>
-    `).join('');
+      </tr>`).join('');
   } catch(e) { toast(e.message); }
 }
-async function adminDeleteUser(id){
-  if(!confirm('Delete this user and all their data?')) return;
-  try {
-    await api(`/api/admin/users/${id}`, { method:'DELETE' });
-    toast('User deleted'); loadAdminUsers();
-  } catch(e) { toast(e.message); }
-}
-async function loadAdminTransactions(){
+async function loadAdminTransactions() {
   try {
     const userId = document.getElementById('adminUserFilter').value;
     const url = userId ? `/api/admin/transactions?user_id=${userId}` : '/api/admin/transactions';
     const txs = await api(url);
     document.getElementById('adminTxTable').innerHTML = txs.map(t=>`
       <tr>
-        <td>${fmtDate(t.tx_date)}</td><td>User ${t.user_id}</td><td>${esc(t.category)}</td><td>${t.tx_type}</td>
-        <td>${fmt(t.amount)}</td><td>${t.is_need?'Need':'Want'}</td>
+        <td>${fmtDate(t.tx_date)}</td><td>User ${t.user_id}</td><td>${esc(t.category)}</td>
+        <td>${t.tx_type}</td><td>${fmt(t.amount)}</td><td>${t.is_need?'Need':'Want'}</td>
       </tr>`).join('');
     const users = await api('/api/admin/users');
     document.getElementById('adminUserFilter').innerHTML = '<option value="">All Users</option>'+
@@ -3377,42 +2534,27 @@ async function loadAdminTransactions(){
 }
 
 // ── EXPORT ──
-document.getElementById('exportBtn').addEventListener('click', ()=>{
-  window.open('/api/export/csv', '_blank');
+document.getElementById('exportBtn').addEventListener('click', ()=>{ window.open('/api/export/csv', '_blank'); });
+
+// ── CHATBOT ──
+let chatDragging = false, chatOffsetX, chatOffsetY;
+document.getElementById('chatHeader').addEventListener('mousedown', (e) => {
+  if(e.target.id === 'chatToggleBtn') return;
+  chatDragging = true; chatOffsetX = e.clientX - chatbot.getBoundingClientRect().left;
+  chatOffsetY = e.clientY - chatbot.getBoundingClientRect().top;
+  chatbot.style.cursor = 'grabbing'; e.preventDefault();
 });
-
-// ── CHATBOT DRAGGABLE & MINIMIZABLE ──
-(function(){
-  const chatbot = document.getElementById('chatbot');
-  const header = document.getElementById('chatHeader');
-  let offsetX, offsetY, isDragging = false;
-  header.addEventListener('mousedown', (e) => {
-    if(e.target.id === 'chatToggleBtn') return;
-    isDragging = true;
-    offsetX = e.clientX - chatbot.getBoundingClientRect().left;
-    offsetY = e.clientY - chatbot.getBoundingClientRect().top;
-    chatbot.style.cursor = 'grabbing';
-    e.preventDefault();
-  });
-  document.addEventListener('mousemove', (e) => {
-    if(!isDragging) return;
-    const left = e.clientX - offsetX;
-    const top = e.clientY - offsetY;
-    const w = window.innerWidth, h = window.innerHeight;
-    const bw = chatbot.offsetWidth, bh = chatbot.offsetHeight;
-    chatbot.style.left = Math.max(0, Math.min(left, w - bw)) + 'px';
-    chatbot.style.top = Math.max(0, Math.min(top, h - bh)) + 'px';
-    chatbot.style.right = 'auto'; chatbot.style.bottom = 'auto';
-  });
-  document.addEventListener('mouseup', () => {
-    if(isDragging){ isDragging = false; chatbot.style.cursor = ''; }
-  });
-  document.getElementById('chatToggleBtn').addEventListener('click', () => {
-    chatbot.classList.toggle('minimized');
-    document.getElementById('chatToggleBtn').textContent = chatbot.classList.contains('minimized') ? '□' : '–';
-  });
-})();
-
+document.addEventListener('mousemove', (e) => {
+  if(!chatDragging) return;
+  chatbot.style.left = Math.max(0, e.clientX - chatOffsetX) + 'px';
+  chatbot.style.top = Math.max(0, e.clientY - chatOffsetY) + 'px';
+  chatbot.style.right = 'auto'; chatbot.style.bottom = 'auto';
+});
+document.addEventListener('mouseup', () => { if(chatDragging){ chatDragging = false; chatbot.style.cursor = ''; } });
+document.getElementById('chatToggleBtn').addEventListener('click', () => {
+  chatbot.classList.toggle('minimized');
+  document.getElementById('chatToggleBtn').textContent = chatbot.classList.contains('minimized') ? '□' : '–';
+});
 document.getElementById('chatSend').addEventListener('click', sendChat);
 document.getElementById('chatInp').addEventListener('keypress', e=>{ if(e.key==='Enter') sendChat(); });
 async function sendChat() {
@@ -3422,35 +2564,30 @@ async function sendChat() {
   const msgs = document.getElementById('chatMsgs');
   msgs.innerHTML += `<div class="msg user">${esc(msg)}</div>`;
   inp.value = '';
-  try {
-    const resp = await api('/api/ai/chat', { method:'POST', body: JSON.stringify({ message: msg }) });
-    msgs.innerHTML += `<div class="msg bot">${esc(resp.reply)}</div>`;
-  } catch(e) {
-    msgs.innerHTML += `<div class="msg bot">Sorry, I'm having trouble right now.</div>`;
-  }
+  try { const resp = await api('/api/ai/chat', { method:'POST', body: JSON.stringify({ message: msg }) }); msgs.innerHTML += `<div class="msg bot">${esc(resp.reply)}</div>`; } catch(e) { msgs.innerHTML += `<div class="msg bot">Sorry, I'm having trouble right now.</div>`; }
   msgs.scrollTop = msgs.scrollHeight;
 }
 
-// ── INITIAL LOAD ──
+// ── INIT ──
 (async ()=>{
   try {
     const user = await api('/api/me');
     currentUser = user;
     authOverlay.style.display = 'none';
     initApp();
-  } catch(e) { 
-    authOverlay.style.display = 'flex'; 
-  }
+  } catch(e) { authOverlay.style.display = 'flex'; }
 })();
 </script>
 </body>
 </html>
 """
-
 @app.route('/')
 def index():
     return HTML_PAGE
 
+# ----------------------------------------------------------------------
+# Init DB
+# ----------------------------------------------------------------------
 with app.app_context():
     db.create_all()
     ensure_schema()
