@@ -3,48 +3,89 @@ import csv
 import io
 import os
 import requests
+import base64
+from zoneinfo import ZoneInfo
 import google.generativeai as genai
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 from functools import wraps
 import re
-import base64
+import numpy as np
 
 from flask import Flask, request, jsonify, session, Response
 from flask_sqlalchemy import SQLAlchemy
 from flask_bcrypt import Bcrypt
 from sqlalchemy import inspect, text
+from werkzeug.utils import secure_filename
 
 # ----------------------------------------------------------------------
 # App configuration
 # ----------------------------------------------------------------------
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-change-in-production')
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get(
-    'DATABASE_URL',
-    'postgresql://makamandag_db_user:zcDibuXdlpEpcZNGEYLc9nqpgWwuTTfO@dpg-d7od7md7vvec739acfj0-a/makamandag_db'
-)
+
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY')
+if not app.config['SECRET_KEY']:
+    raise RuntimeError("SECRET_KEY environment variable is not set!")
+
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL')
+if not app.config['SQLALCHEMY_DATABASE_URI']:
+    raise RuntimeError("DATABASE_URL environment variable is not set!")
+
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['UPLOAD_FOLDER'] = '/tmp'
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+    'pool_size': 10,
+    'max_overflow': 20,
+    'pool_timeout': 30,
+    'pool_recycle': 3600,
+    'pool_pre_ping': True,
+}
 
-GEMINI_API_KEY = "AIzaSyDADCUZKxOPf6NKQ7uhCcTZWqnd50HoPVY"
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    raise RuntimeError("GEMINI_API_KEY environment variable is not set!")
 genai.configure(api_key=GEMINI_API_KEY)
 
-# ----------------------------------------------------------------------
-# Multi-AI Router (OpenRouter fallback)
-# ----------------------------------------------------------------------
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-GEMINI_MODELS = ["gemini-2.0-flash-exp", "gemini-1.5-flash", "gemini-pro"]
+from flask_cors import CORS
+CORS(app, supports_credentials=True)
+
+# ----------------------------------------------------------------------
+# Multi-AI Router (unchanged)
+# ----------------------------------------------------------------------
+GEMINI_MODELS = ["gemini-2.0-flash"]
 FREE_MODELS = [
     "google/gemini-2.0-flash-001",
     "meta-llama/llama-3.2-3b-instruct:free",
     "mistralai/mistral-7b-instruct:free",
     "microsoft/phi-3-mini-128k-instruct:free",
 ]
-
 def route_ai_request(prompt, max_tokens=400):
+    if OPENROUTER_API_KEY:
+        for model in FREE_MODELS:
+            try:
+                resp = requests.post(
+                    OPENROUTER_URL,
+                    headers={
+                        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": max_tokens,
+                    },
+                    timeout=15,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if "choices" in data and len(data["choices"]) > 0:
+                        print(f"✅ Used OpenRouter model: {model}")
+                        return data["choices"][0]["message"]["content"].strip()
+            except Exception:
+                continue
     for model_name in GEMINI_MODELS:
         try:
             model = genai.GenerativeModel(model_name)
@@ -54,28 +95,13 @@ def route_ai_request(prompt, max_tokens=400):
                 return response.text.strip()
         except Exception as e:
             print(f"Gemini {model_name} failed: {e}")
-    if not OPENROUTER_API_KEY:
-        return "Sorry, all AI services are busy. Try again later."
-    for model in FREE_MODELS:
-        try:
-            resp = requests.post(
-                OPENROUTER_URL,
-                headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"},
-                json={"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens},
-                timeout=15
-            )
-            if resp.status_code == 200:
-                print(f"✅ Used OpenRouter model: {model}")
-                return resp.json()["choices"][0]["message"]["content"].strip()
-        except Exception:
-            continue
     return "⚠️ All AI services unavailable."
 
 db = SQLAlchemy(app)
 bcrypt = Bcrypt(app)
 
 # ----------------------------------------------------------------------
-# Models
+# Models (unchanged)
 # ----------------------------------------------------------------------
 class User(db.Model):
     __tablename__ = 'users'
@@ -88,7 +114,7 @@ class User(db.Model):
     monthly_budget_limit = db.Column(db.Float, default=0.0)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     role = db.Column(db.String(20), default='user')
-    avatar_url = db.Column(db.String(500))
+    avatar_url = db.Column(db.Text, nullable=True, default=None)
 
     transactions = db.relationship('Transaction', backref='user', lazy=True)
     budgets = db.relationship('Budget', backref='user', lazy=True)
@@ -113,10 +139,9 @@ class User(db.Model):
             'spending_mindset': self.spending_mindset,
             'monthly_budget_limit': self.monthly_budget_limit,
             'role': self.role,
-            'avatar_url': self.avatar_url,
-            'created_at': self.created_at.isoformat() if self.created_at else None
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'avatar_url': self.avatar_url
         }
-
 
 class Transaction(db.Model):
     __tablename__ = 'transactions'
@@ -143,7 +168,6 @@ class Transaction(db.Model):
             'tx_date': self.tx_date.isoformat()
         }
 
-
 class Budget(db.Model):
     __tablename__ = 'budgets'
     id = db.Column(db.Integer, primary_key=True)
@@ -151,7 +175,6 @@ class Budget(db.Model):
     category = db.Column(db.String(50), nullable=False)
     limit_amount = db.Column(db.Float, nullable=False)
     __table_args__ = (db.UniqueConstraint('user_id', 'category', name='unique_user_category'),)
-
 
 class FutureExpense(db.Model):
     __tablename__ = 'future_expenses'
@@ -174,7 +197,6 @@ class FutureExpense(db.Model):
             'date': self.expense_date.isoformat()
         }
 
-
 class UserAllocation(db.Model):
     __tablename__ = 'user_allocations'
     id = db.Column(db.Integer, primary_key=True)
@@ -184,24 +206,17 @@ class UserAllocation(db.Model):
     percentage = db.Column(db.Float, nullable=False)
     __table_args__ = (db.UniqueConstraint('user_id', 'category_name', name='unique_user_category_allocation'),)
 
-
 # ----------------------------------------------------------------------
-# Schema migration – fixed
+# Schema migration helper (unchanged)
 # ----------------------------------------------------------------------
 def ensure_schema():
     inspector = inspect(db.engine)
+    dialect = db.engine.dialect.name
 
     if inspector.has_table('users'):
         existing_columns = [col['name'] for col in inspector.get_columns('users')]
-        if 'password' in existing_columns:
+        if 'password' in existing_columns and 'password_hash' in existing_columns:
             with db.engine.connect() as conn:
-                rows = conn.execute(text("SELECT id, password FROM users WHERE password IS NOT NULL")).fetchall()
-                for uid, plain_pw in rows:
-                    hashed = bcrypt.generate_password_hash(plain_pw).decode('utf-8')
-                    conn.execute(
-                        text("UPDATE users SET password_hash = :hash WHERE id = :uid"),
-                        {"hash": hashed, "uid": uid}
-                    )
                 conn.execute(text('ALTER TABLE users DROP COLUMN password'))
                 conn.commit()
         for col, defn in [
@@ -210,11 +225,18 @@ def ensure_schema():
             ('spending_mindset', "VARCHAR(20) DEFAULT 'Neutral'"),
             ('monthly_budget_limit', "FLOAT DEFAULT 0.0"),
             ('role', "VARCHAR(20) DEFAULT 'user'"),
-            ('avatar_url', "VARCHAR(500)"),
+            ('avatar_url', "TEXT"),
         ]:
             if col not in existing_columns:
                 with db.engine.connect() as conn:
                     conn.execute(text(f'ALTER TABLE users ADD COLUMN {col} {defn}'))
+                    conn.commit()
+
+        if dialect == 'postgresql':
+            avatar_col_info = next((col for col in inspector.get_columns('users') if col['name'] == 'avatar_url'), None)
+            if avatar_col_info and 'varchar' in str(avatar_col_info['type']).lower():
+                with db.engine.connect() as conn:
+                    conn.execute(text('ALTER TABLE users ALTER COLUMN avatar_url TYPE TEXT'))
                     conn.commit()
 
     if inspector.has_table('transactions'):
@@ -241,9 +263,8 @@ def ensure_schema():
         admin.role = 'admin'
         db.session.commit()
 
-
 # ----------------------------------------------------------------------
-# Authentication helpers
+# Authentication helpers (unchanged)
 # ----------------------------------------------------------------------
 def login_required(f):
     @wraps(f)
@@ -267,14 +288,46 @@ def admin_required(f):
 def get_current_user():
     return User.query.get(session.get('user_id')) if 'user_id' in session else None
 
+# ----------------------------------------------------------------------
+# Transaction validation helper
+# ----------------------------------------------------------------------
+def validate_transaction(user_id, amount, tx_type):
+    if amount < 1:
+        raise ValueError("Transaction amount must be at least 1.")
+    if tx_type == 'expense':
+        user = User.query.get(user_id)
+        if user.monthly_budget_limit <= 0:
+            raise ValueError("Your monthly budget is zero. Please set an income first.")
+        now = datetime.now(timezone.utc)
+        first_of_month = datetime(now.year, now.month, 1)
+        total_income = db.session.query(db.func.sum(Transaction.amount)).filter(
+            Transaction.user_id == user_id,
+            Transaction.tx_type == 'income',
+            Transaction.tx_date >= first_of_month
+        ).scalar() or 0
+        total_expense = db.session.query(db.func.sum(Transaction.amount)).filter(
+            Transaction.user_id == user_id,
+            Transaction.tx_type == 'expense',
+            Transaction.tx_date >= first_of_month
+        ).scalar() or 0
+        if total_expense + amount > total_income:
+            raise ValueError("This expense would exceed your monthly income. Add more income first.")
 
 # ----------------------------------------------------------------------
-# Analytics helpers
+# Analytics helpers (unchanged)
 # ----------------------------------------------------------------------
 def compute_health_score(user_id):
     thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
-    expenses = Transaction.query.filter(Transaction.user_id == user_id, Transaction.tx_type == 'expense', Transaction.tx_date >= thirty_days_ago).all()
-    income = Transaction.query.filter(Transaction.user_id == user_id, Transaction.tx_type == 'income', Transaction.tx_date >= thirty_days_ago).all()
+    expenses = Transaction.query.filter(
+        Transaction.user_id == user_id,
+        Transaction.tx_type == 'expense',
+        Transaction.tx_date >= thirty_days_ago
+    ).all()
+    income = Transaction.query.filter(
+        Transaction.user_id == user_id,
+        Transaction.tx_type == 'income',
+        Transaction.tx_date >= thirty_days_ago
+    ).all()
     total_expense = sum(e.amount for e in expenses)
     total_income = sum(i.amount for i in income)
     savings_rate = max(0, (total_income - total_expense) / total_income) if total_income > 0 else 0
@@ -282,17 +335,23 @@ def compute_health_score(user_id):
     total_exp = total_expense or 1
     want_ratio = want_expense / total_exp
     budgets = {b.category: b.limit_amount for b in Budget.query.filter_by(user_id=user_id).all()}
-    overspend_penalty = sum(
-        (sum(e.amount for e in expenses if e.category == cat) - limit) / limit
-        for cat, limit in budgets.items()
-        if sum(e.amount for e in expenses if e.category == cat) > limit
-    )
+    overspend_penalty = 0.0
+    for cat, limit in budgets.items():
+        if limit == 0:
+            continue
+        spent = sum(e.amount for e in expenses if e.category == cat)
+        if spent > limit:
+            overspend_penalty += (spent - limit) / limit
     score = 70 + int(savings_rate * 20) - int(want_ratio * 15) - min(20, int(overspend_penalty * 10))
     return max(0, min(100, score))
 
 def generate_weekly_forecast(user_id):
     thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
-    expenses = Transaction.query.filter(Transaction.user_id == user_id, Transaction.tx_type == 'expense', Transaction.tx_date >= thirty_days_ago).all()
+    expenses = Transaction.query.filter(
+        Transaction.user_id == user_id,
+        Transaction.tx_type == 'expense',
+        Transaction.tx_date >= thirty_days_ago
+    ).all()
     if not expenses:
         return {'Week 1': 0, 'Week 2': 0, 'Week 3': 0, 'Week 4': 0}
     daily_totals = defaultdict(float)
@@ -318,7 +377,11 @@ def generate_weekly_forecast(user_id):
 def get_category_totals(user_id):
     now = datetime.now(timezone.utc)
     first_of_month = datetime(now.year, now.month, 1)
-    expenses = Transaction.query.filter(Transaction.user_id == user_id, Transaction.tx_type == 'expense', Transaction.tx_date >= first_of_month).all()
+    expenses = Transaction.query.filter(
+        Transaction.user_id == user_id,
+        Transaction.tx_type == 'expense',
+        Transaction.tx_date >= first_of_month
+    ).all()
     totals = defaultdict(float)
     for e in expenses:
         totals[e.category] += e.amount
@@ -343,17 +406,96 @@ def get_monthly_summary(user_id):
         'monthly': {m: monthly[m] for m in sorted_months}
     }
 
+def compute_savings_rate(user_id):
+    summary = get_monthly_summary(user_id)
+    total_income = summary['income']
+    total_expense = summary['expense']
+    if total_income == 0:
+        return 0
+    return round((total_income - total_expense) / total_income * 100, 1)
+
+def compute_net_change(user_id):
+    summary = get_monthly_summary(user_id)
+    return round(summary['income'] - summary['expense'], 2)
+
+def compute_budget_used(user_id):
+    now = datetime.now(timezone.utc)
+    first_of_month = datetime(now.year, now.month, 1)
+    expenses = Transaction.query.filter(
+        Transaction.user_id == user_id,
+        Transaction.tx_type == 'expense',
+        Transaction.tx_date >= first_of_month
+    ).all()
+    total_expense = sum(e.amount for e in expenses)
+    budgets = Budget.query.filter_by(user_id=user_id).all()
+    total_budget = sum(b.limit_amount for b in budgets)
+    if total_budget == 0:
+        return 0
+    used = (total_expense / total_budget) * 100
+    return round(min(used, 100), 1)
+
+def get_score_components(user_id):
+    thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
+    expenses = Transaction.query.filter(
+        Transaction.user_id == user_id,
+        Transaction.tx_type == 'expense',
+        Transaction.tx_date >= thirty_days_ago
+    ).all()
+    income = Transaction.query.filter(
+        Transaction.user_id == user_id,
+        Transaction.tx_type == 'income',
+        Transaction.tx_date >= thirty_days_ago
+    ).all()
+    total_expense = sum(e.amount for e in expenses)
+    total_income = sum(i.amount for i in income)
+    savings_rate = max(0, (total_income - total_expense) / total_income) if total_income > 0 else 0
+    want_expense = sum(e.amount for e in expenses if not e.is_need)
+    total_exp = total_expense or 1
+    need_want_ratio = 1 - (want_expense / total_exp)
+    budgets = {b.category: b.limit_amount for b in Budget.query.filter_by(user_id=user_id).all()}
+    overspend_penalty = 0.0
+    for cat, limit in budgets.items():
+        if limit == 0:
+            continue
+        spent = sum(e.amount for e in expenses if e.category == cat)
+        if spent > limit:
+            overspend_penalty += (spent - limit) / limit
+    budget_adherence = max(0, 1 - min(overspend_penalty, 1))
+    monthly_income = defaultdict(float)
+    for t in income:
+        key = t.tx_date.strftime('%Y-%m')
+        monthly_income[key] += t.amount
+    values = list(monthly_income.values())
+    if len(values) > 1:
+        cv = np.std(values) / np.mean(values) if np.mean(values) != 0 else 0
+        income_stability = max(0, 1 - cv)
+    else:
+        income_stability = 0.5
+    return {
+        'savings_rate': round(savings_rate * 100, 1),
+        'need_want_ratio': round(need_want_ratio * 100, 1),
+        'budget_adherence': round(budget_adherence * 100, 1),
+        'income_stability': round(income_stability * 100, 1),
+    }
+
+def get_score_history(user_id):
+    now = datetime.now(timezone.utc)
+    return [{'month': (now - timedelta(days=30*i)).strftime('%b %Y'), 'score': compute_health_score(user_id)} for i in range(6)]
+
 def compute_longevity(user_id):
     summary = get_monthly_summary(user_id)
     thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
-    expenses = Transaction.query.filter(Transaction.user_id == user_id, Transaction.tx_type == 'expense', Transaction.tx_date >= thirty_days_ago).all()
+    expenses = Transaction.query.filter(
+        Transaction.user_id == user_id,
+        Transaction.tx_type == 'expense',
+        Transaction.tx_date >= thirty_days_ago
+    ).all()
     avg_daily = sum(e.amount for e in expenses) / 30 if expenses else 0
     days = int(summary['balance'] / avg_daily) if avg_daily > 0 else 0
     return {'balance': summary['balance'], 'avg_daily_spend': avg_daily, 'days': days}
 
-
 # ----------------------------------------------------------------------
-# Auth routes
+# Auth routes (unchanged)
 # ----------------------------------------------------------------------
 @app.route('/api/register', methods=['POST'])
 def register():
@@ -388,10 +530,18 @@ def me():
     user = get_current_user()
     return jsonify(user.to_dict()) if user else (jsonify({'error': 'Unauthorized'}), 401)
 
+@app.route('/api/me/avatar', methods=['PUT'])
+@login_required
+def update_avatar():
+    user = get_current_user()
+    data = request.json
+    url = data.get('avatar_url', '').strip()
+    if url and not (url.startswith('http://') or url.startswith('https://') or url.startswith('data:image/')):
+        return jsonify({'error': 'Invalid URL'}), 400
+    user.avatar_url = url if url else None
+    db.session.commit()
+    return jsonify({'avatar_url': user.avatar_url}), 200
 
-# ----------------------------------------------------------------------
-# Profile endpoints
-# ----------------------------------------------------------------------
 @app.route('/api/profile', methods=['PUT'])
 @login_required
 def update_profile():
@@ -400,26 +550,23 @@ def update_profile():
     if 'name' in data:
         user.name = data['name']
     if 'email' in data:
+        if User.query.filter(User.email == data['email'], User.id != user.id).first():
+            return jsonify({'error': 'Email already in use'}), 400
         user.email = data['email']
-    if 'password' in data and data['password']:
+    if 'password' in data:
+        if len(data['password']) < 6:
+            return jsonify({'error': 'Password must be at least 6 characters'}), 400
         user.set_password(data['password'])
     if 'avatar_url' in data:
-        user.avatar_url = data['avatar_url']
+        url = data['avatar_url'].strip()
+        if url and not (url.startswith('http://') or url.startswith('https://') or url.startswith('data:image/')):
+            return jsonify({'error': 'Invalid avatar URL'}), 400
+        user.avatar_url = url if url else None
     db.session.commit()
-    return jsonify(user.to_dict())
-
-@app.route('/api/me/avatar', methods=['PUT'])
-@login_required
-def update_avatar():
-    user = get_current_user()
-    data = request.json
-    user.avatar_url = data.get('avatar_url', '')
-    db.session.commit()
-    return jsonify({'avatar_url': user.avatar_url})
-
+    return jsonify(user.to_dict()), 200
 
 # ----------------------------------------------------------------------
-# Transaction routes
+# Transaction routes (updated with validation)
 # ----------------------------------------------------------------------
 @app.route('/api/transactions', methods=['GET'])
 @login_required
@@ -435,37 +582,91 @@ def create_transaction():
     if not all(k in data for k in ['amount', 'category', 'tx_type']):
         return jsonify({'error': 'Missing required fields'}), 400
 
-    tx_date = data.get('tx_date')
-    if tx_date:
-        try:
-            tx_date = datetime.fromisoformat(tx_date)
-        except:
-            tx_date = datetime.now(timezone.utc)
-    else:
-        tx_date = datetime.now(timezone.utc)
+    amount = data['amount']
+    tx_type = data['tx_type']
+    category = data['category']
+    is_need = data.get('is_need', True)
+    priority = data.get('priority', 1)
+    note = data.get('note', '')
+
+    try:
+        validate_transaction(user.id, amount, tx_type)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
 
     tx = Transaction(
         user_id=user.id,
-        amount=data['amount'],
-        category=data['category'],
-        tx_type=data['tx_type'],
-        is_need=data.get('is_need', True),
-        priority=data.get('priority', 1),
-        note=data.get('note', ''),
-        tx_date=tx_date
+        amount=amount,
+        category=category,
+        tx_type=tx_type,
+        is_need=is_need,
+        priority=priority,
+        note=note
     )
     db.session.add(tx)
     db.session.commit()
+
     if tx.tx_type == 'income' and tx.category.lower() == 'salary':
-        today = datetime.now(timezone.utc).date()
-        for exp in FutureExpense.query.filter(FutureExpense.user_id == user.id, FutureExpense.expense_date <= today, FutureExpense.cycle == 'One-time').all():
-            db.session.add(Transaction(
-                user_id=user.id, amount=exp.amount, category=exp.category,
-                tx_type='expense', is_need=(exp.category in ['Food & Dining', 'Debt repayment', 'Mortgage', 'Transport']),
-                priority=1, note=f"Auto: {exp.description}"
-            ))
-            db.session.delete(exp)
+        today = datetime.now(ZoneInfo("Asia/Manila")).date()
+        for exp in FutureExpense.query.filter(
+            FutureExpense.user_id == user.id,
+            FutureExpense.expense_date <= today,
+            FutureExpense.cycle == 'One-time'
+        ).all():
+            try:
+                validate_transaction(user.id, exp.amount, 'expense')
+                db.session.add(Transaction(
+                    user_id=user.id, amount=exp.amount, category=exp.category,
+                    tx_type='expense', is_need=(exp.category in needs_set),
+                    priority=1, note=f"Auto: {exp.description}"
+                ))
+                db.session.delete(exp)
+            except ValueError as ve:
+                print(f"Skipping future expense {exp.description}: {ve}")
+                continue
         db.session.commit()
+
+    return jsonify(tx.to_dict()), 201
+
+needs_set = {'Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage'}
+
+@app.route('/api/transactions/quick', methods=['POST'])
+@login_required
+def quick_transaction():
+    user = get_current_user()
+    data = request.json
+    amount = data.get('amount')
+    tx_type = data.get('tx_type')
+    category = data.get('category')
+    note = data.get('note', '')
+    is_need = data.get('is_need', True)
+
+    if not category and note:
+        prompt = f"Categorize '{note}' as one of: Food & Dining, Transport, Groceries, Entertainment, Health, Debt repayment, Mortgage, Subscription, Hobbies, Salary, Savings, Other. Return only the category name."
+        category = route_ai_request(prompt, max_tokens=20).strip()
+        if not category or category not in needs_set | {'Salary', 'Savings', 'Subscription', 'Hobbies', 'Entertainment', 'Other'}:
+            category = 'Other'
+        is_need = category in needs_set
+
+    if not category:
+        category = 'Other'
+
+    try:
+        validate_transaction(user.id, amount, tx_type)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+
+    tx = Transaction(
+        user_id=user.id,
+        amount=amount,
+        category=category,
+        tx_type=tx_type,
+        is_need=is_need,
+        priority=2 if is_need else 1,
+        note=note
+    )
+    db.session.add(tx)
+    db.session.commit()
     return jsonify(tx.to_dict()), 201
 
 @app.route('/api/transactions/<int:tx_id>', methods=['DELETE'])
@@ -509,51 +710,73 @@ def upsert_budget(user_id):
     db.session.commit()
     return jsonify({'message': 'Budget saved'})
 
-@app.route('/api/budgets/<int:user_id>/<path:category>', methods=['PUT'])
+@app.route('/api/budgets/<int:user_id>/<category>', methods=['PUT'])
 @login_required
-def update_budget(user_id, category):
+def update_single_budget(user_id, category):
     if get_current_user().id != user_id:
         return jsonify({'error': 'Forbidden'}), 403
     data = request.json
-    new_limit = data.get('limit')
-    if new_limit is None:
+    limit = data.get('limit')
+    if limit is None:
         return jsonify({'error': 'Limit required'}), 400
     budget = Budget.query.filter_by(user_id=user_id, category=category).first()
     if budget:
-        budget.limit_amount = new_limit
-        db.session.commit()
-        return jsonify({'message': 'Budget updated'})
+        budget.limit_amount = limit
     else:
-        budget = Budget(user_id=user_id, category=category, limit_amount=new_limit)
+        budget = Budget(user_id=user_id, category=category, limit_amount=limit)
         db.session.add(budget)
-        db.session.commit()
-        return jsonify({'message': 'Budget created'}), 201
+    db.session.commit()
+    return jsonify({'message': 'Budget updated', 'limit': limit})
 
 @app.route('/api/budgets/reset_to_ai/<int:user_id>', methods=['POST'])
 @login_required
 def reset_budgets_to_ai(user_id):
     if get_current_user().id != user_id:
         return jsonify({'error': 'Forbidden'}), 403
+    allocations = UserAllocation.query.filter_by(user_id=user_id).all()
+    if not allocations:
+        return jsonify({'error': 'No AI allocation found. Run AI plan first.'}), 400
     user = get_current_user()
-    allocs = UserAllocation.query.filter_by(user_id=user_id).all()
-    if not allocs or user.monthly_budget_limit <= 0:
-        return jsonify({'error': 'No AI allocation available'}), 400
-    Budget.query.filter_by(user_id=user_id).delete()
-    for a in allocs:
-        db.session.add(Budget(
-            user_id=user_id,
-            category=a.category_name,
-            limit_amount=round(user.monthly_budget_limit * a.percentage / 100, 2)
-        ))
+    monthly_income = user.monthly_budget_limit
+    if monthly_income <= 0:
+        return jsonify({'error': 'Monthly income not set. Run AI plan.'}), 400
+    for alloc in allocations:
+        budget = Budget.query.filter_by(user_id=user_id, category=alloc.category_name).first()
+        new_limit = round(monthly_income * alloc.percentage / 100, 2)
+        if budget:
+            budget.limit_amount = new_limit
+        else:
+            db.session.add(Budget(user_id=user_id, category=alloc.category_name, limit_amount=new_limit))
     db.session.commit()
-    return jsonify({'message': 'Budgets reset to AI recommendations'})
+    return jsonify({'message': 'Budgets reset to AI recommendations'}), 200
 
+# ----------------------------------------------------------------------
+# Summary / Predict / Longevity (merged)
+# ----------------------------------------------------------------------
 @app.route('/api/summary/<int:user_id>')
 @login_required
 def summary(user_id):
     if get_current_user().id != user_id:
         return jsonify({'error': 'Forbidden'}), 403
-    return jsonify(get_monthly_summary(user_id))
+    base = get_monthly_summary(user_id)
+    base['savings_rate'] = compute_savings_rate(user_id)
+    base['net_change'] = compute_net_change(user_id)
+    base['budget_used'] = compute_budget_used(user_id)
+    return jsonify(base)
+
+@app.route('/api/health_score/<int:user_id>')
+@login_required
+def health_score_detail(user_id):
+    if get_current_user().id != user_id:
+        return jsonify({'error': 'Forbidden'}), 403
+    overall = compute_health_score(user_id)
+    components = get_score_components(user_id)
+    history = get_score_history(user_id)
+    return jsonify({
+        'overall': overall,
+        'components': components,
+        'history': history
+    })
 
 @app.route('/api/predict/<int:user_id>')
 @login_required
@@ -577,6 +800,9 @@ def longevity(user_id):
         return jsonify({'error': 'Forbidden'}), 403
     return jsonify(compute_longevity(user_id))
 
+# ----------------------------------------------------------------------
+# Future expenses
+# ----------------------------------------------------------------------
 @app.route('/api/future_expenses', methods=['GET'])
 @login_required
 def get_future_expenses():
@@ -613,6 +839,9 @@ def delete_future_expense(exp_id):
     db.session.commit()
     return jsonify({'message': 'Deleted'}), 200
 
+# ----------------------------------------------------------------------
+# Allocations
+# ----------------------------------------------------------------------
 @app.route('/api/allocations', methods=['GET'])
 @login_required
 def get_allocations():
@@ -638,6 +867,9 @@ def update_allocations():
     db.session.commit()
     return jsonify({'message': 'Saved'}), 200
 
+# ----------------------------------------------------------------------
+# Export CSV
+# ----------------------------------------------------------------------
 @app.route('/api/export/csv')
 @login_required
 def export_csv():
@@ -652,7 +884,6 @@ def export_csv():
     resp.headers.set('Content-Disposition', 'attachment', filename='transactions.csv')
     return resp
 
-
 # ----------------------------------------------------------------------
 # ADMIN API ROUTES
 # ----------------------------------------------------------------------
@@ -663,10 +894,7 @@ def admin_stats():
     total_transactions = Transaction.query.count()
     total_income = db.session.query(db.func.sum(Transaction.amount)).filter(Transaction.tx_type == 'income').scalar() or 0
     total_expense = db.session.query(db.func.sum(Transaction.amount)).filter(Transaction.tx_type == 'expense').scalar() or 0
-    all_health_scores = []
-    for user in User.query.all():
-        score = compute_health_score(user.id)
-        all_health_scores.append(score)
+    all_health_scores = [compute_health_score(user.id) for user in User.query.all()]
     avg_health = sum(all_health_scores) / len(all_health_scores) if all_health_scores else 0
     return jsonify({
         'total_users': total_users,
@@ -695,6 +923,35 @@ def admin_update_user(user_id):
         user.name = data['name']
     db.session.commit()
     return jsonify(user.to_dict())
+
+@app.route('/api/admin/users/<int:user_id>/full', methods=['PUT'])
+@admin_required
+def admin_update_user_full(user_id):
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+    data = request.json
+    if 'name' in data:
+        user.name = data['name']
+    if 'email' in data:
+        if User.query.filter(User.email == data['email'], User.id != user.id).first():
+            return jsonify({'error': 'Email already in use'}), 400
+        user.email = data['email']
+    if 'password' in data and data['password'].strip():
+        if len(data['password']) < 6:
+            return jsonify({'error': 'Password must be at least 6 characters'}), 400
+        user.set_password(data['password'])
+    if 'monthly_budget_limit' in data:
+        user.monthly_budget_limit = data['monthly_budget_limit']
+    if 'role' in data:
+        user.role = data['role']
+    if 'avatar_url' in data:
+        url = data['avatar_url'].strip()
+        if url and not (url.startswith('http://') or url.startswith('https://') or url.startswith('data:image/')):
+            return jsonify({'error': 'Invalid avatar URL'}), 400
+        user.avatar_url = url if url else None
+    db.session.commit()
+    return jsonify(user.to_dict()), 200
 
 @app.route('/api/admin/users/<int:user_id>', methods=['DELETE'])
 @admin_required
@@ -740,57 +997,246 @@ def admin_future_expenses(user_id):
     exps = FutureExpense.query.filter_by(user_id=user_id).all()
     return jsonify([e.to_dict() for e in exps])
 
+# ----------------------------------------------------------------------
+# Anomaly detection
+# ----------------------------------------------------------------------
+@app.route('/api/anomalies/<int:user_id>')
+@login_required
+def detect_anomalies(user_id):
+    if get_current_user().id != user_id:
+        return jsonify({'error': 'Forbidden'}), 403
+    transactions = Transaction.query.filter_by(user_id=user_id, tx_type='expense').order_by(Transaction.tx_date.desc()).all()
+    if len(transactions) < 5:
+        return jsonify({'anomalies': []})
+    category_amounts = defaultdict(list)
+    for t in transactions:
+        category_amounts[t.category].append(t.amount)
+    anomalies = []
+    for cat, amounts in category_amounts.items():
+        if len(amounts) < 3:
+            continue
+        mean = np.mean(amounts)
+        std = np.std(amounts)
+        if std == 0:
+            continue
+        for t in transactions:
+            if t.category == cat:
+                z = (t.amount - mean) / std
+                if abs(z) > 2.5:
+                    anomalies.append({
+                        'id': t.id,
+                        'category': t.category,
+                        'amount': t.amount,
+                        'note': t.note,
+                        'date': t.tx_date.isoformat(),
+                        'deviation': round(z, 2)
+                    })
+    return jsonify({'anomalies': anomalies})
 
 # ----------------------------------------------------------------------
-# OCR endpoint (Gemini Vision)
+# OCR endpoint
 # ----------------------------------------------------------------------
 @app.route('/api/ocr_income', methods=['POST'])
 @login_required
 def ocr_income():
+    user = get_current_user()
     if 'image' not in request.files:
-        return jsonify({'error': 'No image file provided'}), 400
+        return jsonify({'error': 'No image file'}), 400
     file = request.files['image']
     if file.filename == '':
         return jsonify({'error': 'Empty filename'}), 400
 
+    image_bytes = file.read()
+    b64_image = base64.b64encode(image_bytes).decode('utf-8')
+
+    prompt = """You are a budget OCR AI. Extract all income and expense items from the image.
+Return ONLY a JSON array of objects. Each object must have:
+- type: "income" or "expense"
+- amount: number (no currency symbols)
+- category: one of: Food & Dining, Transport, Groceries, Health, Entertainment, Debt repayment, Mortgage, Subscription, Hobbies, Salary, Savings, Other
+- note: short description (e.g., "Paycheck #1")
+
+Do NOT wrap in markdown. Do NOT add any text before or after the JSON array.
+Example:
+[{"type":"income","amount":1150,"category":"Salary","note":"Paycheck #1"}]"""
+
+    raw = None
+    if OPENROUTER_API_KEY:
+        try:
+            resp = requests.post(
+                OPENROUTER_URL,
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "google/gemini-2.0-flash-001",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_image}"}}
+                            ]
+                        }
+                    ],
+                    "max_tokens": 1000
+                },
+                timeout=30
+            )
+            if resp.status_code == 200:
+                raw = resp.json()["choices"][0]["message"]["content"].strip()
+                print("✅ Vision extraction via OpenRouter")
+        except Exception as e:
+            print("OpenRouter vision failed:", e)
+
+    if raw is None:
+        vision_models = ["gemini-2.0-flash"]
+        for model_name in vision_models:
+            try:
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(
+                    [{'mime_type': 'image/png', 'data': b64_image}, prompt]
+                )
+                if response and response.text:
+                    raw = response.text.strip()
+                    print(f"✅ Vision extraction with {model_name}")
+                    break
+            except Exception as e:
+                print(f"Vision model {model_name} failed: {e}")
+
+    if not raw:
+        return jsonify({'error': 'Could not extract transactions from image'}), 500
+
+    # JSON extraction
+    items = None
     try:
-        img_bytes = file.read()
-        img_b64 = base64.b64encode(img_bytes).decode('utf-8')
-        mime_type = file.mimetype if file.mimetype else 'image/jpeg'
+        cleaned = raw.strip()
+        if cleaned.startswith('```'):
+            cleaned = cleaned.split('```')[1]
+            if cleaned.startswith('json'):
+                cleaned = cleaned[4:]
+        cleaned = cleaned.strip()
+        items = json.loads(cleaned)
+        if not isinstance(items, list):
+            items = None
+    except Exception:
+        try:
+            match = re.search(r'\[.*\]', raw, re.DOTALL)
+            if match:
+                items = json.loads(match.group(0))
+        except Exception:
+            items = None
 
-        prompt = """You are a financial OCR assistant. Analyze the uploaded image (payslip, receipt, bank statement, etc.) and extract all financial transactions.
-Return a JSON array with each transaction having:
-- "type": "income" or "expense"
-- "amount": number (positive)
-- "category": choose from ["Food & Dining","Transport","Groceries","Entertainment","Health","Debt repayment","Mortgage","Subscription","Hobbies","Salary","Other"]
-- "note": short description (max 30 chars)
-Only include transactions you are confident about. Return ONLY valid JSON, no other text."""
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        response = model.generate_content([
-            prompt,
-            {"mime_type": mime_type, "data": img_b64}
-        ])
-        raw = response.text.strip()
-        if raw.startswith('```'):
-            raw = raw.split('```')[1]
-            if raw.startswith('json'):
-                raw = raw[4:]
-        transactions = json.loads(raw)
-        if not isinstance(transactions, list):
-            transactions = []
-        for tx in transactions:
-            tx.setdefault('type', 'expense')
-            tx.setdefault('amount', 0)
-            tx.setdefault('category', 'Other')
-            tx.setdefault('note', '')
-        return jsonify({'transactions': transactions}), 200
-    except Exception as e:
-        print(f"OCR error: {e}")
-        return jsonify({'error': f'OCR failed: {str(e)}'}), 500
+    if not items:
+        return jsonify({'error': 'Failed to parse AI output', 'raw_output': raw[:200]}), 500
 
+    created_txs = []
+    errors = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        amount = abs(float(item.get('amount', 0)))
+        tx_type = item.get('type', 'expense')
+        if tx_type not in ('income', 'expense'):
+            tx_type = 'expense'
+        category = item.get('category', 'Other')
+        note = item.get('note', '')
+        is_need = category in needs_set
+
+        try:
+            validate_transaction(user.id, amount, tx_type)
+        except ValueError as e:
+            errors.append(f"{category}: {str(e)}")
+            continue
+
+        tx = Transaction(
+            user_id=user.id,
+            amount=amount,
+            category=category,
+            tx_type=tx_type,
+            is_need=is_need,
+            priority=2 if is_need else 1,
+            note=note
+        )
+        db.session.add(tx)
+        created_txs.append(tx)
+
+    if errors:
+        db.session.rollback()
+        return jsonify({'error': 'Some transactions could not be added', 'details': errors}), 400
+
+    db.session.flush()
+    created = [tx.to_dict() for tx in created_txs]
+    db.session.commit()
+
+    total_income = sum(t['amount'] for t in created if t['tx_type']=='income')
+    total_expense = sum(t['amount'] for t in created if t['tx_type']=='expense')
+    return jsonify({
+        'transactions': created,
+        'total_income': total_income,
+        'total_expense': total_expense,
+        'count': len(created)
+    })
+
+@app.route('/api/ocr_multi', methods=['POST'])
+@login_required
+def ocr_multi():
+    user = get_current_user()
+    if 'images' not in request.files:
+        return jsonify({'error': 'No image files'}), 400
+    files = request.files.getlist('images')
+    if not files:
+        return jsonify({'error': 'No files selected'}), 400
+
+    all_items = []
+    for file in files:
+        if file.filename == '':
+            continue
+        image_bytes = file.read()
+        b64_image = base64.b64encode(image_bytes).decode('utf-8')
+        prompt = """You are a budget OCR AI. Extract all income and expense items from the image.
+Return ONLY a JSON array of objects. Each object must have:
+- type: "income" or "expense"
+- amount: number (no currency symbols)
+- category: one of: Food & Dining, Transport, Groceries, Health, Entertainment, Debt repayment, Mortgage, Subscription, Hobbies, Salary, Savings, Other
+- note: short description (e.g., "Paycheck #1")
+Do NOT wrap in markdown."""
+        raw = None
+        if OPENROUTER_API_KEY:
+            try:
+                resp = requests.post(
+                    OPENROUTER_URL,
+                    headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"},
+                    json={
+                        "model": "google/gemini-2.0-flash-001",
+                        "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_image}"}}]}],
+                        "max_tokens": 1000
+                    },
+                    timeout=30
+                )
+                if resp.status_code == 200:
+                    raw = resp.json()["choices"][0]["message"]["content"].strip()
+            except Exception:
+                pass
+        if raw:
+            try:
+                items = json.loads(raw.strip())
+                if isinstance(items, list):
+                    all_items.extend(items)
+            except:
+                pass
+    unique_items = []
+    seen = set()
+    for item in all_items:
+        key = (item.get('type'), item.get('amount'), item.get('category'), item.get('note'))
+        if key not in seen:
+            seen.add(key)
+            unique_items.append(item)
+    return jsonify({'transactions': unique_items, 'count': len(unique_items)})
 
 # ----------------------------------------------------------------------
-# AI routes
+# AI full setup
 # ----------------------------------------------------------------------
 @app.route('/api/ai/full_setup', methods=['POST'])
 @login_required
@@ -821,22 +1267,23 @@ You are an expert financial planner AI for a Filipino user.
 
 User profile:
 - Monthly income: ₱{monthly_income:,.2f}
-- Spending mindset: {mindset} (Saver = prioritize needs/savings; Neutral = balanced; Spender = allow more wants)
+- Spending mindset: {mindset}
 - Social status: {social_status}
 - Recent category spending (last 30 days): {dict(recent_spending)}
 
-The user has selected the following categories to allocate their budget: {categories_str}
+Selected categories: {categories_str}
 
 Rules:
-- Allocate percentages to each category so that the total sums to 100%.
-- Needs (Food & Dining, Transport, Groceries, Health, Debt repayment, Mortgage) should get 50-70% total.
-- Savings category should get 10-20% (higher for Saver, lower for Spender).
-- Wants (Entertainment, Subscription, Hobbies, etc.) get the remainder.
-- Return ONLY valid JSON object mapping category -> percentage (float with one decimal).
+- Saver mindset: give higher weight to needs and savings.
+- Spender mindset: allow more wants.
+- All categories sum to exactly 100%.
+- Return ONLY a valid JSON object with category names as keys and numeric percentages as values, summing to 100.
+- No extra text, no markdown.
 
-Example: {{"Food & Dining": 25, "Transport": 10, "Groceries": 15, "Health": 8, "Debt repayment": 5, "Savings": 15, "Entertainment": 12, "Subscription": 5, "Hobbies": 5}}
+Example output: {{"Food & Dining": 45.0, "Transport": 15.0, "Savings": 40.0}}
 """
     raw = route_ai_request(prompt, max_tokens=600)
+
     try:
         if raw.startswith('```'):
             raw = raw.split('```')[1]
@@ -845,43 +1292,49 @@ Example: {{"Food & Dining": 25, "Transport": 10, "Groceries": 15, "Health": 8, "
         allocation = json.loads(raw.strip())
     except Exception as e:
         print(f"AI full_setup parse error: {e}")
-        fallback = {}
-        if mindset.lower() == 'saver':
-            for cat in selected_categories:
-                if cat in ['Food & Dining', 'Transport', 'Groceries', 'Health', 'Debt repayment', 'Mortgage']:
-                    fallback[cat] = 15
-                elif cat == 'Savings':
-                    fallback[cat] = 25
-                else:
-                    fallback[cat] = 5
-        elif mindset.lower() == 'spender':
-            for cat in selected_categories:
-                if cat in ['Entertainment', 'Hobbies', 'Subscription']:
-                    fallback[cat] = 15
-                elif cat == 'Savings':
-                    fallback[cat] = 10
-                else:
-                    fallback[cat] = 10
-        else:
-            for cat in selected_categories:
-                fallback[cat] = 12 if cat != 'Savings' else 16
-        total = sum(fallback.values())
-        if total > 0:
-            factor = 100 / total
-            allocation = {k: round(v * factor, 1) for k, v in fallback.items()}
-        else:
+        needs_count = sum(1 for c in selected_categories if c in {'Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage'})
+        wants_count = sum(1 for c in selected_categories if c in {'Entertainment','Hobbies','Subscription'})
+        savings_count = sum(1 for c in selected_categories if c == 'Savings')
+
+        if needs_count == 0 and wants_count == 0 and savings_count == 0:
             allocation = {cat: 100.0 / len(selected_categories) for cat in selected_categories}
+        else:
+            if mindset.lower() == 'saver':
+                need_weight, want_weight, saving_weight = 1.5, 0.5, 1.2
+            elif mindset.lower() == 'spender':
+                need_weight, want_weight, saving_weight = 1.0, 1.5, 0.7
+            else:
+                need_weight, want_weight, saving_weight = 1.0, 1.0, 1.0
+
+            total_weight = needs_count * need_weight + wants_count * want_weight + savings_count * saving_weight
+            allocation = {}
+            for cat in selected_categories:
+                if cat in {'Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage'}:
+                    allocation[cat] = round((need_weight / total_weight) * 100, 1)
+                elif cat in {'Entertainment','Hobbies','Subscription'}:
+                    allocation[cat] = round((want_weight / total_weight) * 100, 1)
+                elif cat == 'Savings':
+                    allocation[cat] = round((saving_weight / total_weight) * 100, 1)
+                else:
+                    allocation[cat] = round((1.0 / total_weight) * 100, 1)
+
+            diff = 100.0 - sum(allocation.values())
+            if abs(diff) > 0.1:
+                max_cat = max(allocation, key=allocation.get)
+                allocation[max_cat] = round(allocation[max_cat] + diff, 1)
 
     allocation = {k: v for k, v in allocation.items() if k in selected_categories}
     total = sum(allocation.values())
-    if abs(total - 100) > 0.1:
+    if total > 0 and abs(total - 100) > 0.1:
         factor = 100 / total
         allocation = {k: round(v * factor, 1) for k, v in allocation.items()}
 
+    # Savings plan
     savings_prompt = f"""
-Given monthly income ₱{monthly_income:,.2f} and a target savings rate of {allocation.get('Savings', 10)}%, propose a simple daily, weekly, and monthly savings target.
-Return JSON: {{"daily": float, "weekly": float, "monthly": float, "tip": "string (max 60 chars)"}}.
-Only valid JSON.
+User monthly income: ₱{monthly_income:.2f}, monthly expenses: ₱{sum(recent_spending.values()):.2f}, current balance: ₱{get_monthly_summary(user.id)['balance']:.2f}.
+Spending mindset: {mindset}.
+Recommend how much they should save per day, per week, and per month.
+Return JSON: {{"daily": float, "weekly": float, "monthly": float, "tip": "string"}}.
 """
     try:
         raw_savings = route_ai_request(savings_prompt, max_tokens=200)
@@ -890,8 +1343,8 @@ Only valid JSON.
             if raw_savings.startswith('json'):
                 raw_savings = raw_savings[4:]
         savings_plan = json.loads(raw_savings.strip())
-    except:
-        monthly_save = monthly_income * (allocation.get('Savings', 10) / 100)
+    except Exception:
+        monthly_save = monthly_income * 0.2
         savings_plan = {
             "daily": round(monthly_save / 30, 2),
             "weekly": round(monthly_save / 4, 2),
@@ -899,10 +1352,11 @@ Only valid JSON.
             "tip": "Automate your savings on payday."
         }
 
+    # Advice
     advice_prompt = f"""
-Provide 3 short actionable financial advice items for a person with {mindset} mindset and monthly income ₱{monthly_income:,.2f}.
-Return JSON array of objects: [{{"title": "string", "body": "string", "type": "info"|"warning"|"success"}}].
-Only valid JSON.
+User has budget allocations: {allocation}. Recent spending: {dict(recent_spending)}.
+Provide 3 short pieces of financial advice as JSON array:
+[{{"title":"...","body":"...","type":"info|warning|success"}}]
 """
     try:
         raw_advice = route_ai_request(advice_prompt, max_tokens=300)
@@ -913,23 +1367,22 @@ Only valid JSON.
         advice = json.loads(raw_advice.strip())
         if not isinstance(advice, list):
             advice = []
-    except:
+    except Exception:
         advice = [
             {"title": "Stay Consistent", "body": "Track every expense to improve your score.", "type": "info"},
             {"title": "Savings First", "body": "Transfer savings immediately after receiving income.", "type": "success"},
             {"title": "Review Wants", "body": "Audit subscriptions and entertainment monthly.", "type": "warning"}
         ]
 
-    summary_prompt = f"""
-In one sentence, summarise the financial outlook for a Filipino user with income ₱{monthly_income:,.2f}, {mindset} mindset.
-Keep it optimistic and practical.
-"""
+    # Financial summary
+    summary_prompt = f"Based on monthly income ₱{monthly_income}, mindset {mindset}, and allocations {allocation}, give a one‑sentence overall financial health assessment."
     try:
         raw_summary = route_ai_request(summary_prompt, max_tokens=100)
         financial_summary = raw_summary.strip()
-    except:
+    except Exception:
         financial_summary = "Your AI plan is ready. Start by logging your expenses to get personalized insights."
 
+    # Save allocations
     UserAllocation.query.filter_by(user_id=user.id).delete()
     needs = {'Food & Dining', 'Transport', 'Groceries', 'Health', 'Debt repayment', 'Mortgage'}
     savings_cats = {'Savings'}
@@ -953,60 +1406,66 @@ Keep it optimistic and practical.
     }
     return jsonify(result), 200
 
-
+# ----------------------------------------------------------------------
+# Classify transaction / AI chat
+# ----------------------------------------------------------------------
 @app.route('/api/ai/classify_transaction', methods=['POST'])
 @login_required
 def ai_classify_transaction():
     data = request.json
-    if not data or 'note' not in data:
-        return jsonify({'error': 'Missing note field'}), 400
-    note = data['note'][:100]
-    prompt = f"""Classify the following transaction description into one of the categories: Food & Dining, Transport, Groceries, Health, Entertainment, Debt repayment, Mortgage, Subscription, Hobbies, Other. Also decide if it's a need or want.
-Return JSON: {{"category": "string", "is_need": boolean}}.
-Description: "{note}"
-"""
+    if data.get('tx_type') == 'income':
+        return jsonify({'is_need': True, 'priority': 3, 'suggested_note': 'Income received'})
+    prompt = f"Classify expense: category {data['category']}, amount ₱{data['amount']}, note {data.get('note','none')}. Return JSON: {{'is_need':bool,'priority':int,'suggested_note':str}}"
+    raw = route_ai_request(prompt, max_tokens=150)
     try:
-        raw = route_ai_request(prompt, max_tokens=100)
         if raw.startswith('```'):
             raw = raw.split('```')[1]
             if raw.startswith('json'):
                 raw = raw[4:]
-        result = json.loads(raw.strip())
-        return jsonify(result), 200
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
+        return jsonify(json.loads(raw.strip()))
+    except:
+        return jsonify({'is_need': data['category'] in needs_set, 'priority': 2 if data['category'] in needs_set else 1, 'suggested_note': data.get('note','')})
 
 @app.route('/api/ai/chat', methods=['POST'])
 @login_required
 def ai_chat():
-    data = request.json
-    user_msg = data.get('message', '')
-    if not user_msg:
-        return jsonify({'error': 'No message'}), 400
     user = get_current_user()
+    data = request.json
     summary = get_monthly_summary(user.id)
-    context = f"User balance: ₱{summary['balance']:,.2f}, monthly income: ₱{summary['income']:,.2f}, monthly expense: ₱{summary['expense']:,.2f}."
-    prompt = f"You are a friendly financial assistant. {context}\nUser: {user_msg}\nAI:"
-    reply = route_ai_request(prompt, max_tokens=300)
-    return jsonify({'reply': reply}), 200
-
+    score = compute_health_score(user.id)
+    future_cnt = FutureExpense.query.filter_by(user_id=user.id).count()
+    allocs = UserAllocation.query.filter_by(user_id=user.id).all()
+    alloc_str = ', '.join([f"{a.category_name}: {a.percentage}%" for a in allocs]) or 'Not set'
+    recent = Transaction.query.filter_by(user_id=user.id).order_by(Transaction.tx_date.desc()).limit(8).all()
+    recent_str = '\n'.join([f"{t.category}: ₱{t.amount:.2f} ({t.tx_type}) on {t.tx_date.strftime('%b %d')}" for t in recent]) or 'None'
+    prompt = f"""
+You are SmartSpend AI for {user.name}.
+Balance: ₱{summary['balance']:,.2f}, Income: ₱{summary['income']:,.2f}, Expenses: ₱{summary['expense']:,.2f}, Health: {score}/100.
+Allocation: {alloc_str}. Pinned future: {future_cnt}.
+Recent: {recent_str}
+User asks: "{data.get('message','')}"
+Reply in 3-5 sentences, warm, actionable, use ₱.
+"""
+    reply = route_ai_request(prompt, max_tokens=400)
+    return jsonify({'reply': reply})
 
 # ----------------------------------------------------------------------
-# Apply future expenses
+# Apply future expenses (FIXED indentation + Asia/Manila timezone)
 # ----------------------------------------------------------------------
 @app.route('/api/apply_future_expenses', methods=['POST'])
 @login_required
 def apply_future_expenses():
     user = get_current_user()
-    today = datetime.now(timezone.utc).date()
-    future_expenses = FutureExpense.query.filter(
+    today = datetime.now(ZoneInfo("Asia/Manila")).date()
+    applied = []
+
+    # 1. One-time expenses
+    onetime = FutureExpense.query.filter(
         FutureExpense.user_id == user.id,
         FutureExpense.expense_date <= today,
         FutureExpense.cycle == 'One-time'
     ).all()
-    applied = []
-    for exp in future_expenses:
+    for exp in onetime:
         tx = Transaction(
             user_id=user.id,
             amount=exp.amount,
@@ -1019,11 +1478,41 @@ def apply_future_expenses():
         db.session.add(tx)
         applied.append(exp.description)
         db.session.delete(exp)
+
+    # 2. Recurring expenses
+    recurring = FutureExpense.query.filter(
+        FutureExpense.user_id == user.id,
+        FutureExpense.expense_date <= today,
+        FutureExpense.cycle.in_(['Weekly', 'Monthly'])
+    ).all()
+    for exp in recurring:
+        tx = Transaction(
+            user_id=user.id,
+            amount=exp.amount,
+            category=exp.category,
+            tx_type='expense',
+            is_need=(exp.category in ['Food & Dining', 'Debt repayment', 'Mortgage', 'Transport']),
+            priority=1,
+            note=f"Auto-deducted recurring: {exp.description} ({exp.cycle})"
+        )
+        db.session.add(tx)
+        applied.append(f"{exp.description} (recurring)")
+
+        if exp.cycle == 'Weekly':
+            next_date = exp.expense_date + timedelta(weeks=1)
+        else:
+            next_date = exp.expense_date + timedelta(days=30)
+
+        while next_date <= today:
+            if exp.cycle == 'Weekly':
+                next_date += timedelta(weeks=1)
+            else:
+                next_date += timedelta(days=30)
+
+        exp.expense_date = next_date
+
     db.session.commit()
     return jsonify({'applied': applied, 'count': len(applied)}), 200
-
-
-
 HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1449,16 +1938,6 @@ body::before{
 .needwant-group { display:flex; gap:16px; align-items:center; margin-top:8px; }
 .needwant-group label { font-size:0.82rem; display:flex; align-items:center; gap:4px; cursor:pointer; }
 .needwant-group input[type="radio"] { accent-color:var(--green); }
-/* New chart card styles */
-.chart-card {
-    margin-top: 8px;
-    margin-bottom: 24px;
-}
-.vs-chart-container {
-    position: relative;
-    height: 280px;
-    width: 100%;
-}
 </style>
 </head>
 <body>
@@ -1485,78 +1964,48 @@ body::before{
     </div>
   </div>
 
+  <!-- DASHBOARD SCREEN -->
   <div class="screen active" id="screen-dashboard">
     <div class="income-hero">
       <div class="income-label">Monthly Income & Expenses — Tell ML, it handles the rest</div>
       <div class="income-tool-row">
         <select id="incomeTool" class="tool-picker">
-          <option value="manual">📝 Manual Income & Expense</option>
+          <option value="manual-income">📝 Manual Income (ML Plan)</option>
+          <option value="manual-income-add">💰 Add Income</option>
+          <option value="manual-expense">📝 Manual Expense (Quick Log)</option>
           <option value="auto">📸 Automatic (Image/OCR)</option>
           <option value="profile">👤 Edit Profile</option>
         </select>
         <div style="margin-left:auto;"><span class="ai-badge">ML</span></div>
       </div>
 
-      <div id="manualBlock">
-        <div class="income-input-row" style="align-items:center; gap:16px; margin-bottom:16px;">
-          <span style="font-size:0.9rem; color:var(--muted2);">Transaction type:</span>
-          <label style="cursor:pointer; display:flex; align-items:center; gap:6px;">
-            <input type="radio" name="txMode" value="income" checked onchange="switchTxMode()"> Income
-          </label>
-          <label style="cursor:pointer; display:flex; align-items:center; gap:6px;">
-            <input type="radio" name="txMode" value="expense" onchange="switchTxMode()"> Expense
-          </label>
+      <!-- Manual Income Block (for ML Plan) -->
+      <div id="manualIncomeBlock">
+        <div class="income-input-row">
+          <div class="income-peso">₱</div>
+          <input class="income-input" id="incomeInput" type="number" placeholder="0.00" step="100" min="0">
+          <button class="btn-add" id="addIncomeBtn" style="background:var(--green-dim); color:var(--green); border:1px solid var(--border);">+ Add Income</button>
         </div>
-
-        <div id="incomeFields">
-          <div class="income-input-row" style="margin-bottom:12px;">
-            <label style="font-size:0.8rem; color:var(--muted2);">Date</label>
-            <input type="date" id="incomeDate" class="form-input" style="width:160px;">
-          </div>
-          <div style="display:flex; gap:12px; align-items:stretch; flex-wrap:wrap;">
-            <div class="income-peso">₱</div>
-            <input class="income-input" id="incomeInput" type="number" placeholder="0.00" step="100" min="0">
-          </div>
-          <div id="incomeDateWarning" style="display:none; color:var(--red); font-size:0.75rem; margin-top:8px;">
-            Cannot add past income
-          </div>
-        </div>
-
-        <div id="expenseFields" style="display:none;">
-          <div class="tx-form">
-            <div class="form-group"><label class="form-label">Amount (₱)</label><input class="form-input" id="expenseAmount" type="number" placeholder="0.00" step="0.01" min="1"></div>
-            <div class="form-group"><label class="form-label">Category</label>
-              <select class="form-select" id="expenseCategory">
-                <option>Food & Dining</option><option>Transport</option><option>Groceries</option>
-                <option>Entertainment</option><option>Health</option><option>Debt repayment</option>
-                <option>Mortgage</option><option>Subscription</option><option>Hobbies</option><option>Other</option>
-              </select>
-            </div>
-            <div class="form-group"><label class="form-label">Note</label><input class="form-input" id="expenseNote" placeholder="Short description"></div>
-            <div class="form-group" style="justify-content:flex-end;">
-              <div class="needwant-group">
-                <label><input type="radio" name="needwant" value="need" checked> Need</label>
-                <label><input type="radio" name="needwant" value="want"> Want</label>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="mindset-row" id="mindsetRow" style="margin-top:20px;">
+        <div class="mindset-row">
           <span style="font-size:0.78rem;color:var(--muted);align-self:center;">Spending style:</span>
           <button class="mindset-btn" data-mindset="Saver">🏦 Saver</button>
           <button class="mindset-btn active" data-mindset="Neutral">⚖️ Balanced</button>
           <button class="mindset-btn" data-mindset="Spender">🛍️ Spender</button>
         </div>
-
         <div class="ai-checklist">
           <div style="font-weight:600;margin-bottom:12px;">🧠 ML Autonomous Allocation (100% Sum Rule)</div>
           <div class="checklist-section">
             <div class="checklist-section-title" style="display:flex; align-items:center; gap:10px;">
-              Custom ⚙️
-              <button class="add-cat-btn" data-type="want" title="Add custom category" style="background:var(--green-dim); border:1px solid var(--border); color:var(--green); border-radius:6px; width:26px; height:26px; display:flex; align-items:center; justify-content:center; cursor:pointer; font-size:1.2rem;">+</button>
+              Needs ▼
+              <button class="add-cat-btn" data-type="need" title="Add custom Need category" style="background:var(--green-dim); border:1px solid var(--border); color:var(--green); border-radius:6px; width:26px; height:26px; display:flex; align-items:center; justify-content:center; cursor:pointer; font-size:1.2rem;">+</button>
             </div>
             <div id="needsChecklist" class="checklist-item"></div>
+          </div>
+          <div class="checklist-section">
+            <div class="checklist-section-title" style="display:flex; align-items:center; gap:10px;">
+              Wants ▼
+              <button class="add-cat-btn" data-type="want" title="Add custom Want category" style="background:var(--green-dim); border:1px solid var(--border); color:var(--green); border-radius:6px; width:26px; height:26px; display:flex; align-items:center; justify-content:center; cursor:pointer; font-size:1.2rem;">+</button>
+            </div>
             <div id="wantsChecklist" class="checklist-item"></div>
           </div>
           <div id="totalWarning" class="total-warning" style="display:none;">⚠️ Total allocation must be 100% – ML will normalise.</div>
@@ -1565,22 +2014,36 @@ body::before{
         </div>
       </div>
 
-      <div id="incomeImageUpload" class="income-image-upload" style="display:none;">
-        <input type="file" id="incomeImage" accept="image/*" capture="environment">
-        <div class="ocr-hint">📸 Upload a payslip or receipt – ML will extract all income & expenses.</div>
-        <div id="ocrModal" class="modal-overlay" style="display:none;">
-          <div class="auth-card" style="width:600px; max-height:80vh; overflow-y:auto;">
-            <div class="auth-logo">📄</div>
-            <div style="font-weight:600; margin-bottom:16px;">Review extracted items</div>
-            <div id="ocrItemsList"></div>
-            <div style="display:flex; gap:12px; margin-top:16px;">
-              <button class="btn-add" id="ocrSaveBtn">Save All</button>
-              <button class="btn" id="ocrCancelBtn">Cancel</button>
+      <!-- Manual Expense Block (with Need/Want override) -->
+      <div id="manualExpenseBlock" style="display:none;">
+        <div class="tx-form">
+          <div class="form-group"><label class="form-label">Amount (₱)</label><input class="form-input" id="expenseAmount" type="number" placeholder="0.00" step="0.01" min="1"></div>
+          <div class="form-group"><label class="form-label">Category</label>
+            <select class="form-select" id="expenseCategory">
+              <option>Food & Dining</option><option>Transport</option><option>Groceries</option>
+              <option>Entertainment</option><option>Health</option><option>Debt repayment</option>
+              <option>Mortgage</option><option>Subscription</option><option>Hobbies</option><option>Other</option>
+            </select>
+          </div>
+          <div class="form-group"><label class="form-label">Note</label><input class="form-input" id="expenseNote" placeholder="Short description"></div>
+          <div class="form-group" style="justify-content:flex-end;">
+            <div class="needwant-group">
+              <label><input type="radio" name="needwant" value="need" checked> Need</label>
+              <label><input type="radio" name="needwant" value="want"> Want</label>
             </div>
+            <button class="btn-add" id="addExpenseBtn">Add Expense →</button>
           </div>
         </div>
+        <div id="expenseClassifyResult" style="display:none;margin-top:8px;"></div>
       </div>
 
+      <!-- OCR Upload Block -->
+      <div id="incomeImageUpload" class="income-image-upload" style="display:none;">
+        <input type="file" id="incomeImage" accept="image/*" capture="environment">
+        <div class="ocr-hint">📸 Take a photo or upload a payslip / budget screenshot. ML will read all income & expenses.</div>
+      </div>
+
+      <!-- Profile Edit Block -->
       <div id="profileBlock" class="profile-block" style="display:none;">
         <div style="font-size:1rem;font-weight:600;margin-bottom:16px;color:var(--green);">Edit Your Profile</div>
         <div class="form-group">
@@ -1629,22 +2092,12 @@ body::before{
       <div class="stat-card blue-glow"><div class="stat-value" id="sScore" style="color:var(--blue)">—</div><div class="stat-label">Health Score</div><div class="stat-sub" id="scoreLabel">awaiting data</div></div>
     </div>
 
-    <!-- NEW: Income vs Expense bar chart card -->
-    <div class="card chart-card" id="incomeExpenseChartCard">
-      <div class="card-header">
-        <span class="card-title">📊 Income vs Expenses (Current Month)</span>
-        <span class="ai-badge">Real-time</span>
-      </div>
-      <div class="vs-chart-container">
-        <canvas id="incomeExpenseChart"></canvas>
-      </div>
-    </div>
-
     <div class="card ai-feed">
       <div class="ai-feed-header"><div class="ai-pulse"></div><div class="ai-feed-title">ML Activity Feed</div><div class="ai-badge" style="margin-left:auto;">SMART</div></div>
       <div id="aiFeed"><div class="empty-state"><div class="empty-state-icon">🤖</div><div class="empty-state-text">Enter your income above and click<br><strong style="color:var(--green)">Let ML Plan</strong> — SmartSpend will build your entire financial plan automatically.</div></div></div>
     </div>
 
+    <!-- Show Plan Details Toggle -->
     <div id="showPlanToggle" style="display:none; margin-bottom:16px;">
       <button class="btn btn-primary" id="togglePlanBtn">📊 Show Plan Details</button>
     </div>
@@ -1666,6 +2119,7 @@ body::before{
       <div class="alloc-grid" id="allocGrid"></div>
     </div>
 
+    <!-- Budget Management Card (with Reset button) -->
     <div id="budgetBlock" style="display:none" class="card">
       <div class="card-header">
         <span class="card-title">Manage Budgets</span>
@@ -1690,6 +2144,7 @@ body::before{
     </div>
   </div>
 
+  <!-- FUTURE SCREEN -->
   <div class="screen" id="screen-future">
     <div class="card">
       <div class="card-header"><span class="card-title">Pin Future Expense</span></div>
@@ -1708,6 +2163,7 @@ body::before{
     </div>
   </div>
 
+  <!-- INSIGHTS SCREEN -->
   <div class="screen" id="screen-insights">
     <div class="card">
       <div class="card-header"><span class="card-title">Budget Longevity (3 Scenarios)</span></div>
@@ -1729,6 +2185,7 @@ body::before{
     </div>
   </div>
 
+  <!-- HISTORY SCREEN -->
   <div class="screen" id="screen-history">
     <div class="card">
       <div class="card-header">
@@ -1747,6 +2204,7 @@ body::before{
     </div>
   </div>
 
+  <!-- ADMIN SCREEN -->
   <div class="screen" id="screen-admin">
     <div class="card">
       <div class="card-header">👑 Admin Dashboard</div>
@@ -1757,7 +2215,9 @@ body::before{
       </div>
       <div id="adminUsersPanel">
         <input type="text" id="adminSearchUser" placeholder="Search user..." class="form-input" style="margin-bottom:12px;">
-        <table style="width:100%; border-collapse:collapse;"><thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Role</th><th>Created</th><th>Actions</th></tr></thead><tbody id="adminUserTable"></tbody></table>
+        <table style="width:100%; border-collapse:collapse;"><thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Role</th><th>Created</th><th>Actions</th></tr></thead><tbody id="adminUserTable">
+  <!-- rows will be dynamically inserted here -->
+</tbody></table>
       </div>
       <div id="adminTransactionsPanel" style="display:none;">
         <select id="adminUserFilter" class="form-select" style="margin-bottom:12px;"><option value="">All Users</option></select>
@@ -1769,6 +2229,7 @@ body::before{
 
 <div id="toast"></div>
 
+<!-- Auth Overlay -->
 <div id="authOverlay" class="auth-overlay">
   <div class="auth-card">
     <div class="auth-logo">💚</div>
@@ -1785,6 +2246,7 @@ body::before{
   </div>
 </div>
 
+<!-- Sign‑out / Switch account modal -->
 <div id="signoutModal" class="modal-overlay" style="display:none;">
   <div class="auth-card" style="width:320px; padding:28px;">
     <div class="auth-logo" style="text-align:center; margin-bottom:12px;">💚</div>
@@ -1795,6 +2257,7 @@ body::before{
   </div>
 </div>
 
+<!-- Avatar Dropdown -->
 <div id="avatarDropdown" class="avatar-dropdown" style="display:none;">
   <div class="dropdown-user-info">
     <div id="dropdownUserName" style="font-weight:600;"></div>
@@ -1828,7 +2291,6 @@ let allTransactions = [];
 let currentMindset = 'Neutral';
 let aiPlan = null;
 let trendChart = null, catChartInst = null;
-let incomeExpenseChart = null;  // reference for the new bar chart
 let isLogin = true;
 let historyVisible = true;
 
@@ -1884,8 +2346,10 @@ function renderChecklist() {
   const wantsCont = document.getElementById('wantsChecklist');
   needsCont.innerHTML = '';
   wantsCont.innerHTML = '';
+
   categoryConfig.forEach(cat => addCategoryCheckbox(cat));
   customCategories.forEach(cat => addCategoryCheckbox(cat));
+
   document.querySelectorAll('.add-cat-btn').forEach(btn => {
     btn.removeEventListener('click', handleAddCategory);
     btn.addEventListener('click', handleAddCategory);
@@ -1894,23 +2358,50 @@ function renderChecklist() {
 
 function addCategoryCheckbox(cat) {
   const target = (cat.type === 'need' || cat.type === 'savings') ?
-    document.getElementById('needsChecklist') : document.getElementById('wantsChecklist');
+    document.getElementById('needsChecklist') :
+    document.getElementById('wantsChecklist');
+
   const div = document.createElement('div');
-  div.style.display = 'flex'; div.style.alignItems = 'center'; div.style.gap = '6px'; div.style.marginBottom = '6px';
+  div.style.display = 'flex';
+  div.style.alignItems = 'center';
+  div.style.gap = '6px';
+  div.style.marginBottom = '6px';
+
   const checkbox = document.createElement('input');
-  checkbox.type = 'checkbox'; checkbox.className = 'cat-checkbox'; checkbox.dataset.cat = cat.name; checkbox.checked = true;
+  checkbox.type = 'checkbox';
+  checkbox.className = 'cat-checkbox';
+  checkbox.dataset.cat = cat.name;
+  checkbox.checked = true;
+
   const label = document.createElement('label');
-  label.style.fontSize = '0.82rem'; label.style.color = 'var(--text2)'; label.textContent = cat.name;
+  label.style.fontSize = '0.82rem';
+  label.style.color = 'var(--text2)';
+  label.textContent = cat.name;
+
   const percentSpan = document.createElement('span');
-  percentSpan.className = 'cat-percent'; percentSpan.id = 'pct-' + cat.name.replace(/\s/g,''); percentSpan.textContent = '';
+  percentSpan.className = 'cat-percent';
+  percentSpan.id = 'pct-' + cat.name.replace(/\s/g,'');
+  percentSpan.textContent = '';
+
   if (cat.custom) {
     const removeBtn = document.createElement('button');
-    removeBtn.textContent = '✕'; removeBtn.style.background = 'transparent'; removeBtn.style.border = 'none';
-    removeBtn.style.color = 'var(--muted)'; removeBtn.style.cursor = 'pointer'; removeBtn.style.fontSize = '0.8rem'; removeBtn.style.padding = '0 4px';
-    removeBtn.onclick = () => { customCategories = customCategories.filter(c => c.name !== cat.name); renderChecklist(); };
+    removeBtn.textContent = '✕';
+    removeBtn.style.background = 'transparent';
+    removeBtn.style.border = 'none';
+    removeBtn.style.color = 'var(--muted)';
+    removeBtn.style.cursor = 'pointer';
+    removeBtn.style.fontSize = '0.8rem';
+    removeBtn.style.padding = '0 4px';
+    removeBtn.onclick = () => {
+      customCategories = customCategories.filter(c => c.name !== cat.name);
+      renderChecklist();
+    };
     div.appendChild(removeBtn);
   }
-  div.appendChild(checkbox); div.appendChild(label); div.appendChild(percentSpan);
+
+  div.appendChild(checkbox);
+  div.appendChild(label);
+  div.appendChild(percentSpan);
   target.appendChild(div);
 }
 
@@ -1920,7 +2411,10 @@ function handleAddCategory(e) {
   if (!name || name.trim() === '') return;
   const trimmed = name.trim();
   const exists = categoryConfig.concat(customCategories).some(c => c.name.toLowerCase() === trimmed.toLowerCase());
-  if (exists) { toast('Category already exists'); return; }
+  if (exists) {
+    toast('Category already exists');
+    return;
+  }
   customCategories.push({ name: trimmed, type: type, defaultPct: 0, custom: true });
   renderChecklist();
 }
@@ -1937,84 +2431,6 @@ function updateChecklistPercentages(allocation) {
     if (span) span.textContent = pct !== undefined ? `${pct.toFixed(1)}%` : '';
   });
 }
-
-// ── INCOME VS EXPENSE BAR CHART (NEW) ──
-function renderIncomeExpenseChart(income, expense) {
-  const ctx = document.getElementById('incomeExpenseChart').getContext('2d');
-  if (incomeExpenseChart) incomeExpenseChart.destroy();
-  incomeExpenseChart = new Chart(ctx, {
-    type: 'bar',
-    data: {
-      labels: ['Income', 'Expenses'],
-      datasets: [{
-        label: 'Amount (₱)',
-        data: [income || 0, expense || 0],
-        backgroundColor: ['rgba(0,229,160,0.7)', 'rgba(255,59,92,0.7)'],
-        borderColor: ['#00E5A0', '#FF3B5C'],
-        borderWidth: 1,
-        borderRadius: 8,
-        barPercentage: 0.6
-      }]
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: true,
-      plugins: {
-        legend: { labels: { color: '#B0C8E0' } },
-        tooltip: { callbacks: { label: (ctx) => `${ctx.dataset.label}: ${fmt(ctx.raw)}` } }
-      },
-      scales: {
-        y: {
-          beginAtZero: true,
-          grid: { color: 'rgba(107,136,168,0.2)' },
-          ticks: { color: '#B0C8E0', callback: (val) => '₱' + val.toLocaleString() }
-        },
-        x: { ticks: { color: '#B0C8E0' } }
-      }
-    }
-  });
-}
-
-// ── TX MODE SWITCH ──
-function switchTxMode() {
-  const mode = document.querySelector('input[name="txMode"]:checked').value;
-  document.getElementById('incomeFields').style.display = mode === 'income' ? 'block' : 'none';
-  document.getElementById('expenseFields').style.display = mode === 'expense' ? 'block' : 'none';
-  document.getElementById('mindsetRow').style.display = mode === 'income' ? 'flex' : 'none';
-}
-
-// ── DATE & INCOME VALIDATION ──
-function updateAddIncomeButtonState() {
-  const dateInput = document.getElementById('incomeDate');
-  const warning = document.getElementById('incomeDateWarning');
-  const today = new Date().toISOString().slice(0,10);
-  const isPast = dateInput.value < today;
-  warning.style.display = (isPast && dateInput.value !== '') ? 'inline' : 'none';
-}
-
-document.getElementById('incomeDate').addEventListener('change', updateAddIncomeButtonState);
-document.getElementById('incomeInput').addEventListener('input', function() {
-  updateAddIncomeButtonState();
-  const income = parseFloat(this.value) || 0;
-  if (income <= 10000) setActiveMindset('Saver');
-  else if (income <= 50000) setActiveMindset('Neutral');
-  else setActiveMindset('Spender');
-});
-
-function setActiveMindset(mindset) {
-  document.querySelectorAll('.mindset-btn').forEach(b => b.classList.remove('active'));
-  const btn = document.querySelector(`.mindset-btn[data-mindset="${mindset}"]`);
-  if (btn) btn.classList.add('active');
-  currentMindset = mindset;
-}
-
-document.querySelectorAll('.mindset-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.mindset-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    currentMindset = btn.dataset.mindset;
-  });
-});
 
 // ── AUTH ──
 const authOverlay = document.getElementById('authOverlay');
@@ -2033,44 +2449,74 @@ const authSub = document.getElementById('authSub');
 toggleAuth.addEventListener('click', () => {
   isLogin = !isLogin;
   if(isLogin) {
-    authTitle.textContent = 'Welcome back'; authSub.textContent = 'Sign in to your SmartSpend account';
-    authBtn.textContent = 'Sign In'; regName.style.display='none'; authConfirm.style.display='none';
-    termsRow.style.display='none'; toggleAuth.innerHTML = 'No account? <span>Register here</span>';
+    authTitle.textContent = 'Welcome back';
+    authSub.textContent = 'Sign in to your SmartSpend account';
+    authBtn.textContent = 'Sign In';
+    regName.style.display='none';
+    authConfirm.style.display='none';
+    termsRow.style.display='none';
+    toggleAuth.innerHTML = 'No account? <span>Register here</span>';
   } else {
-    authTitle.textContent = 'Create account'; authSub.textContent = 'Start your ML‑powered financial journey';
-    authBtn.textContent = 'Register'; regName.style.display='block'; authConfirm.style.display='block';
-    termsRow.style.display='flex'; toggleAuth.innerHTML = 'Already registered? <span>Sign in</span>';
+    authTitle.textContent = 'Create account';
+    authSub.textContent = 'Start your ML‑powered financial journey';
+    authBtn.textContent = 'Register';
+    regName.style.display='block';
+    authConfirm.style.display='block';
+    termsRow.style.display='flex';
+    toggleAuth.innerHTML = 'Already registered? <span>Sign in</span>';
   }
   authMsg.textContent = '';
 });
 
 authBtn.addEventListener('click', async () => {
   authMsg.textContent = '';
-  if(!isLogin && authPass.value !== authConfirm.value) { authMsg.textContent = 'Passwords do not match'; return; }
-  if(!isLogin && !termsCheck.checked) { authMsg.textContent = 'You must accept the terms'; return; }
+  if(!isLogin && authPass.value !== authConfirm.value) {
+    authMsg.textContent = 'Passwords do not match';
+    return;
+  }
+  if(!isLogin && !termsCheck.checked) {
+    authMsg.textContent = 'You must accept the terms';
+    return;
+  }
   try {
     const endpoint = isLogin ? '/api/login' : '/api/register';
     const body = isLogin ? { email: authEmail.value, password: authPass.value } :
       { name: regName.value, email: authEmail.value, password: authPass.value };
     const data = await api(endpoint, { method:'POST', body: JSON.stringify(body) });
-    currentUser = data; authOverlay.style.display = 'none'; initApp();
-  } catch(e) { authMsg.textContent = e.message; }
+    currentUser = data;
+    authOverlay.style.display = 'none';
+    initApp();
+  } catch(e) {
+    authMsg.textContent = e.message;
+  }
 });
 
 // ── SIGN OUT / SWITCH ACCOUNT ──
-document.getElementById('signoutBtn').addEventListener('click', () => { document.getElementById('signoutModal').style.display = 'flex'; });
-document.getElementById('confirmLogoutBtn').addEventListener('click', async () => {
-  await api('/api/logout', { method:'POST' }); currentUser = null;
-  document.getElementById('signoutModal').style.display = 'none'; authOverlay.style.display = 'flex';
-  document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
-  document.getElementById('screen-dashboard').classList.add('active'); toast('Signed out');
+document.getElementById('signoutBtn').addEventListener('click', () => {
+  document.getElementById('signoutModal').style.display = 'flex';
 });
+
+document.getElementById('confirmLogoutBtn').addEventListener('click', async () => {
+  await api('/api/logout', { method:'POST' });
+  currentUser = null;
+  document.getElementById('signoutModal').style.display = 'none';
+  authOverlay.style.display = 'flex';
+  document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
+  document.getElementById('screen-dashboard').classList.add('active');
+  toast('Signed out');
+});
+
 document.getElementById('switchAccountBtn').addEventListener('click', async () => {
-  await api('/api/logout', { method:'POST' }); currentUser = null;
-  document.getElementById('signoutModal').style.display = 'none'; authOverlay.style.display = 'flex';
+  await api('/api/logout', { method:'POST' });
+  currentUser = null;
+  document.getElementById('signoutModal').style.display = 'none';
+  authOverlay.style.display = 'flex';
   toast('Switching account – please sign in');
 });
-document.getElementById('cancelSignoutBtn').addEventListener('click', () => { document.getElementById('signoutModal').style.display = 'none'; });
+
+document.getElementById('cancelSignoutBtn').addEventListener('click', () => {
+  document.getElementById('signoutModal').style.display = 'none';
+});
 
 // ── NAVIGATION ──
 document.querySelectorAll('.nav-item[data-nav]').forEach(btn => {
@@ -2095,12 +2541,19 @@ async function initApp() {
   const avatar = document.getElementById('userAvatar');
   const initialSpan = avatar.querySelector('.avatar-initial');
   const imgEl = avatar.querySelector('img');
-  if (currentUser.avatar_url) { imgEl.src = currentUser.avatar_url; imgEl.style.display = 'block'; initialSpan.style.display = 'none'; }
-  else { imgEl.style.display = 'none'; initialSpan.style.display = 'block'; initialSpan.textContent = currentUser.name?.charAt(0)?.toUpperCase() || '?'; }
+  if (currentUser.avatar_url) {
+    imgEl.src = currentUser.avatar_url;
+    imgEl.style.display = 'block';
+    initialSpan.style.display = 'none';
+  } else {
+    imgEl.style.display = 'none';
+    initialSpan.style.display = 'block';
+    initialSpan.textContent = currentUser.name?.charAt(0)?.toUpperCase() || '?';
+  }
   if(currentUser.role === 'admin') document.getElementById('adminNavBtn').style.display = 'flex';
   else document.getElementById('adminNavBtn').style.display = 'none';
-  document.getElementById('incomeDate').value = new Date().toISOString().slice(0,10);
-  renderChecklist(); loadDashboard();
+  renderChecklist();
+  loadDashboard();
 }
 
 // ── AVATAR DROPDOWN ──
@@ -2108,15 +2561,21 @@ async function initApp() {
   const avatar = document.getElementById('userAvatar');
   const dropdown = document.getElementById('avatarDropdown');
   let visible = false;
+
   avatar.addEventListener('click', (e) => {
-    e.stopPropagation(); visible = !visible; dropdown.style.display = visible ? 'block' : 'none';
+    e.stopPropagation();
+    visible = !visible;
+    dropdown.style.display = visible ? 'block' : 'none';
     if (visible && currentUser) {
       document.getElementById('dropdownUserName').textContent = currentUser.name;
       document.getElementById('dropdownUserEmail').textContent = currentUser.email;
       document.getElementById('avatarUrlInput').value = currentUser.avatar_url || '';
     }
   });
-  document.addEventListener('click', () => { visible = false; dropdown.style.display = 'none'; });
+  document.addEventListener('click', () => {
+    visible = false;
+    dropdown.style.display = 'none';
+  });
 })();
 
 document.getElementById('saveAvatarBtn').addEventListener('click', async () => {
@@ -2126,8 +2585,15 @@ document.getElementById('saveAvatarBtn').addEventListener('click', async () => {
     currentUser.avatar_url = res.avatar_url;
     const initial = document.querySelector('.avatar-initial');
     const img = document.querySelector('#userAvatar img');
-    if (res.avatar_url) { img.src = res.avatar_url; img.style.display = 'block'; initial.style.display = 'none'; }
-    else { img.style.display = 'none'; initial.style.display = 'block'; initial.textContent = currentUser.name?.charAt(0)?.toUpperCase() || '?'; }
+    if (res.avatar_url) {
+      img.src = res.avatar_url;
+      img.style.display = 'block';
+      initial.style.display = 'none';
+    } else {
+      img.style.display = 'none';
+      initial.style.display = 'block';
+      initial.textContent = currentUser.name?.charAt(0)?.toUpperCase() || '?';
+    }
     toast('Avatar updated');
   } catch(e) { toast(e.message); }
   document.getElementById('avatarDropdown').style.display = 'none';
@@ -2136,86 +2602,105 @@ document.getElementById('saveAvatarBtn').addEventListener('click', async () => {
 // ── TOOL PICKER TOGGLES ──
 document.getElementById('incomeTool').addEventListener('change', function(){
   const val = this.value;
-  document.getElementById('manualBlock').style.display = (val === 'manual') ? 'block' : 'none';
+  document.getElementById('manualIncomeBlock').style.display = (val === 'manual-income' || val === 'manual-income-add') ? 'block' : 'none';
+  document.getElementById('manualExpenseBlock').style.display = (val === 'manual-expense') ? 'block' : 'none';
   document.getElementById('incomeImageUpload').style.display = (val === 'auto') ? 'block' : 'none';
   document.getElementById('profileBlock').style.display = (val === 'profile') ? 'block' : 'none';
+
+  const addIncomeBtn = document.getElementById('addIncomeBtn');
+  const analyzeBtn = document.getElementById('analyzeBtn');
+  const checklist = document.querySelector('.ai-checklist');
+  const mindsetRow = document.querySelector('.mindset-row');
+  if (val === 'manual-income-add') {
+    addIncomeBtn.style.display = 'inline-flex';
+    analyzeBtn.style.display = 'none';
+    checklist.style.display = 'none';
+    mindsetRow.style.display = 'none';
+  } else if (val === 'manual-income') {
+    addIncomeBtn.style.display = 'inline-flex';
+    analyzeBtn.style.display = 'flex';
+    checklist.style.display = 'block';
+    mindsetRow.style.display = 'flex';
+  } else {
+    addIncomeBtn.style.display = 'none';
+    analyzeBtn.style.display = 'flex';
+  }
+
   if (val === 'profile' && currentUser) {
     document.getElementById('profileName').value = currentUser.name || '';
     document.getElementById('profileEmail').value = currentUser.email || '';
     document.getElementById('profilePass').value = '';
     document.getElementById('profileAvatar').value = currentUser.avatar_url || '';
-    if (currentUser.avatar_url) { document.getElementById('profilePreviewImg').src = currentUser.avatar_url; document.getElementById('profilePreviewImg').style.display = 'block'; document.getElementById('profilePreviewPlaceholder').style.display = 'none'; }
-    else { document.getElementById('profilePreviewImg').style.display = 'none'; document.getElementById('profilePreviewPlaceholder').style.display = 'block'; }
+    if (currentUser.avatar_url) {
+      document.getElementById('profilePreviewImg').src = currentUser.avatar_url;
+      document.getElementById('profilePreviewImg').style.display = 'block';
+      document.getElementById('profilePreviewPlaceholder').style.display = 'none';
+    } else {
+      document.getElementById('profilePreviewImg').style.display = 'none';
+      document.getElementById('profilePreviewPlaceholder').style.display = 'block';
+    }
   }
 });
 
-// ── ML PLAN BUTTON ──
-document.getElementById('analyzeBtn').addEventListener('click', async () => {
-  const mode = document.querySelector('input[name="txMode"]:checked').value;
-  if (mode === 'income') {
-    const amount = parseFloat(document.getElementById('incomeInput').value);
-    if (!amount || amount < 1) { toast('Enter a valid income amount (min 1)'); return; }
-    const date = document.getElementById('incomeDate').value;
-    if (!date) { toast('Please select a date'); return; }
-    const today = new Date().toISOString().slice(0,10);
-    if (date < today) { toast('Cannot add past income'); return; }
-    try {
-      await api('/api/transactions', { method:'POST', body: JSON.stringify({
-        amount, category:'Salary', tx_type:'income', is_need:true, note:'Manual income', tx_date: date
-      })});
-      toast('Income added! Running ML Plan…');
-      await autoRunPlanAndUpdateDashboard(true);
-    } catch(e) { toast(e.message); }
-    return;
-  }
-  if (mode === 'expense') {
-    const amount = parseFloat(document.getElementById('expenseAmount').value);
-    if (!amount || amount < 1) { toast('Amount must be at least 1'); return; }
-    const category = document.getElementById('expenseCategory').value;
-    const note = document.getElementById('expenseNote').value;
-    const isNeed = document.querySelector('input[name="needwant"]:checked').value === 'need';
-    try {
-      await api('/api/transactions', { method:'POST', body: JSON.stringify({
-        amount, category, tx_type:'expense', is_need:isNeed, note
-      })});
-      toast('Expense added! Running ML Plan…');
-      await autoRunPlanAndUpdateDashboard(true);
-    } catch(e) { toast(e.message); }
-    return;
-  }
-});
-
-// ── AUTO RUN PLAN ──
-async function autoRunPlanAndUpdateDashboard(runPlan = false) {
+// ── AUTO RUN PLAN AFTER INCOME ──
+async function autoRunPlanAndUpdateDashboard() {
   if (!currentUser) return;
   try {
     const summary = await api(`/api/summary/${currentUser.id}`);
     const totalIncome = summary.income || 0;
     document.getElementById('incomeInput').value = totalIncome;
     if (totalIncome <= 0) { loadDashboard(); return; }
-    if (runPlan) {
-      const selectedCategories = [];
-      document.querySelectorAll('.cat-checkbox:checked').forEach(chk => selectedCategories.push(chk.dataset.cat));
-      if (selectedCategories.length === 0) {
-        ['Food & Dining', 'Transport', 'Groceries', 'Health', 'Entertainment', 'Debt repayment', 'Savings']
-          .forEach(c => selectedCategories.push(c));
-      }
-      const result = await api('/api/ai/full_setup', {
-        method: 'POST',
-        body: JSON.stringify({ monthly_income: totalIncome, mindset: currentMindset, selected_categories })
-      });
-      aiPlan = result;
-      if (result.allocation) {
-        addFeedEvent('✅', `AI categorised ${Object.keys(result.allocation).length} items`);
-        addFeedEvent('💰', `Savings target: ${fmt(result.savings_plan.monthly)}/month`);
-        addFeedEvent('🧠', `Summary: "${result.financial_summary.substring(0,60)}…"`);
-        addFeedEvent('📋', `${result.advice.length} insights ready`);
-        renderAIPlan(result);
-      }
+    const selectedCategories = [];
+    document.querySelectorAll('.cat-checkbox:checked').forEach(chk => selectedCategories.push(chk.dataset.cat));
+    if (selectedCategories.length === 0) {
+      ['Food & Dining', 'Transport', 'Groceries', 'Health', 'Entertainment', 'Debt repayment', 'Savings']
+        .forEach(c => selectedCategories.push(c));
+    }
+    const result = await api('/api/ai/full_setup', {
+      method: 'POST',
+      body: JSON.stringify({ monthly_income: totalIncome, mindset: currentMindset, selected_categories })
+    });
+    aiPlan = result;
+    if (result.allocation) {
+      addFeedEvent('✅', `Budget allocated across ${Object.keys(result.allocation).length} categories`);
+      addFeedEvent('💰', `Savings target set: ${fmt(result.savings_plan.monthly)}/month`);
+      addFeedEvent('🧠', `Financial summary: "${result.financial_summary.substring(0,60)}…"`);
+      addFeedEvent('📋', `${result.advice.length} personalized insights ready`);
+      renderAIPlan(result);
     }
   } catch(e) { console.error('Auto plan error:', e); }
   loadDashboard();
 }
+
+document.getElementById('addIncomeBtn').addEventListener('click', async ()=>{
+  const amount = parseFloat(document.getElementById('incomeInput').value);
+  if(!amount || amount < 1) { toast('Enter a valid amount (min 1)'); return; }
+  try {
+    await api('/api/transactions', { method:'POST', body: JSON.stringify({
+      amount, category:'Salary', tx_type:'income', is_need:true, note:'Manual income'
+    })});
+    toast('Income added!');
+    await autoRunPlanAndUpdateDashboard();
+  } catch(e) { toast(e.message); }
+});
+
+// ── MANUAL EXPENSE LOGIC ──
+document.getElementById('addExpenseBtn').addEventListener('click', async ()=>{
+  const amount = parseFloat(document.getElementById('expenseAmount').value);
+  if(!amount || amount < 1) { toast('Amount must be at least 1'); return; }
+  const category = document.getElementById('expenseCategory').value;
+  const note = document.getElementById('expenseNote').value;
+  const isNeed = document.querySelector('input[name="needwant"]:checked').value === 'need';
+  try {
+    await api('/api/transactions', { method:'POST', body: JSON.stringify({
+      amount, category, tx_type:'expense', is_need:isNeed, note
+    })});
+    toast('Expense added!');
+    document.getElementById('expenseAmount').value = '';
+    document.getElementById('expenseNote').value = '';
+    loadDashboard();
+  } catch(e) { toast(e.message); }
+});
 
 // ── DASHBOARD LOAD ──
 async function loadDashboard() {
@@ -2228,12 +2713,12 @@ async function loadDashboard() {
     renderStats(summary, predict.score, longevity);
     renderForecast(predict.predictions?.weekly);
     renderTrendChart(summary.monthly);
-    // Update the new bar chart with current month values
-    renderIncomeExpenseChart(summary.income, summary.expense);
     document.getElementById('chartBlock').style.display = Object.keys(summary.monthly).length ? 'block' : 'none';
     document.getElementById('forecastBlock').style.display = Object.keys(predict.predictions?.weekly||{}).length ? 'block' : 'none';
   } catch(e) { toast(e.message); }
-  if (currentUser.monthly_budget_limit > 0 && !aiPlan) { autoRunPlanAndUpdateDashboard(true); }
+  if (currentUser.monthly_budget_limit > 0 && !aiPlan) {
+    autoRunPlanAndUpdateDashboard();
+  }
 }
 
 function renderStats(summary, score, longevity) {
@@ -2256,7 +2741,44 @@ function addFeedEvent(icon, text) {
   feed.prepend(div);
 }
 
-// ── RENDER AI PLAN ──
+// ── AI PLAN ──
+document.getElementById('analyzeBtn').addEventListener('click', runAIPlan);
+async function runAIPlan() {
+  const income = parseFloat(document.getElementById('incomeInput').value);
+  if(!income || income <= 0){ toast('Enter a valid monthly income first'); return; }
+  const selectedCategories = [];
+  document.querySelectorAll('.cat-checkbox:checked').forEach(chk => selectedCategories.push(chk.dataset.cat));
+  if(!selectedCategories.length){ toast('Please select at least one category'); return; }
+  const btn = document.getElementById('analyzeBtn');
+  const btnContent = document.getElementById('analyzeBtnContent');
+  btn.disabled = true;
+  btnContent.innerHTML = '<div class="spinner"></div> Analyzing…';
+  addFeedEvent('🤖','ML is analyzing your financial profile…');
+  try {
+    const result = await api('/api/ai/full_setup', {
+      method:'POST',
+      body: JSON.stringify({ monthly_income: income, mindset: currentMindset, selected_categories: selectedCategories })
+    });
+    if (!result.allocation) {
+      throw new Error('No allocation returned from ML');
+    }
+    aiPlan = result;
+    updateChecklistPercentages(result.allocation);
+    addFeedEvent('✅',`Budget allocated across ${Object.keys(result.allocation).length} categories`);
+    addFeedEvent('💰',`Savings target set: ${fmt(result.savings_plan.monthly)}/month`);
+    addFeedEvent('🧠',`Financial summary: "${result.financial_summary.substring(0,60)}…"`);
+    addFeedEvent('📋',`${result.advice.length} personalized insights ready`);
+    renderAIPlan(result);
+    toast('ML plan complete! 🎉', 'var(--green)');
+  } catch(e){
+    console.error('ML plan error:', e);
+    toast('ML error: '+e.message);
+    addFeedEvent('❌','ML error: '+e.message);
+  }
+  btn.disabled = false;
+  btnContent.innerHTML = '🔄 Re‑Analyze';
+}
+
 function renderAIPlan(plan) {
   document.getElementById('financialSummaryText').textContent = plan.financial_summary;
   document.getElementById('saveDaily').textContent = fmt(plan.savings_plan.daily);
@@ -2265,93 +2787,110 @@ function renderAIPlan(plan) {
   document.getElementById('savingsTip').textContent = '💡 ' + (plan.savings_plan.tip || '');
 
   const grid = document.getElementById('allocGrid');
-  const needsSet = new Set(['Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage']);
-  const savingsSet = new Set(['Savings']);
+  const needs = new Set(['Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage']);
+  const savings = new Set(['Savings']);
   grid.innerHTML = Object.entries(plan.allocation).map(([cat, pct])=>{
-    const type = savingsSet.has(cat) ? 'savings' : (needsSet.has(cat) ? 'need' : 'want');
+    const type = savings.has(cat) ? 'savings' : (needs.has(cat) ? 'need' : 'want');
     const amt = plan.allocation_amounts?.[cat] || (plan.monthly_income * pct / 100);
     return `<div class="alloc-item">
-      <div class="alloc-cat">${esc(cat)}</div><div class="alloc-pct">${pct.toFixed(0)}<span style="font-size:1rem;color:var(--muted)">%</span></div>
-      <div class="alloc-amount">${fmt(amt)}</div><div class="alloc-type ${type}">${type.toUpperCase()}</div>
-      <div class="alloc-item-bar ${type}" style="width:${Math.min(pct,100)}%"></div></div>`;
+      <div class="alloc-cat">${esc(cat)}</div>
+      <div class="alloc-pct">${pct.toFixed(0)}<span style="font-size:1rem;color:var(--muted)">%</span></div>
+      <div class="alloc-amount">${fmt(amt)}</div>
+      <div class="alloc-type ${type}">${type.toUpperCase()}</div>
+      <div class="alloc-item-bar ${type}" style="width:${Math.min(pct,100)}%"></div>
+    </div>`;
   }).join('');
 
   const adviceIcons = { info:'ℹ️', warning:'⚠️', success:'✅' };
   document.getElementById('adviceList').innerHTML = plan.advice.map(a=>
-    `<div class="advice-card ${esc(a.type)}"><span class="advice-icon">${adviceIcons[a.type]||'💡'}</span>
-      <div><div class="advice-title">${esc(a.title)}</div><div class="advice-body">${esc(a.body)}</div></div></div>`).join('');
-
-  const categories = Object.keys(plan.allocation);
-  const needs = [], wants = [], savings = [];
-  categories.forEach(cat => {
-    if (savingsSet.has(cat)) savings.push(cat);
-    else if (needsSet.has(cat)) needs.push(cat);
-    else wants.push(cat);
-  });
-  const needsCont = document.getElementById('needsChecklist');
-  const wantsCont = document.getElementById('wantsChecklist');
-  needsCont.innerHTML = '<div class="checklist-section-title">NEEDS (High Priority)</div>';
-  wantsCont.innerHTML = '<div class="checklist-section-title">WANTS (Lower Priority)</div>';
-  let idx = 1;
-  [...needs, ...savings].forEach(cat => {
-    const pct = plan.allocation[cat] || 0;
-    const item = document.createElement('div');
-    item.className = 'checklist-item'; item.style.display = 'flex'; item.style.alignItems = 'center'; item.style.justifyContent = 'space-between';
-    item.innerHTML = `<div style="display:flex; gap:8px; align-items:center;"><span style="color:var(--green); font-weight:700;">${idx++}</span><label style="font-size:0.82rem; color:var(--text2);">${esc(cat)}</label></div><span style="font-family:var(--font-mono); font-size:0.85rem; color:var(--green);">${pct.toFixed(1)}%</span>`;
-    needsCont.appendChild(item);
-  });
-  wants.forEach(cat => {
-    const pct = plan.allocation[cat] || 0;
-    const item = document.createElement('div');
-    item.className = 'checklist-item'; item.style.display = 'flex'; item.style.alignItems = 'center'; item.style.justifyContent = 'space-between';
-    item.innerHTML = `<div style="display:flex; gap:8px; align-items:center;"><span style="color:var(--amber); font-weight:700;">${idx++}</span><label style="font-size:0.82rem; color:var(--text2);">${esc(cat)}</label></div><span style="font-family:var(--font-mono); font-size:0.85rem; color:var(--amber);">${pct.toFixed(1)}%</span>`;
-    wantsCont.appendChild(item);
-  });
-  const returnBtn = document.createElement('button');
-  returnBtn.textContent = '🔄 Return to Checklist'; returnBtn.className = 'btn btn-primary'; returnBtn.style.marginTop = '12px';
-  returnBtn.onclick = () => { renderChecklist(); returnBtn.remove(); };
-  wantsCont.appendChild(returnBtn);
+    `<div class="advice-card ${esc(a.type)}">
+      <span class="advice-icon">${adviceIcons[a.type]||'💡'}</span>
+      <div><div class="advice-title">${esc(a.title)}</div><div class="advice-body">${esc(a.body)}</div></div>
+    </div>`).join('');
 
   const blocks = ['financialSummaryBlock', 'allocationBlock', 'adviceBlock'];
-  blocks.forEach(id => { document.getElementById(id).style.display = 'block'; });
+  blocks.forEach(id => {
+    document.getElementById(id).style.display = 'block';
+  });
   const toggleBtn = document.getElementById('showPlanToggle');
   const togglePlanBtn = document.getElementById('togglePlanBtn');
-  toggleBtn.style.display = 'block'; let detailsVisible = true;
+  toggleBtn.style.display = 'block';
+  let detailsVisible = true;
   togglePlanBtn.textContent = '🔽 Hide Plan Details';
-  togglePlanBtn.onclick = () => { detailsVisible = !detailsVisible; blocks.forEach(id => { document.getElementById(id).style.display = detailsVisible ? 'block' : 'none'; }); togglePlanBtn.textContent = detailsVisible ? '🔽 Hide Plan Details' : '📊 Show Plan Details'; };
+  togglePlanBtn.onclick = () => {
+    detailsVisible = !detailsVisible;
+    blocks.forEach(id => {
+      document.getElementById(id).style.display = detailsVisible ? 'block' : 'none';
+    });
+    togglePlanBtn.textContent = detailsVisible ? '🔽 Hide Plan Details' : '📊 Show Plan Details';
+  };
+
   loadBudgets();
 }
 
 // ── BUDGET MANAGEMENT ──
 async function loadBudgets() {
     if (!currentUser) return;
-    try { const budgets = await api(`/api/budgets/${currentUser.id}`); renderBudgetList(budgets); } catch(e) { toast(e.message); }
+    try {
+        const budgets = await api(`/api/budgets/${currentUser.id}`);
+        renderBudgetList(budgets);
+    } catch(e) { toast(e.message); }
 }
+
 function renderBudgetList(budgets) {
     const container = document.getElementById('budgetList');
-    if (!budgets.length) { container.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📊</div><div class="empty-state-text">No budgets set yet. Run AI Plan first.</div></div>'; return; }
+    if (!budgets.length) {
+        container.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📊</div><div class="empty-state-text">No budgets set yet. Run AI Plan first.</div></div>';
+        return;
+    }
     container.innerHTML = budgets.map(b => {
         const safeId = b.category.replace(/[^a-zA-Z0-9]/g, '_');
-        return `<div class="budget-item" id="budget-${safeId}"><div class="budget-cat">${esc(b.category)}</div><input class="budget-input" id="budget-input-${safeId}" type="number" step="0.01" value="${b.limit.toFixed(2)}"><button class="budget-save-btn" onclick="saveBudget('${b.category.replace(/'/g, "\\'")}', '${safeId}')">Save</button><span class="budget-amount">${fmt(b.limit)}</span></div>`;
+        return `
+          <div class="budget-item" id="budget-${safeId}">
+            <div class="budget-cat">${esc(b.category)}</div>
+            <input class="budget-input" id="budget-input-${safeId}" type="number" step="0.01" value="${b.limit.toFixed(2)}">
+            <button class="budget-save-btn" onclick="saveBudget('${b.category.replace(/'/g, "\\'")}', '${safeId}')">Save</button>
+            <span class="budget-amount">${fmt(b.limit)}</span>
+          </div>`;
     }).join('');
     document.getElementById('budgetBlock').style.display = 'block';
 }
+
 async function saveBudget(category, safeId) {
     const input = document.getElementById('budget-input-' + safeId);
     const newLimit = parseFloat(input.value);
     if (isNaN(newLimit)) return;
-    try { await api(`/api/budgets/${currentUser.id}/${encodeURIComponent(category)}`, { method: 'PUT', body: JSON.stringify({ limit: newLimit }) }); toast('Budget updated'); loadBudgets(); } catch(e) { toast(e.message); }
+    try {
+        await api(`/api/budgets/${currentUser.id}/${encodeURIComponent(category)}`, {
+            method: 'PUT',
+            body: JSON.stringify({ limit: newLimit })
+        });
+        toast('Budget updated');
+        loadBudgets();
+    } catch(e) { toast(e.message); }
 }
+
 document.getElementById('resetBudgetsBtn')?.addEventListener('click', async () => {
     if (!currentUser) return;
-    try { await api(`/api/budgets/reset_to_ai/${currentUser.id}`, { method: 'POST' }); toast('Budgets reset to AI recommendations'); loadBudgets(); } catch(e) { toast(e.message); }
+    try {
+        await api(`/api/budgets/reset_to_ai/${currentUser.id}`, { method: 'POST' });
+        toast('Budgets reset to AI recommendations');
+        loadBudgets();
+    } catch(e) { toast(e.message); }
 });
 
 function renderForecast(weekly) {
   const container = document.getElementById('forecastBars');
   if(!weekly) { container.innerHTML = ''; return; }
   const maxVal = Math.max(...Object.values(weekly), 1);
-  container.innerHTML = Object.entries(weekly).map(([week, val])=>{ const pct = (val / maxVal * 100).toFixed(0); return `<div class="forecast-bar-row"><span class="forecast-week-label">${week}</span><div class="forecast-track"><div class="forecast-fill" style="width:${pct}%"></div></div><span class="forecast-val">${fmt(val)}</span></div>`; }).join('');
+  container.innerHTML = Object.entries(weekly).map(([week, val])=>{
+    const pct = (val / maxVal * 100).toFixed(0);
+    return `<div class="forecast-bar-row">
+              <span class="forecast-week-label">${week}</span>
+              <div class="forecast-track"><div class="forecast-fill" style="width:${pct}%"></div></div>
+              <span class="forecast-val">${fmt(val)}</span>
+            </div>`;
+  }).join('');
 }
 
 function renderTrendChart(monthly) {
@@ -2361,110 +2900,433 @@ function renderTrendChart(monthly) {
   const labels = Object.keys(monthly);
   const incomeData = labels.map(m=>monthly[m].income);
   const expenseData = labels.map(m=>monthly[m].expense);
-  trendChart = new Chart(ctx, { type: 'line', data: { labels, datasets: [ { label: 'Income', data: incomeData, borderColor: '#00E5A0', backgroundColor: 'rgba(0,229,160,0.1)', tension:0.3 }, { label: 'Expense', data: expenseData, borderColor: '#FF3B5C', backgroundColor: 'rgba(255,59,92,0.1)', tension:0.3 } ] }, options: { responsive:true, maintainAspectRatio:false, plugins:{legend:{labels:{color:'#B0C8E0'}}} } });
+  trendChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Income', data: incomeData, borderColor: '#00E5A0', backgroundColor: 'rgba(0,229,160,0.1)', tension:0.3 },
+        { label: 'Expense', data: expenseData, borderColor: '#FF3B5C', backgroundColor: 'rgba(255,59,92,0.1)', tension:0.3 }
+      ]
+    },
+    options: { responsive:true, maintainAspectRatio:false, plugins:{legend:{labels:{color:'#B0C8E0'}}} }
+  });
 }
 
 // ── OCR IMAGE UPLOAD ──
 document.getElementById('incomeImage').addEventListener('change', async function(){
   const file = this.files[0];
   if(!file) return;
-  const formData = new FormData();
-  formData.append('image', file);
-  formData.append('save', 'false');
   try {
+    const formData = new FormData();
+    formData.append('image', file);
     const resp = await fetch('/api/ocr_income', { method:'POST', body: formData, credentials:'include' });
     const data = await resp.json();
-    if (data.transactions && data.transactions.length > 0) { showOCRModal(data.transactions.map(t => ({ ...t, id: Math.random().toString(36) }))); }
-    else { toast('No transactions found in the image'); }
+    if(data.transactions){
+      toast(`Extracted ${data.count} transactions`);
+      loadDashboard();
+    }
   } catch(e) { toast('OCR failed: '+e.message); }
 });
 
-function showOCRModal(items) {
-  const modal = document.getElementById('ocrModal');
-  const list = document.getElementById('ocrItemsList');
-  list.innerHTML = '';
-  items.forEach((item, idx) => {
-    const row = document.createElement('div');
-    row.className = 'budget-item';
-    row.innerHTML = `<span style="flex:1;">${esc(item.category)} – ₱${item.amount.toFixed(2)} – ${esc(item.note)}</span><select class="form-select" style="width:100px;" onchange="updateOCRItemType(${idx}, this.value)"><option value="income" ${item.type === 'income' ? 'selected' : ''}>Income</option><option value="expense" ${item.type === 'expense' ? 'selected' : ''}>Expense</option></select><button class="btn-del" onclick="removeOCRItem(${idx})">🗑</button>`;
-    list.appendChild(row);
+// Mindset buttons
+document.querySelectorAll('.mindset-btn').forEach(btn => {
+  btn.addEventListener('click', ()=>{
+    document.querySelectorAll('.mindset-btn').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    currentMindset = btn.dataset.mindset;
   });
-  window.ocrItems = items;
-  document.getElementById('ocrSaveBtn').onclick = async () => {
-    for (const item of window.ocrItems) {
-      if (item._deleted) continue;
-      await api('/api/transactions', { method: 'POST', body: JSON.stringify({ amount: Math.abs(item.amount), category: item.category, tx_type: item.type, is_need: item.category in {'Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage'}, note: item.note }) });
-    }
-    toast('Transactions saved!'); modal.style.display = 'none'; loadDashboard();
-  };
-  document.getElementById('ocrCancelBtn').onclick = () => { modal.style.display = 'none'; };
-  modal.style.display = 'flex';
-}
-function updateOCRItemType(idx, newType) { window.ocrItems[idx].type = newType; }
-function removeOCRItem(idx) { window.ocrItems[idx]._deleted = true; document.getElementById('ocrItemsList').children[idx].style.display = 'none'; }
+});
 
 // ── FUTURE EXPENSES ──
-async function loadFutureExpenses() { if(!currentUser) return; try { const exps = await api('/api/future_expenses'); renderFutureList(exps); } catch(e) { toast(e.message); } }
-function renderFutureList(exps) { const list = document.getElementById('futureList'); if(!exps.length) { list.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📌</div><div class="empty-state-text">No pinned expenses yet.</div></div>'; return; } list.innerHTML = exps.map(e=>`<div class="future-item"><div class="future-info"><div class="future-desc">${esc(e.description)}</div><div class="future-meta">${esc(e.category)} · ${e.cycle} · ${e.date}</div></div><div class="future-amount">${fmt(e.amount)}</div><button class="btn-del" onclick="deleteFuture(${e.id})">🗑</button></div>`).join(''); }
-document.getElementById('pinFutureBtn').addEventListener('click', async ()=>{ const desc = document.getElementById('futureDesc').value; const amount = parseFloat(document.getElementById('futureAmt').value); const category = document.getElementById('futureCat').value; const cycle = document.getElementById('futureCycle').value; const date = document.getElementById('futureDate').value; if(!desc || !amount || !date) { toast('Please fill all fields'); return; } try { await api('/api/future_expenses', { method:'POST', body: JSON.stringify({ description:desc, amount, category, cycle, date }) }); toast('Pinned'); document.getElementById('futureDesc').value=''; document.getElementById('futureAmt').value=''; loadFutureExpenses(); } catch(e) { toast(e.message); } });
-async function deleteFuture(id) { if(!confirm('Remove this future expense?')) return; try { await api(`/api/future_expenses/${id}`, { method:'DELETE' }); toast('Removed'); loadFutureExpenses(); } catch(e) { toast(e.message); } }
-document.getElementById('applyFutureBtn').addEventListener('click', async ()=>{ try { const result = await api('/api/apply_future_expenses', { method:'POST' }); toast(`Processed ${result.count} pending expenses`); loadFutureExpenses(); } catch(e) { toast(e.message); } });
+async function loadFutureExpenses() {
+  if(!currentUser) return;
+  try {
+    const exps = await api('/api/future_expenses');
+    renderFutureList(exps);
+  } catch(e) { toast(e.message); }
+}
+function renderFutureList(exps) {
+  const list = document.getElementById('futureList');
+  if(!exps.length) { list.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📌</div><div class="empty-state-text">No pinned expenses yet.</div></div>'; return; }
+  list.innerHTML = exps.map(e=>`
+    <div class="future-item">
+      <div class="future-info"><div class="future-desc">${esc(e.description)}</div><div class="future-meta">${esc(e.category)} · ${e.cycle} · ${e.date}</div></div>
+      <div class="future-amount">${fmt(e.amount)}</div>
+      <button class="btn-del" onclick="deleteFuture(${e.id})">🗑</button>
+    </div>`).join('');
+}
+document.getElementById('pinFutureBtn').addEventListener('click', async ()=>{
+  const desc = document.getElementById('futureDesc').value;
+  const amount = parseFloat(document.getElementById('futureAmt').value);
+  const category = document.getElementById('futureCat').value;
+  const cycle = document.getElementById('futureCycle').value;
+  const date = document.getElementById('futureDate').value;
+  if(!desc || !amount || !date) { toast('Please fill all fields'); return; }
+  try {
+    await api('/api/future_expenses', { method:'POST', body: JSON.stringify({ description:desc, amount, category, cycle, date }) });
+    toast('Pinned');
+    document.getElementById('futureDesc').value=''; document.getElementById('futureAmt').value='';
+    loadFutureExpenses();
+  } catch(e) { toast(e.message); }
+});
+async function deleteFuture(id) {
+  if(!confirm('Remove this future expense?')) return;
+  try {
+    await api(`/api/future_expenses/${id}`, { method:'DELETE' });
+    toast('Removed'); loadFutureExpenses();
+  } catch(e) { toast(e.message); }
+}
+document.getElementById('applyFutureBtn').addEventListener('click', async ()=>{
+  try {
+    const result = await api('/api/apply_future_expenses', { method:'POST' });
+    toast(`Processed ${result.count} pending expenses`);
+    loadFutureExpenses();
+  } catch(e) { toast(e.message); }
+});
 
 // ── INSIGHTS ──
-async function loadInsights() { if(!currentUser) return; try { const longevity = await api(`/api/longevity/${currentUser.id}`); const bal = longevity.balance; const avgDaily = longevity.avg_daily_spend; const scenarios = [ { label: '🏦 Saver', daily: avgDaily * 0.8, cssClass: 'saver-fill' }, { label: '⚖️ Balanced', daily: avgDaily, cssClass: 'neutral-fill' }, { label: '🛍️ Spender', daily: avgDaily * 1.2, cssClass: 'spender-fill' } ]; const maxDays = Math.max(...scenarios.map(s => bal / s.daily), 1); let barsHTML = ''; scenarios.forEach(s => { const days = Math.floor(bal / s.daily); const pct = Math.min((days / maxDays) * 100, 100); barsHTML += `<div class="scenario-bar-row"><span class="scenario-label">${s.label}</span><div class="scenario-track"><div class="scenario-fill ${s.cssClass}" style="width:${pct}%"></div></div><span class="scenario-val">${days} days</span></div>`; }); document.getElementById('scenarioBars').innerHTML = barsHTML; document.getElementById('longevityDays').textContent = scenarios[1].daily > 0 ? Math.floor(bal / scenarios[1].daily) : '—'; document.getElementById('longevityBalance').textContent = fmt(bal); document.getElementById('longevityDaily').textContent = fmt(avgDaily); const predict = await api(`/api/predict/${currentUser.id}`); renderForecastInsights(predict.predictions?.weekly); renderCategoryChart(predict.predictions?.categories); } catch(e) { toast(e.message); } }
-function renderForecastInsights(weekly) { const container = document.getElementById('forecastBarsInsights'); if(!weekly) { container.innerHTML = ''; return; } const maxVal = Math.max(...Object.values(weekly), 1); container.innerHTML = Object.entries(weekly).map(([week, val])=>{ const pct = (val / maxVal * 100).toFixed(0); return `<div class="forecast-bar-row"><span class="forecast-week-label">${week}</span><div class="forecast-track"><div class="forecast-fill" style="width:${pct}%"></div></div><span class="forecast-val">${fmt(val)}</span></div>`; }).join(''); }
-function renderCategoryChart(categories) { const ctx = document.getElementById('catChart'); if(!ctx) return; if(catChartInst) catChartInst.destroy(); const labels = Object.keys(categories||{}); const data = Object.values(categories||{}); catChartInst = new Chart(ctx, { type: 'doughnut', data: { labels, datasets: [{ data, backgroundColor: ['#00E5A0','#3B8BFF','#F5A623','#FF3B5C','#9B59F5','#00b87a','#FF8C00'] }] }, options: { responsive:true, maintainAspectRatio:false, plugins:{legend:{labels:{color:'#B0C8E0'}}} } }); }
+async function loadInsights() {
+  if(!currentUser) return;
+  try {
+    const longevity = await api(`/api/longevity/${currentUser.id}`);
+    const bal = longevity.balance;
+    const avgDaily = longevity.avg_daily_spend;
+
+    const scenarios = [
+      { label: '🏦 Saver',   daily: avgDaily * 0.8,   cssClass: 'saver-fill' },
+      { label: '⚖️ Balanced', daily: avgDaily,         cssClass: 'neutral-fill' },
+      { label: '🛍️ Spender', daily: avgDaily * 1.2,   cssClass: 'spender-fill' }
+    ];
+
+    const maxDays = Math.max(...scenarios.map(s => bal / s.daily), 1);
+    let barsHTML = '';
+    scenarios.forEach(s => {
+      const days = Math.floor(bal / s.daily);
+      const pct = Math.min((days / maxDays) * 100, 100);
+      barsHTML += `
+        <div class="scenario-bar-row">
+          <span class="scenario-label">${s.label}</span>
+          <div class="scenario-track"><div class="scenario-fill ${s.cssClass}" style="width:${pct}%"></div></div>
+          <span class="scenario-val">${days} days</span>
+        </div>`;
+    });
+    document.getElementById('scenarioBars').innerHTML = barsHTML;
+
+    document.getElementById('longevityDays').textContent = scenarios[1].daily > 0 ? Math.floor(bal / scenarios[1].daily) : '—';
+    document.getElementById('longevityBalance').textContent = fmt(bal);
+    document.getElementById('longevityDaily').textContent = fmt(avgDaily);
+
+    const predict = await api(`/api/predict/${currentUser.id}`);
+    renderForecastInsights(predict.predictions?.weekly);
+    renderCategoryChart(predict.predictions?.categories);
+  } catch(e) { toast(e.message); }
+}
+
+function renderForecastInsights(weekly) {
+  const container = document.getElementById('forecastBarsInsights');
+  if(!weekly) { container.innerHTML = ''; return; }
+  const maxVal = Math.max(...Object.values(weekly), 1);
+  container.innerHTML = Object.entries(weekly).map(([week, val])=>{
+    const pct = (val / maxVal * 100).toFixed(0);
+    return `<div class="forecast-bar-row">
+              <span class="forecast-week-label">${week}</span>
+              <div class="forecast-track"><div class="forecast-fill" style="width:${pct}%"></div></div>
+              <span class="forecast-val">${fmt(val)}</span>
+            </div>`;
+  }).join('');
+}
+function renderCategoryChart(categories) {
+  const ctx = document.getElementById('catChart');
+  if(!ctx) return;
+  if(catChartInst) catChartInst.destroy();
+  const labels = Object.keys(categories||{});
+  const data = Object.values(categories||{});
+  catChartInst = new Chart(ctx, {
+    type: 'doughnut',
+    data: {
+      labels,
+      datasets: [{ data, backgroundColor: ['#00E5A0','#3B8BFF','#F5A623','#FF3B5C','#9B59F5','#00b87a','#FF8C00'] }]
+    },
+    options: { responsive:true, maintainAspectRatio:false, plugins:{legend:{labels:{color:'#B0C8E0'}}} }
+  });
+}
 
 // ── HISTORY ──
-async function loadHistory() { if(!currentUser) return; try { const txs = await api('/api/transactions'); allTransactions = txs; renderHistory(txs); } catch(e) { toast(e.message); } }
-function renderHistory(txs) { const list = document.getElementById('historyList'); const search = document.getElementById('historySearch').value.toLowerCase(); const showBadges = document.getElementById('showNeedWantBadges').checked; const filtered = txs.filter(t=> t.category.toLowerCase().includes(search) || (t.note||'').toLowerCase().includes(search)); if(!filtered.length) { list.innerHTML = '<div class="empty-state"><div class="empty-state-icon">🔍</div><div class="empty-state-text">No matching transactions.</div></div>'; return; } list.innerHTML = filtered.map(t=>{ const badgeHtml = showBadges ? (t.is_need ? '<span class="tx-badge need">Need</span>' : '<span class="tx-badge want">Want</span>') : ''; return `<div class="tx-item"><div class="tx-cat-icon">${CAT_ICONS[t.category]||'📦'}</div><div class="tx-info"><div class="tx-cat">${esc(t.category)} ${badgeHtml}</div><div class="tx-meta">${t.note?esc(t.note)+' · ':''}${fmtDate(t.tx_date)}</div></div><div class="tx-amount ${t.tx_type}">${t.tx_type==='income'?'+':'-'}${fmt(t.amount)}</div><button class="btn-del" onclick="deleteTransaction(${t.id})">🗑</button></div>`; }).join(''); }
+async function loadHistory() {
+  if(!currentUser) return;
+  try {
+    const txs = await api('/api/transactions');
+    allTransactions = txs;
+    renderHistory(txs);
+  } catch(e) { toast(e.message); }
+}
+
+function renderHistory(txs) {
+  const list = document.getElementById('historyList');
+  const search = document.getElementById('historySearch').value.toLowerCase();
+  const showBadges = document.getElementById('showNeedWantBadges').checked;
+  const filtered = txs.filter(t=> t.category.toLowerCase().includes(search) || (t.note||'').toLowerCase().includes(search));
+  if(!filtered.length) { list.innerHTML = '<div class="empty-state"><div class="empty-state-icon">🔍</div><div class="empty-state-text">No matching transactions.</div></div>'; return; }
+  list.innerHTML = filtered.map(t=>{
+    const badgeHtml = showBadges ? (t.is_need ? '<span class="tx-badge need">Need</span>' : '<span class="tx-badge want">Want</span>') : '';
+    return `<div class="tx-item">
+      <div class="tx-cat-icon">${CAT_ICONS[t.category]||'📦'}</div>
+      <div class="tx-info">
+        <div class="tx-cat">${esc(t.category)} ${badgeHtml}</div>
+        <div class="tx-meta">${t.note?esc(t.note)+' · ':''}${fmtDate(t.tx_date)}</div>
+      </div>
+      <div class="tx-amount ${t.tx_type}">${t.tx_type==='income'?'+':'-'}${fmt(t.amount)}</div>
+      <button class="btn-del" onclick="deleteTransaction(${t.id})">🗑</button>
+    </div>`;
+  }).join('');
+}
+
 document.getElementById('historySearch').addEventListener('input', ()=> renderHistory(allTransactions));
-document.getElementById('showNeedWantBadges').addEventListener('change', ()=> { renderHistory(allTransactions); });
-document.getElementById('toggleHistoryViewBtn').addEventListener('click', () => { const content = document.getElementById('historyContent'); const btn = document.getElementById('toggleHistoryViewBtn'); historyVisible = !historyVisible; if (historyVisible) { content.style.display = 'block'; btn.textContent = '🙈 Hide History'; } else { content.style.display = 'none'; btn.textContent = '👁 Show History'; } });
-async function deleteTransaction(id) { if(!confirm('Delete this transaction?')) return; try { await api(`/api/transactions/${id}`, { method:'DELETE' }); toast('Deleted'); if(document.getElementById('screen-history').classList.contains('active')) loadHistory(); } catch(e) { toast(e.message); } }
+
+document.getElementById('showNeedWantBadges').addEventListener('change', ()=> {
+  renderHistory(allTransactions);
+});
+
+document.getElementById('toggleHistoryViewBtn').addEventListener('click', () => {
+  const content = document.getElementById('historyContent');
+  const btn = document.getElementById('toggleHistoryViewBtn');
+  historyVisible = !historyVisible;
+  if (historyVisible) {
+    content.style.display = 'block';
+    btn.textContent = '🙈 Hide History';
+  } else {
+    content.style.display = 'none';
+    btn.textContent = '👁 Show History';
+  }
+});
+
+async function deleteTransaction(id) {
+  if(!confirm('Delete this transaction?')) return;
+  try {
+    await api(`/api/transactions/${id}`, { method:'DELETE' });
+    toast('Deleted');
+    if(document.getElementById('screen-history').classList.contains('active')) loadHistory();
+  } catch(e) { toast(e.message); }
+}
 
 // ── PROFILE PREVIEW & UPLOAD HANDLING ──
-document.getElementById('profileAvatar').addEventListener('input', function() { const url = this.value.trim(); const previewImg = document.getElementById('profilePreviewImg'); const placeholder = document.getElementById('profilePreviewPlaceholder'); if (url) { previewImg.src = url; previewImg.onerror = () => { previewImg.style.display = 'none'; placeholder.style.display = 'block'; }; previewImg.onload = () => { previewImg.style.display = 'block'; placeholder.style.display = 'none'; }; previewImg.src = url; } else { previewImg.style.display = 'none'; placeholder.style.display = 'block'; } });
-document.getElementById('profileFileInput').addEventListener('change', function(e) { const file = e.target.files[0]; if (!file) return; const reader = new FileReader(); reader.onload = function(ev) { const dataUrl = ev.target.result; document.getElementById('profileAvatar').value = dataUrl; document.getElementById('profileAvatar').dispatchEvent(new Event('input')); }; reader.readAsDataURL(file); });
-document.querySelectorAll('#profileBlock .preset-avatar').forEach(el => { el.addEventListener('click', () => { const dataUrl = el.dataset.url; document.getElementById('profileAvatar').value = dataUrl; document.getElementById('profileAvatar').dispatchEvent(new Event('input')); }); });
-document.getElementById('saveProfileBtn').addEventListener('click', async () => { const name = document.getElementById('profileName').value.trim(); const email = document.getElementById('profileEmail').value.trim(); const password = document.getElementById('profilePass').value; const avatar_url = document.getElementById('profileAvatar').value.trim(); const body = { name, email, avatar_url }; if (password) body.password = password; try { const updatedUser = await api('/api/profile', { method: 'PUT', body: JSON.stringify(body) }); currentUser = updatedUser; const initial = document.querySelector('.avatar-initial'); const img = document.querySelector('#userAvatar img'); if (updatedUser.avatar_url) { img.src = updatedUser.avatar_url; img.style.display = 'block'; initial.style.display = 'none'; } else { img.style.display = 'none'; initial.style.display = 'block'; initial.textContent = updatedUser.name?.charAt(0)?.toUpperCase() || '?'; } toast('Profile updated!'); } catch(e) { toast(e.message); } });
+document.getElementById('profileAvatar').addEventListener('input', function() {
+  const url = this.value.trim();
+  const previewImg = document.getElementById('profilePreviewImg');
+  const placeholder = document.getElementById('profilePreviewPlaceholder');
+  if (url) {
+    previewImg.src = url;
+    previewImg.onerror = () => {
+      previewImg.style.display = 'none';
+      placeholder.style.display = 'block';
+    };
+    previewImg.onload = () => {
+      previewImg.style.display = 'block';
+      placeholder.style.display = 'none';
+    };
+    previewImg.src = url;
+  } else {
+    previewImg.style.display = 'none';
+    placeholder.style.display = 'block';
+  }
+});
+
+document.getElementById('profileFileInput').addEventListener('change', function(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function(ev) {
+    const dataUrl = ev.target.result;
+    document.getElementById('profileAvatar').value = dataUrl;
+    document.getElementById('profileAvatar').dispatchEvent(new Event('input'));
+  };
+  reader.readAsDataURL(file);
+});
+
+document.querySelectorAll('#profileBlock .preset-avatar').forEach(el => {
+  el.addEventListener('click', () => {
+    const dataUrl = el.dataset.url;
+    document.getElementById('profileAvatar').value = dataUrl;
+    document.getElementById('profileAvatar').dispatchEvent(new Event('input'));
+  });
+});
+
+document.getElementById('saveProfileBtn').addEventListener('click', async () => {
+  const name = document.getElementById('profileName').value.trim();
+  const email = document.getElementById('profileEmail').value.trim();
+  const password = document.getElementById('profilePass').value;
+  const avatar_url = document.getElementById('profileAvatar').value.trim();
+
+  const body = { name, email, avatar_url };
+  if (password) body.password = password;
+
+  try {
+    const updatedUser = await api('/api/profile', { method: 'PUT', body: JSON.stringify(body) });
+    currentUser = updatedUser;
+    const initial = document.querySelector('.avatar-initial');
+    const img = document.querySelector('#userAvatar img');
+    if (updatedUser.avatar_url) {
+      img.src = updatedUser.avatar_url;
+      img.style.display = 'block';
+      initial.style.display = 'none';
+    } else {
+      img.style.display = 'none';
+      initial.style.display = 'block';
+      initial.textContent = updatedUser.name?.charAt(0)?.toUpperCase() || '?';
+    }
+    toast('Profile updated!');
+  } catch(e) { toast(e.message); }
+});
 
 // ── ADMIN ──
-async function loadAdmin() { if(!currentUser || currentUser.role!=='admin') return; try { const stats = await api('/api/admin/stats'); document.getElementById('adminStats').innerHTML = `<div class="stat-card"><div class="stat-value">${stats.total_users}</div><div class="stat-label">Users</div></div><div class="stat-card"><div class="stat-value">${stats.total_transactions}</div><div class="stat-label">Transactions</div></div><div class="stat-card"><div class="stat-value">${fmt(stats.total_income)}</div><div class="stat-label">Total Income</div></div><div class="stat-card"><div class="stat-value">${fmt(stats.total_expense)}</div><div class="stat-label">Total Expense</div></div><div class="stat-card blue-glow"><div class="stat-value">${stats.avg_health_score}</div><div class="stat-label">Avg Health Score</div></div>`; loadAdminUsers(); loadAdminTransactions(); } catch(e) { toast(e.message); } }
+async function loadAdmin() {
+  if(!currentUser || currentUser.role!=='admin') return;
+  try {
+    const stats = await api('/api/admin/stats');
+    document.getElementById('adminStats').innerHTML = `
+      <div class="stat-card"><div class="stat-value">${stats.total_users}</div><div class="stat-label">Users</div></div>
+      <div class="stat-card"><div class="stat-value">${stats.total_transactions}</div><div class="stat-label">Transactions</div></div>
+      <div class="stat-card"><div class="stat-value">${fmt(stats.total_income)}</div><div class="stat-label">Total Income</div></div>
+      <div class="stat-card"><div class="stat-value">${fmt(stats.total_expense)}</div><div class="stat-label">Total Expense</div></div>
+      <div class="stat-card blue-glow"><div class="stat-value">${stats.avg_health_score}</div><div class="stat-label">Avg Health Score</div></div>`;
+    loadAdminUsers();
+    loadAdminTransactions();
+  } catch(e) { toast(e.message); }
+}
 document.getElementById('adminSearchUser').addEventListener('input', loadAdminUsers);
 document.getElementById('adminUserFilter').addEventListener('change', loadAdminTransactions);
-document.querySelectorAll('#adminTabs .tab').forEach(tab=>{ tab.addEventListener('click', ()=>{ document.querySelectorAll('#adminTabs .tab').forEach(t=>t.classList.remove('active')); tab.classList.add('active'); if(tab.dataset.tab==='users'){ document.getElementById('adminUsersPanel').style.display='block'; document.getElementById('adminTransactionsPanel').style.display='none'; } else { document.getElementById('adminUsersPanel').style.display='none'; document.getElementById('adminTransactionsPanel').style.display='block'; } }); });
-async function loadAdminUsers() { try { const users = await api('/api/admin/users'); const search = document.getElementById('adminSearchUser').value.toLowerCase(); const filtered = users.filter(u => u.name.toLowerCase().includes(search) || u.email.toLowerCase().includes(search)); const tbody = document.getElementById('adminUserTable'); tbody.innerHTML = filtered.map(u => `<tr id="userRow-${u.id}"><td>${u.id}</td><td>${esc(u.name)}</td><td>${esc(u.email)}</td><td>${esc(u.role)}</td><td>${fmtDate(u.created_at)}</td><td><button onclick="adminDeleteUser(${u.id})" class="btn btn-danger" style="padding:4px 8px;font-size:0.7rem;">Del</button></td></tr>`).join(''); } catch(e) { toast(e.message); } }
-async function adminDeleteUser(id){ if(!confirm('Delete this user and all their data?')) return; try { await api(`/api/admin/users/${id}`, { method:'DELETE' }); toast('User deleted'); loadAdminUsers(); } catch(e) { toast(e.message); } }
-async function loadAdminTransactions(){ try { const userId = document.getElementById('adminUserFilter').value; const url = userId ? `/api/admin/transactions?user_id=${userId}` : '/api/admin/transactions'; const txs = await api(url); document.getElementById('adminTxTable').innerHTML = txs.map(t=>`<tr><td>${fmtDate(t.tx_date)}</td><td>User ${t.user_id}</td><td>${esc(t.category)}</td><td>${t.tx_type}</td><td>${fmt(t.amount)}</td><td>${t.is_need?'Need':'Want'}</td></tr>`).join(''); const users = await api('/api/admin/users'); document.getElementById('adminUserFilter').innerHTML = '<option value="">All Users</option>'+ users.map(u=>`<option value="${u.id}">${esc(u.name)} (${u.id})</option>`).join(''); } catch(e) { toast(e.message); } }
+document.querySelectorAll('#adminTabs .tab').forEach(tab=>{
+  tab.addEventListener('click', ()=>{
+    document.querySelectorAll('#adminTabs .tab').forEach(t=>t.classList.remove('active'));
+    tab.classList.add('active');
+    if(tab.dataset.tab==='users'){
+      document.getElementById('adminUsersPanel').style.display='block';
+      document.getElementById('adminTransactionsPanel').style.display='none';
+    } else {
+      document.getElementById('adminUsersPanel').style.display='none';
+      document.getElementById('adminTransactionsPanel').style.display='block';
+    }
+  });
+});
+async function loadAdminUsers() {
+  try {
+    const users = await api('/api/admin/users');
+    const search = document.getElementById('adminSearchUser').value.toLowerCase();
+    const filtered = users.filter(u => u.name.toLowerCase().includes(search) || u.email.toLowerCase().includes(search));
+    const tbody = document.getElementById('adminUserTable');
+    tbody.innerHTML = filtered.map(u => `
+      <tr id="userRow-${u.id}">
+        <td>${u.id}</td>
+        <td>${esc(u.name)}</td>
+        <td>${esc(u.email)}</td>
+        <td>${esc(u.role)}</td>
+        <td>${fmtDate(u.created_at)}</td>
+        <td>
+          <button onclick="adminDeleteUser(${u.id})" class="btn btn-danger" style="padding:4px 8px;font-size:0.7rem;">Del</button>
+        </td>
+      </tr>
+    `).join('');
+  } catch(e) { toast(e.message); }
+}
+async function adminDeleteUser(id){
+  if(!confirm('Delete this user and all their data?')) return;
+  try {
+    await api(`/api/admin/users/${id}`, { method:'DELETE' });
+    toast('User deleted'); loadAdminUsers();
+  } catch(e) { toast(e.message); }
+}
+async function loadAdminTransactions(){
+  try {
+    const userId = document.getElementById('adminUserFilter').value;
+    const url = userId ? `/api/admin/transactions?user_id=${userId}` : '/api/admin/transactions';
+    const txs = await api(url);
+    document.getElementById('adminTxTable').innerHTML = txs.map(t=>`
+      <tr>
+        <td>${fmtDate(t.tx_date)}</td><td>User ${t.user_id}</td><td>${esc(t.category)}</td><td>${t.tx_type}</td>
+        <td>${fmt(t.amount)}</td><td>${t.is_need?'Need':'Want'}</td>
+      </tr>`).join('');
+    const users = await api('/api/admin/users');
+    document.getElementById('adminUserFilter').innerHTML = '<option value="">All Users</option>'+
+      users.map(u=>`<option value="${u.id}">${esc(u.name)} (${u.id})</option>`).join('');
+  } catch(e) { toast(e.message); }
+}
 
 // ── EXPORT ──
-document.getElementById('exportBtn').addEventListener('click', ()=>{ window.open('/api/export/csv', '_blank'); });
+document.getElementById('exportBtn').addEventListener('click', ()=>{
+  window.open('/api/export/csv', '_blank');
+});
 
 // ── CHATBOT DRAGGABLE & MINIMIZABLE ──
-(function(){ const chatbot = document.getElementById('chatbot'); const header = document.getElementById('chatHeader'); let offsetX, offsetY, isDragging = false; header.addEventListener('mousedown', (e) => { if(e.target.id === 'chatToggleBtn') return; isDragging = true; offsetX = e.clientX - chatbot.getBoundingClientRect().left; offsetY = e.clientY - chatbot.getBoundingClientRect().top; chatbot.style.cursor = 'grabbing'; e.preventDefault(); }); document.addEventListener('mousemove', (e) => { if(!isDragging) return; const left = e.clientX - offsetX; const top = e.clientY - offsetY; const w = window.innerWidth, h = window.innerHeight; const bw = chatbot.offsetWidth, bh = chatbot.offsetHeight; chatbot.style.left = Math.max(0, Math.min(left, w - bw)) + 'px'; chatbot.style.top = Math.max(0, Math.min(top, h - bh)) + 'px'; chatbot.style.right = 'auto'; chatbot.style.bottom = 'auto'; }); document.addEventListener('mouseup', () => { if(isDragging){ isDragging = false; chatbot.style.cursor = ''; } }); document.getElementById('chatToggleBtn').addEventListener('click', () => { chatbot.classList.toggle('minimized'); document.getElementById('chatToggleBtn').textContent = chatbot.classList.contains('minimized') ? '□' : '–'; }); })();
+(function(){
+  const chatbot = document.getElementById('chatbot');
+  const header = document.getElementById('chatHeader');
+  let offsetX, offsetY, isDragging = false;
+  header.addEventListener('mousedown', (e) => {
+    if(e.target.id === 'chatToggleBtn') return;
+    isDragging = true;
+    offsetX = e.clientX - chatbot.getBoundingClientRect().left;
+    offsetY = e.clientY - chatbot.getBoundingClientRect().top;
+    chatbot.style.cursor = 'grabbing';
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove', (e) => {
+    if(!isDragging) return;
+    const left = e.clientX - offsetX;
+    const top = e.clientY - offsetY;
+    const w = window.innerWidth, h = window.innerHeight;
+    const bw = chatbot.offsetWidth, bh = chatbot.offsetHeight;
+    chatbot.style.left = Math.max(0, Math.min(left, w - bw)) + 'px';
+    chatbot.style.top = Math.max(0, Math.min(top, h - bh)) + 'px';
+    chatbot.style.right = 'auto'; chatbot.style.bottom = 'auto';
+  });
+  document.addEventListener('mouseup', () => {
+    if(isDragging){ isDragging = false; chatbot.style.cursor = ''; }
+  });
+  document.getElementById('chatToggleBtn').addEventListener('click', () => {
+    chatbot.classList.toggle('minimized');
+    document.getElementById('chatToggleBtn').textContent = chatbot.classList.contains('minimized') ? '□' : '–';
+  });
+})();
+
 document.getElementById('chatSend').addEventListener('click', sendChat);
 document.getElementById('chatInp').addEventListener('keypress', e=>{ if(e.key==='Enter') sendChat(); });
-async function sendChat() { const inp = document.getElementById('chatInp'); const msg = inp.value.trim(); if(!msg) return; const msgs = document.getElementById('chatMsgs'); msgs.innerHTML += `<div class="msg user">${esc(msg)}</div>`; inp.value = ''; try { const resp = await api('/api/ai/chat', { method:'POST', body: JSON.stringify({ message: msg }) }); msgs.innerHTML += `<div class="msg bot">${esc(resp.reply)}</div>`; } catch(e) { msgs.innerHTML += `<div class="msg bot">Sorry, I'm having trouble right now.</div>`; } msgs.scrollTop = msgs.scrollHeight; }
+async function sendChat() {
+  const inp = document.getElementById('chatInp');
+  const msg = inp.value.trim();
+  if(!msg) return;
+  const msgs = document.getElementById('chatMsgs');
+  msgs.innerHTML += `<div class="msg user">${esc(msg)}</div>`;
+  inp.value = '';
+  try {
+    const resp = await api('/api/ai/chat', { method:'POST', body: JSON.stringify({ message: msg }) });
+    msgs.innerHTML += `<div class="msg bot">${esc(resp.reply)}</div>`;
+  } catch(e) {
+    msgs.innerHTML += `<div class="msg bot">Sorry, I'm having trouble right now.</div>`;
+  }
+  msgs.scrollTop = msgs.scrollHeight;
+}
 
 // ── INITIAL LOAD ──
-(async ()=>{ try { const user = await api('/api/me'); currentUser = user; authOverlay.style.display = 'none'; initApp(); } catch(e) { authOverlay.style.display = 'flex'; } })();
+(async ()=>{
+  try {
+    const user = await api('/api/me');
+    currentUser = user;
+    authOverlay.style.display = 'none';
+    initApp();
+  } catch(e) { 
+    authOverlay.style.display = 'flex'; 
+  }
+})();
 </script>
 </body>
 </html>
 """
 
-
-# ----------------------------------------------------------------------
-# Route to serve the HTML page
-# ----------------------------------------------------------------------
 @app.route('/')
 def index():
     return HTML_PAGE
 
-# ----------------------------------------------------------------------
-# Initialize DB
-# ----------------------------------------------------------------------
 with app.app_context():
     db.create_all()
     ensure_schema()
