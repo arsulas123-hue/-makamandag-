@@ -1048,7 +1048,6 @@ Reply in 3-5 sentences, warm, actionable, use ₱.
     return jsonify({'reply': reply})
 
 HTML_PAGE = r"""<!DOCTYPE html>
-
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -1847,6 +1846,11 @@ let isLogin = true;
 let historyVisible = true;
 let customCategories = [];
 
+// ── OPTIMISATION FLAGS ──
+let futureExpensesApplied = false;
+let refreshTimeout = null;
+let dashboardLoading = false;
+
 const CAT_ICONS = {
   'Food & Dining':'🍜','Transport':'🚗','Groceries':'🛒','Entertainment':'🎬',
   'Health':'💊','Debt repayment':'💳','Mortgage':'🏠','Subscription':'📱',
@@ -1880,6 +1884,15 @@ async function api(url, opts={}){
   const res = await fetch(url, { ...opts, credentials:'include', headers:{'Content-Type':'application/json',...(opts.headers||{})} });
   if(!res.ok){ const err = await res.json().catch(()=>({error:'Request failed'})); throw new Error(err.error || 'Request failed'); }
   return res.json();
+}
+
+// ── DEBOUNCED REFRESH ──
+function debouncedRefresh() {
+  if (refreshTimeout) clearTimeout(refreshTimeout);
+  refreshTimeout = setTimeout(() => {
+    loadDashboard();
+    refreshTimeout = null;
+  }, 500);
 }
 
 // ── CHECKLIST ──
@@ -2091,15 +2104,22 @@ document.getElementById('addExpenseBtn').addEventListener('click', async ()=>{
     toast('Expense added!');
     document.getElementById('expenseAmount').value = '';
     document.getElementById('expenseNote').value = '';
-    loadDashboard();
+    debouncedRefresh();
   } catch(e) { toast(e.message); }
 });
 
 // ── DASHBOARD LOAD ──
 async function loadDashboard() {
-  if(!currentUser) return;
+  if (!currentUser) return;
+  // Prevent multiple simultaneous loads
+  if (dashboardLoading) return;
+  dashboardLoading = true;
   try {
-    await api('/api/apply_future_expenses', { method:'POST' });
+    // Only apply future expenses once per session
+    if (!futureExpensesApplied) {
+      await api('/api/apply_future_expenses', { method: 'POST' });
+      futureExpensesApplied = true;
+    }
     const summary = await api(`/api/summary/${currentUser.id}`);
     const predict = await api(`/api/predict/${currentUser.id}`);
     const longevity = await api(`/api/longevity/${currentUser.id}`);
@@ -2110,14 +2130,22 @@ async function loadDashboard() {
     document.getElementById('incomeExpenseChartCard').style.display = 'block';
     document.getElementById('chartBlock').style.display = Object.keys(summary.monthly).length ? 'block' : 'none';
     document.getElementById('forecastBlock').style.display = Object.keys(predict.predictions?.weekly||{}).length ? 'block' : 'none';
-  } catch(e) { toast(e.message); }
-  if (currentUser.monthly_budget_limit > 0 && !aiPlan) { autoRunPlanAndUpdateDashboard(); }
+  } catch(e) {
+    // Don't toast on empty data – just use default values
+    // toast(e.message);
+  } finally {
+    dashboardLoading = false;
+  }
+  // Only auto-run plan if not already running
+  if (currentUser.monthly_budget_limit > 0 && !aiPlan && !dashboardLoading) {
+    autoRunPlanAndUpdateDashboard();
+  }
 }
 
 function renderStats(summary, score, longevity) {
-  document.getElementById('sBalance').textContent = fmt(summary.balance);
-  document.getElementById('sExpense').textContent = fmt(summary.expense);
-  document.getElementById('sIncome').textContent = fmt(summary.income);
+  document.getElementById('sBalance').textContent = fmt(summary.balance ?? 0);
+  document.getElementById('sExpense').textContent = fmt(summary.expense ?? 0);
+  document.getElementById('sIncome').textContent = fmt(summary.income ?? 0);
   document.getElementById('sScore').textContent = score ?? '—';
   document.getElementById('scoreLabel').textContent = score ? 'Health Score' : 'awaiting data';
   document.getElementById('topScore').textContent = score ?? '—';
@@ -2166,11 +2194,12 @@ function addFeedEvent(icon, text) {
 // ── AUTO PLAN ──
 async function autoRunPlanAndUpdateDashboard() {
   if (!currentUser) return;
+  if (dashboardLoading) return;
   try {
     const summary = await api(`/api/summary/${currentUser.id}`);
     const totalIncome = summary.income || 0;
     document.getElementById('incomeInput').value = totalIncome;
-    if (totalIncome <= 0) { loadDashboard(); return; }
+    if (totalIncome <= 0) { return; }
     const selectedCategories = [];
     document.querySelectorAll('.cat-checkbox:checked').forEach(chk => selectedCategories.push(chk.dataset.cat));
     if (selectedCategories.length === 0) {
@@ -2190,7 +2219,7 @@ async function autoRunPlanAndUpdateDashboard() {
       renderAIPlan(result);
     }
   } catch(e) { console.error('Auto plan error:', e); }
-  loadDashboard();
+  debouncedRefresh();
 }
 
 // ── ML PLAN ──
@@ -2333,7 +2362,7 @@ document.getElementById('incomeImage').addEventListener('change', async function
     const data = await resp.json();
     if(data.transactions) {
       toast(`Extracted ${data.count} transactions`);
-      loadDashboard();
+      debouncedRefresh();
     }
   } catch(e) { toast('OCR failed: '+e.message); }
 });
