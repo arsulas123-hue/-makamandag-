@@ -1449,6 +1449,16 @@ body::before{
 .needwant-group { display:flex; gap:16px; align-items:center; margin-top:8px; }
 .needwant-group label { font-size:0.82rem; display:flex; align-items:center; gap:4px; cursor:pointer; }
 .needwant-group input[type="radio"] { accent-color:var(--green); }
+/* New chart card styles */
+.chart-card {
+    margin-top: 8px;
+    margin-bottom: 24px;
+}
+.vs-chart-container {
+    position: relative;
+    height: 280px;
+    width: 100%;
+}
 </style>
 </head>
 <body>
@@ -1617,6 +1627,17 @@ body::before{
       <div class="stat-card neg"><div class="stat-value" id="sExpense" style="color:var(--red)">—</div><div class="stat-label">Month Expenses</div></div>
       <div class="stat-card"><div class="stat-value" id="sIncome" style="color:var(--green)">—</div><div class="stat-label">Month Income</div></div>
       <div class="stat-card blue-glow"><div class="stat-value" id="sScore" style="color:var(--blue)">—</div><div class="stat-label">Health Score</div><div class="stat-sub" id="scoreLabel">awaiting data</div></div>
+    </div>
+
+    <!-- NEW: Income vs Expense bar chart card -->
+    <div class="card chart-card" id="incomeExpenseChartCard">
+      <div class="card-header">
+        <span class="card-title">📊 Income vs Expenses (Current Month)</span>
+        <span class="ai-badge">Real-time</span>
+      </div>
+      <div class="vs-chart-container">
+        <canvas id="incomeExpenseChart"></canvas>
+      </div>
     </div>
 
     <div class="card ai-feed">
@@ -1807,6 +1828,7 @@ let allTransactions = [];
 let currentMindset = 'Neutral';
 let aiPlan = null;
 let trendChart = null, catChartInst = null;
+let incomeExpenseChart = null;  // reference for the new bar chart
 let isLogin = true;
 let historyVisible = true;
 
@@ -1913,6 +1935,43 @@ function updateChecklistPercentages(allocation) {
     const pct = allocation[cat.name];
     const span = document.getElementById('pct-' + cat.name.replace(/\s/g,''));
     if (span) span.textContent = pct !== undefined ? `${pct.toFixed(1)}%` : '';
+  });
+}
+
+// ── INCOME VS EXPENSE BAR CHART (NEW) ──
+function renderIncomeExpenseChart(income, expense) {
+  const ctx = document.getElementById('incomeExpenseChart').getContext('2d');
+  if (incomeExpenseChart) incomeExpenseChart.destroy();
+  incomeExpenseChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: ['Income', 'Expenses'],
+      datasets: [{
+        label: 'Amount (₱)',
+        data: [income || 0, expense || 0],
+        backgroundColor: ['rgba(0,229,160,0.7)', 'rgba(255,59,92,0.7)'],
+        borderColor: ['#00E5A0', '#FF3B5C'],
+        borderWidth: 1,
+        borderRadius: 8,
+        barPercentage: 0.6
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: true,
+      plugins: {
+        legend: { labels: { color: '#B0C8E0' } },
+        tooltip: { callbacks: { label: (ctx) => `${ctx.dataset.label}: ${fmt(ctx.raw)}` } }
+      },
+      scales: {
+        y: {
+          beginAtZero: true,
+          grid: { color: 'rgba(107,136,168,0.2)' },
+          ticks: { color: '#B0C8E0', callback: (val) => '₱' + val.toLocaleString() }
+        },
+        x: { ticks: { color: '#B0C8E0' } }
+      }
+    }
   });
 }
 
@@ -2169,6 +2228,8 @@ async function loadDashboard() {
     renderStats(summary, predict.score, longevity);
     renderForecast(predict.predictions?.weekly);
     renderTrendChart(summary.monthly);
+    // Update the new bar chart with current month values
+    renderIncomeExpenseChart(summary.income, summary.expense);
     document.getElementById('chartBlock').style.display = Object.keys(summary.monthly).length ? 'block' : 'none';
     document.getElementById('forecastBlock').style.display = Object.keys(predict.predictions?.weekly||{}).length ? 'block' : 'none';
   } catch(e) { toast(e.message); }
