@@ -18,7 +18,7 @@ from flask_cors import CORS
 from sqlalchemy import inspect, text
 import google.generativeai as genai
 from flask_limiter import Limiter
-from flask_limiter.util 
+from flask_limiter.util import get_remote_address
 from threading import Lock
 
 
@@ -45,23 +45,21 @@ limiter = Limiter(
     default_limits=["200 per day", "50 per hour"]
 )
 
-class RateLimiter:
+class ManualRateLimiter:
     def __init__(self):
         self.lock = Lock()
-        self.windows = defaultdict(list)
+        self.requests = defaultdict(list)
 
-    def allow(self, key, max_req, period):
+    def allow(self, key, max_calls, period):
         now = _time.time()
         with self.lock:
-            # remove old entries
-            self.windows[key] = [t for t in self.windows[key] if now - t < period]
-            if len(self.windows[key]) >= max_req:
+            self.requests[key] = [t for t in self.requests[key] if now - t < period]
+            if len(self.requests[key]) >= max_calls:
                 return False
-            self.windows[key].append(now)
+            self.requests[key].append(now)
             return True
 
-manual_rl = RateLimiter()
-
+rl = ManualRateLimiter()
 # ----------------------------------------------------------------------
 # Multi-AI Router
 # ----------------------------------------------------------------------
@@ -568,39 +566,44 @@ def delete_transaction(tx_id):
 # ----------------------------------------------------------------------
 # Summary / Predict / Longevity
 # ----------------------------------------------------------------------
-@@app.route('/api/summary/<int:user_id>')
+@app.route('/api/summary/<int:user_id>')
 @login_required
 def summary(user_id):
-    # ----- manual rate limit (5 reqs per 60 seconds) -----
-    if not manual_rl.allow(f"summary_{user_id}", 5, 60):
+    if not rl.allow(f"summary_{user_id}", 5, 60):       # 5 requests per 60 sec
         return jsonify({'error': 'Too many requests – slow down'}), 429
+    if get_current_user().id != user_id:
+        return jsonify({'error': 'Forbidden'}), 403
+    return jsonify(get_monthly_summary(user_id))
 
 
 @app.route('/api/predict/<int:user_id>')
-@limiter.limit("5 per minute")
 @login_required
 def predict(user_id):
+    if not rl.allow(f"predict_{user_id}", 5, 60):
+        return jsonify({'error': 'Too many requests – slow down'}), 429
     if get_current_user().id != user_id:
         return jsonify({'error': 'Forbidden'}), 403
     has_data = Transaction.query.filter_by(user_id=user_id, tx_type='expense').count() > 0
     if not has_data:
-        return jsonify({'has_data': False, 'score': None, 'predictions': {'weekly': {}, 'categories': {}}, 'advice': []})
+        return jsonify({'has_data': False, 'score': None,
+                        'predictions': {'weekly': {}, 'categories': {}}, 'advice': []})
     return jsonify({
         'has_data': True,
         'score': compute_health_score(user_id),
-        'predictions': {'weekly': generate_weekly_forecast(user_id), 'categories': get_category_totals(user_id)},
+        'predictions': {'weekly': generate_weekly_forecast(user_id),
+                        'categories': get_category_totals(user_id)},
         'advice': []
     })
 
 
 @app.route('/api/longevity/<int:user_id>')
-@limiter.limit("5 per minute")
 @login_required
 def longevity(user_id):
+    if not rl.allow(f"longevity_{user_id}", 5, 60):
+        return jsonify({'error': 'Too many requests – slow down'}), 429
     if get_current_user().id != user_id:
         return jsonify({'error': 'Forbidden'}), 403
     return jsonify(compute_longevity(user_id))
-
 # ----------------------------------------------------------------------
 # Budget routes
 # ----------------------------------------------------------------------
