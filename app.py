@@ -1,5 +1,4 @@
 import json
-import time as _time
 import csv
 import io
 import os
@@ -9,7 +8,6 @@ import re
 import get_remote_address
 import numpy as np
 from datetime import datetime, timedelta, timezone
-from collections import defaultdict
 from functools import wraps
 from flask import Flask, request, jsonify, session, Response, make_response
 from flask_sqlalchemy import SQLAlchemy
@@ -19,8 +17,6 @@ from sqlalchemy import inspect, text
 import google.generativeai as genai
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
-from threading import Lock
-
 
 # ----------------------------------------------------------------------
 # App configuration
@@ -569,7 +565,8 @@ def delete_transaction(tx_id):
 @app.route('/api/summary/<int:user_id>')
 @login_required
 def summary(user_id):
-    if not rl.allow(f"summary_{user_id}", 5, 60):       # 5 requests per 60 sec
+    # --- manual rate limit: 5 requests per 60 seconds ---
+    if not manual_rl.allow(f"summary_{user_id}", 5, 60):
         return jsonify({'error': 'Too many requests – slow down'}), 429
     if get_current_user().id != user_id:
         return jsonify({'error': 'Forbidden'}), 403
@@ -579,19 +576,25 @@ def summary(user_id):
 @app.route('/api/predict/<int:user_id>')
 @login_required
 def predict(user_id):
-    if not rl.allow(f"predict_{user_id}", 5, 60):
+    if not manual_rl.allow(f"predict_{user_id}", 5, 60):
         return jsonify({'error': 'Too many requests – slow down'}), 429
     if get_current_user().id != user_id:
         return jsonify({'error': 'Forbidden'}), 403
     has_data = Transaction.query.filter_by(user_id=user_id, tx_type='expense').count() > 0
     if not has_data:
-        return jsonify({'has_data': False, 'score': None,
-                        'predictions': {'weekly': {}, 'categories': {}}, 'advice': []})
+        return jsonify({
+            'has_data': False,
+            'score': None,
+            'predictions': {'weekly': {}, 'categories': {}},
+            'advice': []
+        })
     return jsonify({
         'has_data': True,
         'score': compute_health_score(user_id),
-        'predictions': {'weekly': generate_weekly_forecast(user_id),
-                        'categories': get_category_totals(user_id)},
+        'predictions': {
+            'weekly': generate_weekly_forecast(user_id),
+            'categories': get_category_totals(user_id)
+        },
         'advice': []
     })
 
@@ -599,7 +602,7 @@ def predict(user_id):
 @app.route('/api/longevity/<int:user_id>')
 @login_required
 def longevity(user_id):
-    if not rl.allow(f"longevity_{user_id}", 5, 60):
+    if not manual_rl.allow(f"longevity_{user_id}", 5, 60):
         return jsonify({'error': 'Too many requests – slow down'}), 429
     if get_current_user().id != user_id:
         return jsonify({'error': 'Forbidden'}), 403
