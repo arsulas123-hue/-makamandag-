@@ -22,6 +22,27 @@ from flask_limiter.util import get_remote_address
 # App configuration
 # ----------------------------------------------------------------------
 app = Flask(__name__)
+# ---------- Manual rate‑limiter (no extra package needed) ----------
+from threading import Lock
+from collections import defaultdict
+import time as _time
+
+class ManualRateLimiter:
+    def __init__(self):
+        self.lock = Lock()
+        self.requests = defaultdict(list)
+
+    def allow(self, key, max_calls, period):
+        now = _time.time()
+        with self.lock:
+            self.requests[key] = [t for t in self.requests[key] if now - t < period]
+            if len(self.requests[key]) >= max_calls:
+                return False
+            self.requests[key].append(now)
+            return True
+
+manual_rl = ManualRateLimiter()
+
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'change-this-secret-key-in-production')
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///smartspend.db')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
@@ -41,21 +62,6 @@ limiter = Limiter(
     default_limits=["200 per day", "50 per hour"]
 )
 
-class ManualRateLimiter:
-    def __init__(self):
-        self.lock = Lock()
-        self.requests = defaultdict(list)
-
-    def allow(self, key, max_calls, period):
-        now = _time.time()
-        with self.lock:
-            self.requests[key] = [t for t in self.requests[key] if now - t < period]
-            if len(self.requests[key]) >= max_calls:
-                return False
-            self.requests[key].append(now)
-            return True
-
-rl = ManualRateLimiter()
 # ----------------------------------------------------------------------
 # Multi-AI Router
 # ----------------------------------------------------------------------
@@ -2679,7 +2685,7 @@ async function sendChat() {
     authOverlay.style.display = 'none';
     initApp();
   } catch(e) { authOverlay.style.display = 'flex'; }
-})();
+})();class ManualRateLimiter:
 </script>
 </body>
 </html>
