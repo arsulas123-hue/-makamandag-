@@ -45,23 +45,47 @@ FREE_MODELS = [
 ]
 
 def route_ai_request(prompt, max_tokens=400):
+    """Try OpenRouter free models first, then Gemini. Return content string or None."""
     if OPENROUTER_API_KEY:
+        # Updated model IDs that are actually available on OpenRouter free tier
+        FREE_MODELS = [
+            "google/gemini-2.0-flash-001:free",
+            "meta-llama/llama-3.2-3b-instruct:free",
+            "mistralai/mistral-7b-instruct:free",
+        ]
         for model in FREE_MODELS:
             try:
                 resp = requests.post(
                     OPENROUTER_URL,
-                    headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"},
-                    json={"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens},
-                    timeout=15,
+                    headers={
+                        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": max_tokens,
+                    },
+                    timeout=20,  # Slightly longer timeout
                 )
                 if resp.status_code == 200:
                     data = resp.json()
                     if "choices" in data and len(data["choices"]) > 0:
                         print(f"✅ Used OpenRouter: {model}")
                         return data["choices"][0]["message"]["content"].strip()
-            except Exception:
+                    else:
+                        print(f"⚠️ OpenRouter ({model}) returned unexpected format: {data}")
+                else:
+                    error_msg = resp.json().get("error", {}).get("message", resp.text)
+                    print(f"❌ OpenRouter ({model}) HTTP {resp.status_code}: {error_msg}")
+            except Exception as e:
+                print(f"❌ OpenRouter ({model}) exception: {e}")
                 continue
+    else:
+        print("ℹ️ OPENROUTER_API_KEY not set – skipping OpenRouter")
+
     if GEMINI_API_KEY:
+        GEMINI_MODELS = ["gemini-2.0-flash"]  # Use the latest stable
         for model_name in GEMINI_MODELS:
             try:
                 model = genai.GenerativeModel(model_name)
@@ -69,9 +93,14 @@ def route_ai_request(prompt, max_tokens=400):
                 if response and response.text:
                     print(f"✅ Used Gemini: {model_name}")
                     return response.text.strip()
+                else:
+                    print(f"⚠️ Gemini ({model_name}) returned no text")
             except Exception as e:
-                print(f"Gemini {model_name} failed: {e}")
-    return "⚠️ All AI services unavailable."
+                print(f"❌ Gemini ({model_name}) failed: {e}")
+    else:
+        print("ℹ️ GEMINI_API_KEY not set – skipping Gemini")
+
+    return None  # Explicitly signal failure
 
 db = SQLAlchemy(app)
 bcrypt = Bcrypt(app)
