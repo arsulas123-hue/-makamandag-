@@ -7,116 +7,19 @@ import base64
 import re
 import numpy as np
 from datetime import datetime, timedelta, timezone
+from collections import defaultdict
 from functools import wraps
-from flask import Flask, request, jsonify, session, Response, make_response
+from flask import Flask, request, jsonify, session, Response
 from flask_sqlalchemy import SQLAlchemy
 from flask_bcrypt import Bcrypt
 from flask_cors import CORS
 from sqlalchemy import inspect, text
 import google.generativeai as genai
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
 
 # ----------------------------------------------------------------------
 # App configuration
 # ----------------------------------------------------------------------
 app = Flask(__name__)
-# ---------- Manual rate‑limiter (no extra package needed) ----------
-from threading import Lock
-from collections import defaultdict
-import time as _time
-
-class ManualRateLimiter:
-    def __init__(self):
-        self.lock = Lock()
-        self.requests = defaultdict(list)
-
-    def allow(self, key, max_calls, period):
-        now = _time.time()
-        with self.lock:
-            self.requests[key] = [t for t in self.requests[key] if now - t < period]
-            if len(self.requests[key]) >= max_calls:
-                return False
-            self.requests[key].append(now)
-            return True
-
-manual_rl = ManualRateLimiter()
-
-def your_ml_planning_function(income, mindset, selected_categories):
-    """Simple ML plan that distributes income based on mindset."""
-    # Base percentages for "Neutral" mindset
-    if mindset == 'Saver':
-        savings_pct = 30
-        needs_pct = 50
-        wants_pct = 20
-    elif mindset == 'Spender':
-        savings_pct = 10
-        needs_pct = 50
-        wants_pct = 40
-    else:  # Neutral
-        savings_pct = 20
-        needs_pct = 60
-        wants_pct = 20
-
-    allocation = {}
-    allocation_amounts = {}
-
-    # Distribute percentages among categories
-    need_cats = [c for c in selected_categories if c in ['Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage']]
-    want_cats = [c for c in selected_categories if c not in need_cats and c != 'Savings']
-    savings_cats = ['Savings'] if 'Savings' in selected_categories else []
-
-    # Assign percentages
-    for cat in need_cats:
-        allocation[cat] = needs_pct / max(len(need_cats), 1)
-    for cat in want_cats:
-        allocation[cat] = wants_pct / max(len(want_cats), 1)
-    for cat in savings_cats:
-        allocation[cat] = savings_pct
-
-    # Normalise to 100% (avoid floating point issues)
-    total_pct = sum(allocation.values())
-    if total_pct > 0:
-        for cat in allocation:
-            allocation[cat] = allocation[cat] / total_pct * 100
-
-    # Compute amounts
-    for cat, pct in allocation.items():
-        allocation_amounts[cat] = income * pct / 100
-
-    # Savings plan
-    monthly_savings = allocation_amounts.get('Savings', 0) if 'Savings' in allocation else 0
-    savings_plan = {
-        'daily': monthly_savings / 30,
-        'weekly': monthly_savings / 4,
-        'monthly': monthly_savings,
-        'tip': 'Try to automate this amount to a separate account.'
-    }
-
-    # Simple advice
-    advice = []
-    if monthly_savings < income * 0.1:
-        advice.append({'type': 'warning', 'title': 'Low savings rate', 'body': 'Try to save at least 10% of your income.'})
-    else:
-        advice.append({'type': 'success', 'title': 'Good savings habit', 'body': 'You are saving a healthy percentage.'})
-    if wants_pct > 30:
-        advice.append({'type': 'info', 'title': 'Watch discretionary spending', 'body': 'Consider reducing wants to 20-30% of your budget.'})
-
-    financial_summary = f"Based on your {mindset} mindset, we allocated {savings_pct:.0f}% to savings, {needs_pct:.0f}% to needs, and {wants_pct:.0f}% to wants. Your monthly savings target is {fmt(monthly_savings)}."
-
-    return {
-        'allocation': allocation,
-        'allocation_amounts': allocation_amounts,
-        'savings_plan': savings_plan,
-        'financial_summary': financial_summary,
-        'advice': advice,
-        'monthly_income': income
-    }
-
-def fmt(amount):
-    return f"₱{amount:,.2f}"
-
-
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'change-this-secret-key-in-production')
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///smartspend.db')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
@@ -130,11 +33,6 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 CORS(app, supports_credentials=True)
-limiter = Limiter(
-    key_func=get_remote_address,
-    app=app,
-    default_limits=["200 per day", "50 per hour"]
-)
 
 # ----------------------------------------------------------------------
 # Multi-AI Router
@@ -645,48 +543,32 @@ def delete_transaction(tx_id):
 @app.route('/api/summary/<int:user_id>')
 @login_required
 def summary(user_id):
-    # --- manual rate limit: 5 requests per 60 seconds ---
-    if not manual_rl.allow(f"summary_{user_id}", 5, 60):
-        return jsonify({'error': 'Too many requests – slow down'}), 429
     if get_current_user().id != user_id:
         return jsonify({'error': 'Forbidden'}), 403
     return jsonify(get_monthly_summary(user_id))
 
-
 @app.route('/api/predict/<int:user_id>')
 @login_required
 def predict(user_id):
-    if not manual_rl.allow(f"predict_{user_id}", 5, 60):
-        return jsonify({'error': 'Too many requests – slow down'}), 429
     if get_current_user().id != user_id:
         return jsonify({'error': 'Forbidden'}), 403
     has_data = Transaction.query.filter_by(user_id=user_id, tx_type='expense').count() > 0
     if not has_data:
-        return jsonify({
-            'has_data': False,
-            'score': None,
-            'predictions': {'weekly': {}, 'categories': {}},
-            'advice': []
-        })
+        return jsonify({'has_data': False, 'score': None, 'predictions': {'weekly': {}, 'categories': {}}, 'advice': []})
     return jsonify({
         'has_data': True,
         'score': compute_health_score(user_id),
-        'predictions': {
-            'weekly': generate_weekly_forecast(user_id),
-            'categories': get_category_totals(user_id)
-        },
+        'predictions': {'weekly': generate_weekly_forecast(user_id), 'categories': get_category_totals(user_id)},
         'advice': []
     })
-
 
 @app.route('/api/longevity/<int:user_id>')
 @login_required
 def longevity(user_id):
-    if not manual_rl.allow(f"longevity_{user_id}", 5, 60):
-        return jsonify({'error': 'Too many requests – slow down'}), 429
     if get_current_user().id != user_id:
         return jsonify({'error': 'Forbidden'}), 403
     return jsonify(compute_longevity(user_id))
+
 # ----------------------------------------------------------------------
 # Budget routes
 # ----------------------------------------------------------------------
@@ -1031,38 +913,30 @@ Do NOT wrap in markdown."""
 @login_required
 def ai_full_setup():
     user = get_current_user()
-    try:
-        data = request.get_json() or {}
-        monthly_income = data.get('monthly_income', user.monthly_budget_limit or 0)
-        mindset = data.get('mindset', user.spending_mindset or 'Neutral')
-        social_status = data.get('social_status', user.social_status or 'Middle')
-        selected_categories = data.get('selected_categories', [])
+    data = request.json or {}
+    monthly_income = data.get('monthly_income', user.monthly_budget_limit or 0)
+    mindset = data.get('mindset', user.spending_mindset)
+    social_status = data.get('social_status', user.social_status)
+    selected_categories = data.get('selected_categories', [])
 
-        if not selected_categories:
-            selected_categories = [
-                'Food & Dining', 'Transport', 'Groceries', 'Health',
-                'Entertainment', 'Debt repayment', 'Savings'
-            ]
+    if not selected_categories:
+        selected_categories = ['Food & Dining', 'Transport', 'Groceries', 'Health',
+                               'Entertainment', 'Debt repayment', 'Savings']
 
-        # Persist income/mindset on user record immediately
-        user.monthly_budget_limit = monthly_income
-        user.spending_mindset = mindset
-        user.social_status = social_status
-        db.session.commit()
+    user.monthly_budget_limit = monthly_income
+    user.spending_mindset = mindset
+    user.social_status = social_status
+    db.session.commit()
 
-        # --- Try AI router first, fall back to local ML ---
-        recent_spending = defaultdict(float)
-        for t in Transaction.query.filter_by(user_id=user.id, tx_type='expense') \
-                                  .order_by(Transaction.tx_date.desc()).limit(30).all():
-            recent_spending[t.category] += t.amount
+    # Get recent spending
+    recent_spending = defaultdict(float)
+    for t in Transaction.query.filter_by(user_id=user.id, tx_type='expense').order_by(Transaction.tx_date.desc()).limit(30).all():
+        recent_spending[t.category] += t.amount
 
-        allocation = {}
-        ai_used = False
-
-        if OPENROUTER_API_KEY or GEMINI_API_KEY:
-            categories_str = ', '.join(selected_categories)
-            prompt = f"""You are an expert financial planner AI for a Filipino user.
-Monthly income: \u20b1{monthly_income:,.2f}
+    categories_str = ', '.join(selected_categories)
+    prompt = f"""
+You are an expert financial planner AI for a Filipino user.
+Monthly income: ₱{monthly_income:,.2f}
 Spending mindset: {mindset}
 Social status: {social_status}
 Recent spending (30 days): {dict(recent_spending)}
@@ -1070,134 +944,154 @@ Selected categories: {categories_str}
 Rules:
 - Saver mindset: higher needs & savings.
 - Spender mindset: more wants.
-- All percentages must sum to EXACTLY 100.
-Return ONLY valid JSON with category names as keys and percentage floats as values.
-Example: {{"Food & Dining": 35.0, "Transport": 15.0, "Savings": 20.0}}"""
-            raw = route_ai_request(prompt, max_tokens=600)
-            if raw:
-                try:
-                    cleaned = raw.strip()
-                    if cleaned.startswith('```'):
-                        cleaned = cleaned.split('```')[1]
-                        if cleaned.startswith('json'):
-                            cleaned = cleaned[4:]
-                    parsed = json.loads(cleaned.strip())
-                    # Keep only selected categories; skip unknown keys
-                    allocation = {k: float(v) for k, v in parsed.items()
-                                  if k in selected_categories and isinstance(v, (int, float))}
-                    if allocation:
-                        ai_used = True
-                except Exception as parse_err:
-                    print(f"AI JSON parse error: {parse_err}")
+- Sum to exactly 100%.
+Return ONLY valid JSON with category names as keys and percentages as values.
+Example: {{"Food & Dining": 45.0, "Transport": 15.0, "Savings": 40.0}}
+"""
+    raw = route_ai_request(prompt, max_tokens=600)
 
-        # --- Local ML fallback if AI returned nothing usable ---
-        if not allocation:
-            local = your_ml_planning_function(monthly_income, mindset, selected_categories)
-            allocation = local['allocation']
-
-        # --- Normalise to exactly 100% ---
-        total = sum(allocation.values())
-        if total > 0 and abs(total - 100) > 0.01:
-            allocation = {k: round(v / total * 100, 2) for k, v in allocation.items()}
-
-        # Fix any remaining rounding drift
-        total = sum(allocation.values())
-        if allocation and abs(total - 100) > 0.01:
-            max_cat = max(allocation, key=allocation.get)
-            allocation[max_cat] = round(allocation[max_cat] + (100 - total), 2)
-
-        allocation_amounts = {cat: round(monthly_income * pct / 100, 2)
-                              for cat, pct in allocation.items()}
-
-        # --- Savings plan ---
-        monthly_savings = allocation_amounts.get('Savings', monthly_income * 0.2)
-        savings_plan = {
-            'daily': round(monthly_savings / 30, 2),
-            'weekly': round(monthly_savings / 4, 2),
-            'monthly': round(monthly_savings, 2),
-            'tip': 'Automate your savings transfer on payday to make it effortless.'
-        }
-        if OPENROUTER_API_KEY or GEMINI_API_KEY:
-            balance = get_monthly_summary(user.id)['balance']
-            sp_prompt = f"""User income: \u20b1{monthly_income:.2f}, expenses: \u20b1{sum(recent_spending.values()):.2f}, balance: \u20b1{balance:.2f}.
-Mindset: {mindset}. Return JSON: {{"daily":float,"weekly":float,"monthly":float,"tip":"string"}}"""
-            sp_raw = route_ai_request(sp_prompt, max_tokens=200)
-            if sp_raw:
-                try:
-                    sp_clean = sp_raw.strip().lstrip('`').lstrip('json').strip('`').strip()
-                    savings_plan = json.loads(sp_clean)
-                except Exception:
-                    pass
-
-        # --- Advice ---
-        advice = []
-        if OPENROUTER_API_KEY or GEMINI_API_KEY:
-            adv_prompt = f"""Allocation: {allocation}. Recent spending: {dict(recent_spending)}.
-Give 3 short financial advice items as JSON array (no markdown):
-[{{"title":"...","body":"...","type":"info|warning|success"}}]"""
-            adv_raw = route_ai_request(adv_prompt, max_tokens=300)
-            if adv_raw:
-                try:
-                    adv_clean = adv_raw.strip().lstrip('`').lstrip('json').strip('`').strip()
-                    parsed_adv = json.loads(adv_clean)
-                    if isinstance(parsed_adv, list):
-                        advice = parsed_adv
-                except Exception:
-                    pass
-        if not advice:
-            savings_rate = (monthly_income - sum(recent_spending.values())) / monthly_income \
-                           if monthly_income > 0 else 0
-            advice = [
-                {'title': 'Stay Consistent', 'body': 'Track every expense to improve your score.', 'type': 'info'},
-                {'title': 'Savings First', 'body': 'Transfer savings immediately after receiving income.', 'type': 'success'},
-                {'title': 'Review Wants', 'body': 'Audit subscriptions and entertainment monthly.', 'type': 'warning'},
-            ]
-            if savings_rate < 0.1:
-                advice[1] = {'title': 'Low Savings Alert', 'body': 'Try to save at least 10% of income.', 'type': 'warning'}
-
-        # --- Financial summary ---
-        financial_summary = f"Based on your {mindset} mindset with \u20b1{monthly_income:,.2f}/month, your ML plan allocates {allocation.get('Savings', 0):.0f}% to savings."
-        if OPENROUTER_API_KEY or GEMINI_API_KEY:
-            fs_raw = route_ai_request(
-                f"Based on income \u20b1{monthly_income}, mindset {mindset}, allocation {allocation}, give a one-sentence financial health assessment.",
-                max_tokens=100)
-            if fs_raw:
-                financial_summary = fs_raw.strip()
-
-        # --- PERSIST allocations & budgets to DB ---
-        needs_cats = {'Food & Dining', 'Transport', 'Groceries', 'Health', 'Debt repayment', 'Mortgage'}
-        savings_cats = {'Savings'}
-
-        UserAllocation.query.filter_by(user_id=user.id).delete()
-        for cat, pct in allocation.items():
-            cat_type = 'need' if cat in needs_cats else ('savings' if cat in savings_cats else 'want')
-            db.session.add(UserAllocation(
-                user_id=user.id, category_name=cat, type=cat_type, percentage=pct))
-
-        Budget.query.filter_by(user_id=user.id).delete()
-        for cat, pct in allocation.items():
-            db.session.add(Budget(
-                user_id=user.id, category=cat,
-                limit_amount=round(monthly_income * pct / 100, 2)))
-
-        db.session.commit()
-        print(f"✅ AI full_setup saved for user {user.id} | AI used: {ai_used}")
-
-        return jsonify({
-            'allocation': allocation,
-            'allocation_amounts': allocation_amounts,
-            'savings_plan': savings_plan,
-            'advice': advice,
-            'financial_summary': financial_summary,
-            'monthly_income': monthly_income,
-        }), 200
-
+    allocation = {}
+    try:
+        if raw.startswith('```'):
+            raw = raw.split('```')[1]
+            if raw.startswith('json'):
+                raw = raw[4:]
+        allocation = json.loads(raw.strip())
+        # Filter to only selected categories
+        allocation = {k: v for k, v in allocation.items() if k in selected_categories}
     except Exception as e:
-        db.session.rollback()
-        print(f"❌ ai_full_setup error: {e}")
-        import traceback; traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
+        print(f"Parse error: {e}, using smart fallback")
+        allocation = {}
 
+    # Smart fallback
+    if not allocation:
+        needs = ['Food & Dining', 'Transport', 'Groceries', 'Health', 'Debt repayment', 'Mortgage']
+        wants = ['Entertainment', 'Subscription', 'Hobbies']
+        
+        if mindset.lower() == 'saver':
+            need_weight = 70
+            want_weight = 10
+            savings_weight = 20
+        elif mindset.lower() == 'spender':
+            need_weight = 45
+            want_weight = 35
+            savings_weight = 20
+        else:  # Neutral
+            need_weight = 55
+            want_weight = 25
+            savings_weight = 20
+        
+        need_cats = [c for c in selected_categories if c in needs]
+        want_cats = [c for c in selected_categories if c in wants]
+        savings_cats = [c for c in selected_categories if c == 'Savings']
+        other_cats = [c for c in selected_categories if c not in needs and c not in wants and c != 'Savings']
+        
+        total_weight = len(need_cats) + len(want_cats) + len(savings_cats) + len(other_cats)
+        if total_weight == 0:
+            for cat in selected_categories:
+                allocation[cat] = round(100.0 / len(selected_categories), 1)
+        else:
+            for cat in selected_categories:
+                if cat in needs:
+                    base = need_weight / len(need_cats) if need_cats else 0
+                elif cat in wants:
+                    base = want_weight / len(want_cats) if want_cats else 0
+                elif cat == 'Savings':
+                    base = savings_weight / len(savings_cats) if savings_cats else 0
+                else:
+                    base = (100 - need_weight - want_weight - savings_weight) / len(other_cats) if other_cats else 0
+                allocation[cat] = round(base, 1)
+    
+    # Normalize to exactly 100%
+    total = sum(allocation.values())
+    if abs(total - 100) > 0.1:
+        factor = 100 / total
+        allocation = {k: round(v * factor, 1) for k, v in allocation.items()}
+    
+    # Fix rounding
+    total = sum(allocation.values())
+    if abs(total - 100) > 0.01:
+        diff = round(100 - total, 1)
+        if allocation:
+            max_cat = max(allocation, key=allocation.get)
+            allocation[max_cat] = round(allocation[max_cat] + diff, 1)
+
+    # Savings plan
+    savings_prompt = f"""
+User income: ₱{monthly_income:.2f}, expenses: ₱{sum(recent_spending.values()):.2f}, balance: ₱{get_monthly_summary(user.id)['balance']:.2f}.
+Mindset: {mindset}. Recommend daily, weekly, monthly savings.
+Return JSON: {{"daily": float, "weekly": float, "monthly": float, "tip": "string"}}.
+"""
+    try:
+        raw_savings = route_ai_request(savings_prompt, max_tokens=200)
+        if raw_savings.startswith('```'):
+            raw_savings = raw_savings.split('```')[1]
+            if raw_savings.startswith('json'):
+                raw_savings = raw_savings[4:]
+        savings_plan = json.loads(raw_savings.strip())
+    except Exception:
+        monthly_save = monthly_income * 0.2
+        savings_plan = {
+            "daily": round(monthly_save / 30, 2),
+            "weekly": round(monthly_save / 4, 2),
+            "monthly": round(monthly_save, 2),
+            "tip": "Automate your savings on payday."
+        }
+
+    # Advice
+    advice_prompt = f"""
+Allocation: {allocation}. Spending: {dict(recent_spending)}.
+Give 3 short financial advice items as JSON array:
+[{{"title":"...","body":"...","type":"info|warning|success"}}]
+"""
+    try:
+        raw_advice = route_ai_request(advice_prompt, max_tokens=300)
+        if raw_advice.startswith('```'):
+            raw_advice = raw_advice.split('```')[1]
+            if raw_advice.startswith('json'):
+                raw_advice = raw_advice[4:]
+        advice = json.loads(raw_advice.strip())
+        if not isinstance(advice, list):
+            advice = []
+    except Exception:
+        advice = [
+            {"title": "Stay Consistent", "body": "Track every expense to improve your score.", "type": "info"},
+            {"title": "Savings First", "body": "Transfer savings immediately after receiving income.", "type": "success"},
+            {"title": "Review Wants", "body": "Audit subscriptions and entertainment monthly.", "type": "warning"}
+        ]
+
+    # Financial summary
+    summary_prompt = f"Based on income ₱{monthly_income}, mindset {mindset}, and allocation {allocation}, give a one‑sentence financial health assessment."
+    try:
+        raw_summary = route_ai_request(summary_prompt, max_tokens=100)
+        financial_summary = raw_summary.strip()
+    except Exception:
+        financial_summary = "Your AI plan is ready. Start logging your expenses to get personalised insights."
+
+    # Save allocations & budgets
+    UserAllocation.query.filter_by(user_id=user.id).delete()
+    needs = {'Food & Dining', 'Transport', 'Groceries', 'Health', 'Debt repayment', 'Mortgage'}
+    savings_cats = {'Savings'}
+    
+    for cat, pct in allocation.items():
+        t = 'need' if cat in needs else ('savings' if cat in savings_cats else 'want')
+        db.session.add(UserAllocation(user_id=user.id, category_name=cat, type=t, percentage=pct))
+
+    Budget.query.filter_by(user_id=user.id).delete()
+    for cat, pct in allocation.items():
+        limit = round(monthly_income * pct / 100, 2)
+        db.session.add(Budget(user_id=user.id, category=cat, limit_amount=limit))
+
+    db.session.commit()
+
+    return jsonify({
+        'allocation': allocation,
+        'allocation_amounts': {cat: round(monthly_income * pct / 100, 2) for cat, pct in allocation.items()},
+        'savings_plan': savings_plan,
+        'advice': advice,
+        'financial_summary': financial_summary,
+        'monthly_income': monthly_income
+    }), 200
 
 # ----------------------------------------------------------------------
 # AI classification & chat
@@ -1234,6 +1128,7 @@ Reply in 3-5 sentences, warm, actionable, use ₱.
 """
     reply = route_ai_request(prompt, max_tokens=400)
     return jsonify({'reply': reply})
+
 HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1983,21 +1878,11 @@ table td { color:var(--text2); font-size:0.85rem; }
       </div>
       <div id="adminUsersPanel">
         <input type="text" id="adminSearchUser" placeholder="Search user..." class="form-input" style="margin-bottom:12px;">
-        <table>
-          <thead>
-            <tr><th>ID</th><th>Name</th><th>Email</th><th>Role</th><th>Created</th></tr>
-          </thead>
-          <tbody id="adminUserTable"></tbody>
-        </table>
+        <table><thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Role</th><th>Created</th></tr></thead><tbody id="adminUserTable"></tbody></table>
       </div>
       <div id="adminTransactionsPanel" style="display:none;">
         <select id="adminUserFilter" class="form-select" style="margin-bottom:12px;"><option value="">All Users</option></select>
-        <table>
-          <thead>
-            <tr><th>Date</th><th>User</th><th>Category</th><th>Type</th><th>Amount</th><th>Need/Want</th></tr>
-          </thead>
-          <tbody id="adminTxTable"></tbody>
-        </table>
+        <table><thead><tr><th>Date</th><th>User</th><th>Category</th><th>Type</th><th>Amount</th><th>Need/Want</th></tr></thead><tbody id="adminTxTable"></tbody></table>
       </div>
     </div>
   </div>
@@ -2047,8 +1932,6 @@ let customCategories = [];
 let futureExpensesApplied = false;
 let refreshTimeout = null;
 let dashboardLoading = false;
-let planAttempted = false;          // ← NEW: only try AI plan once
-let isAnalyzing = false;            // ← NEW: prevent concurrent ML calls
 
 const CAT_ICONS = {
   'Food & Dining':'🍜','Transport':'🚗','Groceries':'🛒','Entertainment':'🎬',
@@ -2085,26 +1968,15 @@ async function api(url, opts={}){
   return res.json();
 }
 
-// ── HELPER: get selected categories (with fallback) ──
-function getSelectedCategories() {
-  const selected = [];
-  document.querySelectorAll('.cat-checkbox:checked').forEach(chk => selected.push(chk.dataset.cat));
-  if (selected.length === 0) {
-    // fallback to sensible defaults
-    return ['Food & Dining','Transport','Groceries','Health','Entertainment','Debt repayment','Savings'];
-  }
-  return selected;
-}
-
-// ── DEBOUNCED REFRESH (only refreshes data, never retriggers plan) ──
+// ── DEBOUNCED REFRESH ──
 function debouncedRefresh() {
-  if (dashboardLoading) return;   // skip if already loading
   if (refreshTimeout) clearTimeout(refreshTimeout);
   refreshTimeout = setTimeout(() => {
-    if (!dashboardLoading) loadDashboardData();
+    loadDashboard();
     refreshTimeout = null;
-  }, 2000);
+  }, 500);
 }
+
 // ── CHECKLIST ──
 function renderChecklist() {
   const needsCont = document.getElementById('needsChecklist');
@@ -2318,11 +2190,14 @@ document.getElementById('addExpenseBtn').addEventListener('click', async ()=>{
   } catch(e) { toast(e.message); }
 });
 
-// ── DASHBOARD DATA ONLY (no plan triggering) ──
-async function loadDashboardData() {
-  if (!currentUser || dashboardLoading) return;
+// ── DASHBOARD LOAD ──
+async function loadDashboard() {
+  if (!currentUser) return;
+  // Prevent multiple simultaneous loads
+  if (dashboardLoading) return;
   dashboardLoading = true;
   try {
+    // Only apply future expenses once per session
     if (!futureExpensesApplied) {
       await api('/api/apply_future_expenses', { method: 'POST' });
       futureExpensesApplied = true;
@@ -2337,79 +2212,114 @@ async function loadDashboardData() {
     document.getElementById('incomeExpenseChartCard').style.display = 'block';
     document.getElementById('chartBlock').style.display = Object.keys(summary.monthly).length ? 'block' : 'none';
     document.getElementById('forecastBlock').style.display = Object.keys(predict.predictions?.weekly||{}).length ? 'block' : 'none';
-  } catch(e) {} finally { dashboardLoading = false; }
-}
-
-// ── FULL DASHBOARD LOAD (only called once, tries plan) ──
-async function loadDashboard() {
-  await loadDashboardData();
-  if (!planAttempted && currentUser && currentUser.monthly_budget_limit > 0) {
-    planAttempted = true;
+  } catch(e) {
+    // Don't toast on empty data – just use default values
+    // toast(e.message);
+  } finally {
+    dashboardLoading = false;
+  }
+  // Only auto-run plan if not already running
+  if (currentUser.monthly_budget_limit > 0 && !aiPlan && !dashboardLoading) {
     autoRunPlanAndUpdateDashboard();
   }
 }
 
-// ── AUTO PLAN (with lock and proper error handling) ──
-async function autoRunPlanAndUpdateDashboard() {
-  if (!currentUser || dashboardLoading || isAnalyzing) return;
-  const totalIncome = currentUser.monthly_budget_limit;
-  if (totalIncome <= 0) return;
-  
-  isAnalyzing = true;
-  dashboardLoading = true;
-  addFeedEvent('🤖', 'ML is analyzing your financial profile…');
-  
-  try {
-    const selectedCategories = getSelectedCategories();
-    const result = await api('/api/ai/full_setup', {
-      method: 'POST',
-      body: JSON.stringify({ 
-        monthly_income: totalIncome, 
-        mindset: currentMindset, 
-        selected_categories: selectedCategories 
-      })
-    });
-    if (!result.allocation) throw new Error('No allocation returned from ML');
-    aiPlan = result;
-    addFeedEvent('✅', `AI categorised ${Object.keys(result.allocation).length} categories`);
-    addFeedEvent('💰', `Savings target: ${fmt(result.savings_plan.monthly)}/month`);
-    addFeedEvent('🧠', `Summary: "${result.financial_summary.substring(0,60)}…"`);
-    addFeedEvent('📋', `${result.advice.length} insights ready`);
-    renderAIPlan(result);
-  } catch(e) {
-    console.error('Auto plan error:', e);
-    let errMsg = e.message;
-    if (errMsg.includes('selected_categories is not defined')) {
-      errMsg = 'Backend error: selected_categories variable missing. Please check your server code.';
-    }
-    toast('ML analysis failed: ' + errMsg, 'var(--red)');
-    addFeedEvent('❌', 'ML error: ' + errMsg);
-  } finally {
-    dashboardLoading = false;
-    isAnalyzing = false;
-    loadDashboardData();
-  }
+function renderStats(summary, score, longevity) {
+  document.getElementById('sBalance').textContent = fmt(summary.balance ?? 0);
+  document.getElementById('sExpense').textContent = fmt(summary.expense ?? 0);
+  document.getElementById('sIncome').textContent = fmt(summary.income ?? 0);
+  document.getElementById('sScore').textContent = score ?? '—';
+  document.getElementById('scoreLabel').textContent = score ? 'Health Score' : 'awaiting data';
+  document.getElementById('topScore').textContent = score ?? '—';
 }
 
-// ── MANUAL ML PLAN (button click) ──
+function renderIncomeExpenseChart(income, expense) {
+  const ctx = document.getElementById('incomeExpenseChart');
+  if(!ctx) return;
+  if(incomeExpenseChart) incomeExpenseChart.destroy();
+  incomeExpenseChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: ['Income', 'Expenses'],
+      datasets: [{
+        label: 'Amount (₱)',
+        data: [income || 0, expense || 0],
+        backgroundColor: ['rgba(0,229,160,0.7)', 'rgba(255,59,92,0.7)'],
+        borderColor: ['#00E5A0', '#FF3B5C'],
+        borderWidth: 1,
+        borderRadius: 8,
+        barPercentage: 0.6
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: true,
+      plugins: { legend: { labels: { color: '#B0C8E0' } } },
+      scales: {
+        y: { beginAtZero: true, grid: { color: 'rgba(107,136,168,0.2)' }, ticks: { color: '#B0C8E0', callback: (val) => '₱'+val.toLocaleString() } },
+        x: { ticks: { color: '#B0C8E0' } }
+      }
+    }
+  });
+}
+
+function addFeedEvent(icon, text) {
+  const feed = document.getElementById('aiFeed');
+  const empty = feed.querySelector('.empty-state');
+  if (empty) empty.remove();
+  const time = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+  const div = document.createElement('div');
+  div.className = 'ai-event';
+  div.innerHTML = `<span class="ai-event-icon">${icon}</span><span class="ai-event-text">${esc(text)}</span><span class="ai-event-time">${time}</span>`;
+  feed.prepend(div);
+}
+
+// ── AUTO PLAN ──
+async function autoRunPlanAndUpdateDashboard() {
+  if (!currentUser) return;
+  if (dashboardLoading) return;
+  try {
+    const summary = await api(`/api/summary/${currentUser.id}`);
+    const totalIncome = summary.income || 0;
+    document.getElementById('incomeInput').value = totalIncome;
+    if (totalIncome <= 0) { return; }
+    const selectedCategories = [];
+    document.querySelectorAll('.cat-checkbox:checked').forEach(chk => selectedCategories.push(chk.dataset.cat));
+    if (selectedCategories.length === 0) {
+      ['Food & Dining','Transport','Groceries','Health','Entertainment','Debt repayment','Savings']
+        .forEach(c => selectedCategories.push(c));
+    }
+    const result = await api('/api/ai/full_setup', {
+      method: 'POST',
+      body: JSON.stringify({ monthly_income: totalIncome, mindset: currentMindset, selected_categories })
+    });
+    aiPlan = result;
+    if (result.allocation) {
+      addFeedEvent('✅', `AI categorised ${Object.keys(result.allocation).length} categories`);
+      addFeedEvent('💰', `Savings target: ${fmt(result.savings_plan.monthly)}/month`);
+      addFeedEvent('🧠', `Summary: "${result.financial_summary.substring(0,60)}…"`);
+      addFeedEvent('📋', `${result.advice.length} insights ready`);
+      renderAIPlan(result);
+    }
+  } catch(e) { console.error('Auto plan error:', e); }
+  debouncedRefresh();
+}
+
+// ── ML PLAN ──
 document.getElementById('analyzeBtn').addEventListener('click', async () => {
-  if (isAnalyzing) { toast('ML analysis already running...', 'var(--amber)'); return; }
   const income = parseFloat(document.getElementById('incomeInput').value);
   if(!income || income <= 0){ toast('Enter a valid monthly income first'); return; }
-  const selectedCategories = getSelectedCategories();
+  const selectedCategories = [];
+  document.querySelectorAll('.cat-checkbox:checked').forEach(chk => selectedCategories.push(chk.dataset.cat));
   if(!selectedCategories.length){ toast('Please select at least one category'); return; }
-  
   const btn = document.getElementById('analyzeBtn');
   const btnContent = document.getElementById('analyzeBtnContent');
   btn.disabled = true;
   btnContent.innerHTML = '<div class="spinner"></div> Analyzing…';
   addFeedEvent('🤖','ML is analyzing your financial profile…');
-  isAnalyzing = true;
-  
   try {
     const result = await api('/api/ai/full_setup', {
       method:'POST',
-      body: JSON.stringify({ monthly_income: income, mindset: currentMindset, selected_categories: selectedCategories })
+      body: JSON.stringify({ monthly_income: income, mindset: currentMindset, selected_categories })
     });
     if (!result.allocation) throw new Error('No allocation returned from ML');
     aiPlan = result;
@@ -2421,79 +2331,12 @@ document.getElementById('analyzeBtn').addEventListener('click', async () => {
     toast('ML plan complete! 🎉', 'var(--green)');
   } catch(e){
     console.error('ML plan error:', e);
-    let errMsg = e.message;
-    if (errMsg.includes('selected_categories is not defined')) {
-      errMsg = 'Backend error: selected_categories variable missing. Please check your server code.';
-    }
-    toast('ML error: '+errMsg);
-    addFeedEvent('❌','ML error: '+errMsg);
-  } finally {
-    isAnalyzing = false;
-    btn.disabled = false;
-    btnContent.innerHTML = '🔄 Re‑Analyze';
-    loadDashboardData();
+    toast('ML error: '+e.message);
+    addFeedEvent('❌','ML error: '+e.message);
   }
+  btn.disabled = false;
+  btnContent.innerHTML = '🔄 Re‑Analyze';
 });
-
-function addFeedEvent(emoji, text) {
-  const feedDiv = document.getElementById('aiFeed');
-  const existing = feedDiv.querySelector('.empty-state');
-  if (existing) existing.remove();
-  feedDiv.innerHTML += `<div style="padding:8px 0; border-bottom:1px solid var(--border2); font-size:0.8rem;">${emoji} ${esc(text)}</div>`;
-  feedDiv.scrollTop = feedDiv.scrollHeight;
-}
-
-function renderStats(summary, score, longevity) {
-  document.getElementById('sBalance').innerHTML = fmt(longevity?.balance || 0);
-  document.getElementById('sExpense').innerHTML = fmt(summary.expense);
-  document.getElementById('sIncome').innerHTML = fmt(summary.income);
-  document.getElementById('sScore').innerHTML = score !== undefined ? Math.round(score) : '—';
-  document.getElementById('topScore').innerHTML = score !== undefined ? Math.round(score) : '—';
-  let label = '';
-  if (score >= 80) label = 'Excellent financial health';
-  else if (score >= 60) label = 'Good, but room to improve';
-  else if (score >= 40) label = 'Needs attention';
-  else label = 'Critical – adjust spending';
-  document.getElementById('scoreLabel').innerHTML = label;
-}
-
-function renderIncomeExpenseChart(income, expense) {
-  const ctx = document.getElementById('incomeExpenseChart');
-  if (!ctx) return;
-  if (incomeExpenseChart) incomeExpenseChart.destroy();
-  incomeExpenseChart = new Chart(ctx, {
-    type: 'bar',
-    data: { labels: ['Income', 'Expense'], datasets: [{ data: [income, expense], backgroundColor: ['#00E5A0', '#FF3B5C'], borderRadius: 8 }] },
-    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } }
-  });
-}
-
-function renderTrendChart(monthly) {
-  const ctx = document.getElementById('trendChart');
-  if(!ctx || !monthly) return;
-  if(trendChart) trendChart.destroy();
-  const labels = Object.keys(monthly);
-  const incomeData = labels.map(m=>monthly[m].income);
-  const expenseData = labels.map(m=>monthly[m].expense);
-  trendChart = new Chart(ctx, {
-    type: 'line',
-    data: { labels, datasets: [
-      { label: 'Income', data: incomeData, borderColor: '#00E5A0', backgroundColor: 'rgba(0,229,160,0.1)', tension:0.3 },
-      { label: 'Expense', data: expenseData, borderColor: '#FF3B5C', backgroundColor: 'rgba(255,59,92,0.1)', tension:0.3 }
-    ] },
-    options: { responsive:true, maintainAspectRatio:false, plugins:{legend:{labels:{color:'#B0C8E0'}}} }
-  });
-}
-
-function renderForecast(weekly) {
-  const container = document.getElementById('forecastBars');
-  if(!weekly) { container.innerHTML = ''; return; }
-  const maxVal = Math.max(...Object.values(weekly), 1);
-  container.innerHTML = Object.entries(weekly).map(([week, val])=>{
-    const pct = (val / maxVal * 100).toFixed(0);
-    return `<div class="forecast-bar-row"><span class="forecast-week-label">${week}</span><div class="forecast-track"><div class="forecast-fill" style="width:${pct}%"></div></div><span class="forecast-val">${fmt(val)}</span></div>`;
-  }).join('');
-}
 
 function renderAIPlan(plan) {
   document.getElementById('financialSummaryText').textContent = plan.financial_summary;
@@ -2559,6 +2402,80 @@ async function saveBudget(category, safeId) {
 document.getElementById('resetBudgetsBtn').addEventListener('click', async () => {
   if (!currentUser) return;
   try { await api(`/api/budgets/reset_to_ai/${currentUser.id}`, { method:'POST' }); toast('Budgets reset to AI recommendations'); loadBudgets(); } catch(e) { toast(e.message); }
+});
+
+// ── FORECAST ──
+function renderForecast(weekly) {
+  const container = document.getElementById('forecastBars');
+  if(!weekly) { container.innerHTML = ''; return; }
+  const maxVal = Math.max(...Object.values(weekly), 1);
+  container.innerHTML = Object.entries(weekly).map(([week, val])=>{
+    const pct = (val / maxVal * 100).toFixed(0);
+    return `<div class="forecast-bar-row"><span class="forecast-week-label">${week}</span><div class="forecast-track"><div class="forecast-fill" style="width:${pct}%"></div></div><span class="forecast-val">${fmt(val)}</span></div>`;
+  }).join('');
+}
+
+// ── TREND CHART ──
+function renderTrendChart(monthly) {
+  const ctx = document.getElementById('trendChart');
+  if(!ctx || !monthly) return;
+  if(trendChart) trendChart.destroy();
+  const labels = Object.keys(monthly);
+  const incomeData = labels.map(m=>monthly[m].income);
+  const expenseData = labels.map(m=>monthly[m].expense);
+  trendChart = new Chart(ctx, {
+    type: 'line',
+    data: { labels, datasets: [
+      { label: 'Income', data: incomeData, borderColor: '#00E5A0', backgroundColor: 'rgba(0,229,160,0.1)', tension:0.3 },
+      { label: 'Expense', data: expenseData, borderColor: '#FF3B5C', backgroundColor: 'rgba(255,59,92,0.1)', tension:0.3 }
+    ] },
+    options: { responsive:true, maintainAspectRatio:false, plugins:{legend:{labels:{color:'#B0C8E0'}}} }
+  });
+}
+
+// ── OCR ──
+document.getElementById('incomeImage').addEventListener('change', async function(){
+  const file = this.files[0];
+  if(!file) return;
+  const formData = new FormData();
+  formData.append('image', file);
+  try {
+    const resp = await fetch('/api/ocr_income', { method:'POST', body: formData, credentials:'include' });
+    const data = await resp.json();
+    if(data.transactions) {
+      toast(`Extracted ${data.count} transactions`);
+      debouncedRefresh();
+    }
+  } catch(e) { toast('OCR failed: '+e.message); }
+});
+
+// ── FUTURE ──
+async function loadFutureExpenses() {
+  if(!currentUser) return;
+  try { const exps = await api('/api/future_expenses'); renderFutureList(exps); } catch(e) { toast(e.message); }
+}
+function renderFutureList(exps) {
+  const list = document.getElementById('futureList');
+  if(!exps.length) { list.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📌</div><div class="empty-state-text">No pinned expenses yet.</div></div>'; return; }
+  list.innerHTML = exps.map(e=>`
+    <div class="future-item">
+      <div class="future-info"><div class="future-desc">${esc(e.description)}</div><div class="future-meta">${esc(e.category)} · ${e.cycle} · ${e.date}</div></div>
+      <div class="future-amount">${fmt(e.amount)}</div>
+      <button class="btn-del" onclick="deleteFuture(${e.id})">🗑</button>
+    </div>`).join('');
+}
+document.getElementById('pinFutureBtn').addEventListener('click', async ()=>{
+  const desc = document.getElementById('futureDesc').value;
+  const amount = parseFloat(document.getElementById('futureAmt').value);
+  const category = document.getElementById('futureCat').value;
+  const cycle = document.getElementById('futureCycle').value;
+  const date = document.getElementById('futureDate').value;
+  if(!desc || !amount || !date) { toast('Please fill all fields'); return; }
+  try { await api('/api/future_expenses', { method:'POST', body: JSON.stringify({ description:desc, amount, category, cycle, date }) }); toast('Pinned'); document.getElementById('futureDesc').value=''; document.getElementById('futureAmt').value=''; loadFutureExpenses(); } catch(e) { toast(e.message); }
+});
+async function deleteFuture(id) { if(!confirm('Remove this future expense?')) return; try { await api(`/api/future_expenses/${id}`, { method:'DELETE' }); toast('Removed'); loadFutureExpenses(); } catch(e) { toast(e.message); } }
+document.getElementById('applyFutureBtn').addEventListener('click', async ()=>{
+  try { const result = await api('/api/apply_future_expenses', { method:'POST' }); toast(`Processed ${result.count} pending expenses`); loadFutureExpenses(); } catch(e) { toast(e.message); }
 });
 
 // ── INSIGHTS ──
@@ -2640,35 +2557,6 @@ async function deleteTransaction(id) {
   if(!confirm('Delete this transaction?')) return;
   try { await api(`/api/transactions/${id}`, { method:'DELETE' }); toast('Deleted'); if(document.getElementById('screen-history').classList.contains('active')) loadHistory(); } catch(e) { toast(e.message); }
 }
-
-// ── FUTURE EXPENSES ──
-async function loadFutureExpenses() {
-  if(!currentUser) return;
-  try { const exps = await api('/api/future_expenses'); renderFutureList(exps); } catch(e) { toast(e.message); }
-}
-function renderFutureList(exps) {
-  const list = document.getElementById('futureList');
-  if(!exps.length) { list.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📌</div><div class="empty-state-text">No pinned expenses yet.</div></div>'; return; }
-  list.innerHTML = exps.map(e=>`
-    <div class="future-item">
-      <div class="future-info"><div class="future-desc">${esc(e.description)}</div><div class="future-meta">${esc(e.category)} · ${e.cycle} · ${e.date}</div></div>
-      <div class="future-amount">${fmt(e.amount)}</div>
-      <button class="btn-del" onclick="deleteFuture(${e.id})">🗑</button>
-    </div>`).join('');
-}
-document.getElementById('pinFutureBtn').addEventListener('click', async ()=>{
-  const desc = document.getElementById('futureDesc').value;
-  const amount = parseFloat(document.getElementById('futureAmt').value);
-  const category = document.getElementById('futureCat').value;
-  const cycle = document.getElementById('futureCycle').value;
-  const date = document.getElementById('futureDate').value;
-  if(!desc || !amount || !date) { toast('Please fill all fields'); return; }
-  try { await api('/api/future_expenses', { method:'POST', body: JSON.stringify({ description:desc, amount, category, cycle, date }) }); toast('Pinned'); document.getElementById('futureDesc').value=''; document.getElementById('futureAmt').value=''; loadFutureExpenses(); } catch(e) { toast(e.message); }
-});
-async function deleteFuture(id) { if(!confirm('Remove this future expense?')) return; try { await api(`/api/future_expenses/${id}`, { method:'DELETE' }); toast('Removed'); loadFutureExpenses(); } catch(e) { toast(e.message); } }
-document.getElementById('applyFutureBtn').addEventListener('click', async ()=>{
-  try { const result = await api('/api/apply_future_expenses', { method:'POST' }); toast(`Processed ${result.count} pending expenses`); loadFutureExpenses(); } catch(e) { toast(e.message); }
-});
 
 // ── PROFILE ──
 document.getElementById('profileAvatar').addEventListener('input', function() {
@@ -2805,13 +2693,10 @@ async function sendChat() {
 </html>
 """
 
+
 @app.route('/')
 def index():
-    response = app.make_response(HTML_PAGE)      # Flask creates a response object
-    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
-    response.headers['Pragma'] = 'no-cache'
-    response.headers['Expires'] = '0'
-    return response
+    return HTML_PAGE
 
 # ----------------------------------------------------------------------
 # Init DB
