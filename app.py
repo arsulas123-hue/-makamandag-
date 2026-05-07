@@ -1045,6 +1045,18 @@ def admin_transactions():
         query = query.filter_by(user_id=user_id)
     return jsonify([t.to_dict() for t in query.order_by(Transaction.tx_date.desc()).all()])
 
+# 👇 Add the new reset route here (after admin_transactions)
+@app.route('/api/admin/reset_data', methods=['POST'])
+@admin_required
+def reset_data():
+    """Delete all finance data but keep users."""
+    db.session.query(Transaction).delete()
+    db.session.query(Budget).delete()
+    db.session.query(FutureExpense).delete()
+    db.session.query(UserAllocation).delete()
+    db.session.commit()
+    return jsonify({'message': 'All finance data reset. Users and admin accounts preserved.'}), 200
+# 👆 End of new route
 
 # ----------------------------------------------------------------------
 # OCR endpoint
