@@ -489,6 +489,14 @@ def get_category_totals(user_id):
         totals[e.category] += e.amount
     return dict(totals)
 
+# ----------------------------------------------------------------------
+# Helper: ensure datetime is UTC-aware
+# ----------------------------------------------------------------------
+def _ensure_aware(dt: datetime) -> datetime:
+    """Convert a naive datetime to UTC-aware, or return as-is if already aware."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
 
 def get_monthly_summary(user_id):
     all_trans = Transaction.query.filter_by(user_id=user_id).all()
@@ -497,13 +505,14 @@ def get_monthly_summary(user_id):
         for t in all_trans
     )
     fom = _month_start()
+    # ✅ Use _ensure_aware() to compare with fom
     this_month_expense = sum(
         t.amount for t in all_trans
-        if t.tx_type == 'expense' and t.tx_date >= fom
+        if t.tx_type == 'expense' and _ensure_aware(t.tx_date) >= fom
     )
     this_month_income = sum(
         t.amount for t in all_trans
-        if t.tx_type == 'income' and t.tx_date >= fom
+        if t.tx_type == 'income' and _ensure_aware(t.tx_date) >= fom
     )
     monthly = defaultdict(lambda: {'income': 0.0, 'expense': 0.0})
     for t in all_trans:
@@ -519,7 +528,6 @@ def get_monthly_summary(user_id):
         'income': this_month_income,
         'monthly': {m: monthly[m] for m in sorted_months},
     }
-
 
 def compute_longevity(user_id):
     summary = get_monthly_summary(user_id)
