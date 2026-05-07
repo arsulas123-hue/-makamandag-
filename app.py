@@ -5,7 +5,6 @@ import os
 import requests
 import base64
 import re
-import get_remote_address
 import numpy as np
 from datetime import datetime, timedelta, timezone
 from functools import wraps
@@ -1029,29 +1028,174 @@ Do NOT wrap in markdown."""
 # AI full setup (with smart fallback)
 # ----------------------------------------------------------------------
 @app.route('/api/ai/full_setup', methods=['POST'])
+@login_required
 def ai_full_setup():
+    user = get_current_user()
     try:
-        data = request.get_json()
-        monthly_income = data.get('monthly_income', 0)
-        mindset = data.get('mindset', 'Neutral')
-        
-        # ✅ FIX: properly extract selected_categories from request
+        data = request.get_json() or {}
+        monthly_income = data.get('monthly_income', user.monthly_budget_limit or 0)
+        mindset = data.get('mindset', user.spending_mindset or 'Neutral')
+        social_status = data.get('social_status', user.social_status or 'Middle')
         selected_categories = data.get('selected_categories', [])
-        
-        # Fallback default categories if none provided
+
         if not selected_categories:
             selected_categories = [
                 'Food & Dining', 'Transport', 'Groceries', 'Health',
                 'Entertainment', 'Debt repayment', 'Savings'
             ]
-        
-        # Now call your ML planning function – make sure it accepts selected_categories
-        result = your_ml_planning_function(monthly_income, mindset, selected_categories)
-        
-        return jsonify(result), 200
-        
+
+        # Persist income/mindset on user record immediately
+        user.monthly_budget_limit = monthly_income
+        user.spending_mindset = mindset
+        user.social_status = social_status
+        db.session.commit()
+
+        # --- Try AI router first, fall back to local ML ---
+        recent_spending = defaultdict(float)
+        for t in Transaction.query.filter_by(user_id=user.id, tx_type='expense') \
+                                  .order_by(Transaction.tx_date.desc()).limit(30).all():
+            recent_spending[t.category] += t.amount
+
+        allocation = {}
+        ai_used = False
+
+        if OPENROUTER_API_KEY or GEMINI_API_KEY:
+            categories_str = ', '.join(selected_categories)
+            prompt = f"""You are an expert financial planner AI for a Filipino user.
+Monthly income: \u20b1{monthly_income:,.2f}
+Spending mindset: {mindset}
+Social status: {social_status}
+Recent spending (30 days): {dict(recent_spending)}
+Selected categories: {categories_str}
+Rules:
+- Saver mindset: higher needs & savings.
+- Spender mindset: more wants.
+- All percentages must sum to EXACTLY 100.
+Return ONLY valid JSON with category names as keys and percentage floats as values.
+Example: {{"Food & Dining": 35.0, "Transport": 15.0, "Savings": 20.0}}"""
+            raw = route_ai_request(prompt, max_tokens=600)
+            if raw:
+                try:
+                    cleaned = raw.strip()
+                    if cleaned.startswith('```'):
+                        cleaned = cleaned.split('```')[1]
+                        if cleaned.startswith('json'):
+                            cleaned = cleaned[4:]
+                    parsed = json.loads(cleaned.strip())
+                    # Keep only selected categories; skip unknown keys
+                    allocation = {k: float(v) for k, v in parsed.items()
+                                  if k in selected_categories and isinstance(v, (int, float))}
+                    if allocation:
+                        ai_used = True
+                except Exception as parse_err:
+                    print(f"AI JSON parse error: {parse_err}")
+
+        # --- Local ML fallback if AI returned nothing usable ---
+        if not allocation:
+            local = your_ml_planning_function(monthly_income, mindset, selected_categories)
+            allocation = local['allocation']
+
+        # --- Normalise to exactly 100% ---
+        total = sum(allocation.values())
+        if total > 0 and abs(total - 100) > 0.01:
+            allocation = {k: round(v / total * 100, 2) for k, v in allocation.items()}
+
+        # Fix any remaining rounding drift
+        total = sum(allocation.values())
+        if allocation and abs(total - 100) > 0.01:
+            max_cat = max(allocation, key=allocation.get)
+            allocation[max_cat] = round(allocation[max_cat] + (100 - total), 2)
+
+        allocation_amounts = {cat: round(monthly_income * pct / 100, 2)
+                              for cat, pct in allocation.items()}
+
+        # --- Savings plan ---
+        monthly_savings = allocation_amounts.get('Savings', monthly_income * 0.2)
+        savings_plan = {
+            'daily': round(monthly_savings / 30, 2),
+            'weekly': round(monthly_savings / 4, 2),
+            'monthly': round(monthly_savings, 2),
+            'tip': 'Automate your savings transfer on payday to make it effortless.'
+        }
+        if OPENROUTER_API_KEY or GEMINI_API_KEY:
+            balance = get_monthly_summary(user.id)['balance']
+            sp_prompt = f"""User income: \u20b1{monthly_income:.2f}, expenses: \u20b1{sum(recent_spending.values()):.2f}, balance: \u20b1{balance:.2f}.
+Mindset: {mindset}. Return JSON: {{"daily":float,"weekly":float,"monthly":float,"tip":"string"}}"""
+            sp_raw = route_ai_request(sp_prompt, max_tokens=200)
+            if sp_raw:
+                try:
+                    sp_clean = sp_raw.strip().lstrip('`').lstrip('json').strip('`').strip()
+                    savings_plan = json.loads(sp_clean)
+                except Exception:
+                    pass
+
+        # --- Advice ---
+        advice = []
+        if OPENROUTER_API_KEY or GEMINI_API_KEY:
+            adv_prompt = f"""Allocation: {allocation}. Recent spending: {dict(recent_spending)}.
+Give 3 short financial advice items as JSON array (no markdown):
+[{{"title":"...","body":"...","type":"info|warning|success"}}]"""
+            adv_raw = route_ai_request(adv_prompt, max_tokens=300)
+            if adv_raw:
+                try:
+                    adv_clean = adv_raw.strip().lstrip('`').lstrip('json').strip('`').strip()
+                    parsed_adv = json.loads(adv_clean)
+                    if isinstance(parsed_adv, list):
+                        advice = parsed_adv
+                except Exception:
+                    pass
+        if not advice:
+            savings_rate = (monthly_income - sum(recent_spending.values())) / monthly_income \
+                           if monthly_income > 0 else 0
+            advice = [
+                {'title': 'Stay Consistent', 'body': 'Track every expense to improve your score.', 'type': 'info'},
+                {'title': 'Savings First', 'body': 'Transfer savings immediately after receiving income.', 'type': 'success'},
+                {'title': 'Review Wants', 'body': 'Audit subscriptions and entertainment monthly.', 'type': 'warning'},
+            ]
+            if savings_rate < 0.1:
+                advice[1] = {'title': 'Low Savings Alert', 'body': 'Try to save at least 10% of income.', 'type': 'warning'}
+
+        # --- Financial summary ---
+        financial_summary = f"Based on your {mindset} mindset with \u20b1{monthly_income:,.2f}/month, your ML plan allocates {allocation.get('Savings', 0):.0f}% to savings."
+        if OPENROUTER_API_KEY or GEMINI_API_KEY:
+            fs_raw = route_ai_request(
+                f"Based on income \u20b1{monthly_income}, mindset {mindset}, allocation {allocation}, give a one-sentence financial health assessment.",
+                max_tokens=100)
+            if fs_raw:
+                financial_summary = fs_raw.strip()
+
+        # --- PERSIST allocations & budgets to DB ---
+        needs_cats = {'Food & Dining', 'Transport', 'Groceries', 'Health', 'Debt repayment', 'Mortgage'}
+        savings_cats = {'Savings'}
+
+        UserAllocation.query.filter_by(user_id=user.id).delete()
+        for cat, pct in allocation.items():
+            cat_type = 'need' if cat in needs_cats else ('savings' if cat in savings_cats else 'want')
+            db.session.add(UserAllocation(
+                user_id=user.id, category_name=cat, type=cat_type, percentage=pct))
+
+        Budget.query.filter_by(user_id=user.id).delete()
+        for cat, pct in allocation.items():
+            db.session.add(Budget(
+                user_id=user.id, category=cat,
+                limit_amount=round(monthly_income * pct / 100, 2)))
+
+        db.session.commit()
+        print(f"✅ AI full_setup saved for user {user.id} | AI used: {ai_used}")
+
+        return jsonify({
+            'allocation': allocation,
+            'allocation_amounts': allocation_amounts,
+            'savings_plan': savings_plan,
+            'advice': advice,
+            'financial_summary': financial_summary,
+            'monthly_income': monthly_income,
+        }), 200
+
     except Exception as e:
-        print(f"ML plan error: {e}")   # or use logging
+        db.session.rollback()
+        print(f"❌ ai_full_setup error: {e}")
+        import traceback; traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 
