@@ -1616,7 +1616,12 @@ body::before {
   border-radius:50%; transform:translate(30px,-30px);
 }
 .stat-card.neg::before { background:radial-gradient(circle,var(--red-dim),transparent 70%); }
-.stat-card.blue-glow::before { background:radial-gradient(circle,rgba(59,139,255,0.1),transparent 70%); }
+.stat-card.blue-glow::before {
+  background: radial-gradient(circle, rgba(59, 139, 255, 0.1), transparent 70%);
+}
+#remainingBudgetCard .stat-value {
+  color: var(--blue);
+}
 .stat-value { font-family:var(--font-mono); font-size:1.7rem; font-weight:600; margin-bottom:6px; letter-spacing:-1px; }
 .stat-label { font-size:0.72rem; color:var(--muted2); text-transform:uppercase; letter-spacing:0.5px; }
 .stat-sub { font-size:0.75rem; color:var(--muted); font-family:var(--font-mono); margin-top:4px; }
@@ -2097,6 +2102,14 @@ table td { color:var(--text2); font-size:0.85rem; }
       <div class="stat-card neg"><div class="stat-value" id="sExpense" style="color:var(--red)">—</div><div class="stat-label">Month Expenses</div></div>
       <div class="stat-card"><div class="stat-value" id="sIncome" style="color:var(--green)">—</div><div class="stat-label">Month Income</div></div>
       <div class="stat-card blue-glow"><div class="stat-value" id="sScore" style="color:var(--blue)">—</div><div class="stat-label">Health Score</div><div class="stat-sub" id="scoreLabel">awaiting data</div></div>
+ <!-- 👇 INSERT YOUR NEW CARD HERE 👇 -->
+  <div class="stat-card blue-glow" id="remainingBudgetCard">
+    <div class="stat-value" id="sRemaining" style="color:var(--blue)">—</div>
+    <div class="stat-label">Spending Left This Month</div>
+    <div class="stat-sub" id="remainingSub">You can still spend ₱0</div>
+  </div>
+  <!-- 👆 END OF NEW CARD 👆 -->
+
     </div>
 
     <!-- Income vs Expense Chart -->
@@ -2524,6 +2537,24 @@ document.getElementById('addIncomeBtn').addEventListener('click', async ()=>{
 document.getElementById('addExpenseBtn').addEventListener('click', async ()=>{
   const amount = parseFloat(document.getElementById('expenseAmount').value);
   if(!amount || amount < 1) { toast('Amount must be at least 1'); return; }
+  
+  // ✅ Pre-check: fetch current remaining balance
+  try {
+    const summary = await api(`/api/summary/${currentUser.id}`);
+    const remaining = (summary.income || 0) - (summary.expense || 0);
+    if (remaining <= 0) {
+      toast(`⛔ You have no remaining budget this month. Income: ${fmt(summary.income)}, Expenses: ${fmt(summary.expense)}`);
+      return;
+    }
+    if (amount > remaining) {
+      toast(`⛔ This expense (${fmt(amount)}) would exceed your remaining budget (${fmt(remaining)}).`);
+      return;
+    }
+  } catch(e) {
+    toast('Could not check remaining budget: ' + e.message);
+    return;
+  }
+  
   const category = document.getElementById('expenseCategory').value;
   const note = document.getElementById('expenseNote').value;
   const isNeed = document.querySelector('input[name="needwant"]:checked').value === 'need';
@@ -2535,10 +2566,12 @@ document.getElementById('addExpenseBtn').addEventListener('click', async ()=>{
     document.getElementById('expenseAmount').value = '';
     document.getElementById('expenseNote').value = '';
     debouncedRefresh();
-  } catch(e) { toast(e.message); }
+  } catch(e) { 
+    // The backend already returns a friendly error, just show it
+    toast(e.message); 
+  }
 });
 
-// ── DASHBOARD LOAD ──
 async function loadDashboard() {
   if (!currentUser) return;
   if (dashboardLoading) return;
@@ -2552,6 +2585,16 @@ async function loadDashboard() {
     const predict = await api(`/api/predict/${currentUser.id}`);
     const longevity = await api(`/api/longevity/${currentUser.id}`);
     renderStats(summary, predict.score, longevity);
+    
+    // ✅ Add this: calculate and display remaining balance
+    const remaining = (summary.income || 0) - (summary.expense || 0);
+    document.getElementById('sRemaining').textContent = fmt(remaining);
+    document.getElementById('remainingSub').textContent = 
+      remaining > 0 ? `You can still spend ${fmt(remaining)}` : 
+      remaining === 0 ? 'You have no spending left this month' : 
+      `⚠️ You are over budget by ${fmt(Math.abs(remaining))}`;
+    document.getElementById('remainingBudgetCard').style.display = 'block';
+    
     renderForecast(predict.predictions?.weekly);
     renderTrendChart(summary.monthly);
     renderIncomeExpenseChart(summary.income, summary.expense);
