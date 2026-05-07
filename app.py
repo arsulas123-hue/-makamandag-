@@ -1954,13 +1954,13 @@ function getSelectedCategories() {
 
 // ── DEBOUNCED REFRESH (only refreshes data, never retriggers plan) ──
 function debouncedRefresh() {
+  if (dashboardLoading) return;   // skip if already loading
   if (refreshTimeout) clearTimeout(refreshTimeout);
   refreshTimeout = setTimeout(() => {
-    loadDashboardData();   // ← calls a non‑plan triggering version
+    if (!dashboardLoading) loadDashboardData();
     refreshTimeout = null;
-  }, 800);
+  }, 2000);
 }
-
 // ── CHECKLIST ──
 function renderChecklist() {
   const needsCont = document.getElementById('needsChecklist');
