@@ -43,6 +43,81 @@ class ManualRateLimiter:
 
 manual_rl = ManualRateLimiter()
 
+def your_ml_planning_function(income, mindset, selected_categories):
+    """Simple ML plan that distributes income based on mindset."""
+    # Base percentages for "Neutral" mindset
+    if mindset == 'Saver':
+        savings_pct = 30
+        needs_pct = 50
+        wants_pct = 20
+    elif mindset == 'Spender':
+        savings_pct = 10
+        needs_pct = 50
+        wants_pct = 40
+    else:  # Neutral
+        savings_pct = 20
+        needs_pct = 60
+        wants_pct = 20
+
+    allocation = {}
+    allocation_amounts = {}
+
+    # Distribute percentages among categories
+    need_cats = [c for c in selected_categories if c in ['Food & Dining','Transport','Groceries','Health','Debt repayment','Mortgage']]
+    want_cats = [c for c in selected_categories if c not in need_cats and c != 'Savings']
+    savings_cats = ['Savings'] if 'Savings' in selected_categories else []
+
+    # Assign percentages
+    for cat in need_cats:
+        allocation[cat] = needs_pct / max(len(need_cats), 1)
+    for cat in want_cats:
+        allocation[cat] = wants_pct / max(len(want_cats), 1)
+    for cat in savings_cats:
+        allocation[cat] = savings_pct
+
+    # Normalise to 100% (avoid floating point issues)
+    total_pct = sum(allocation.values())
+    if total_pct > 0:
+        for cat in allocation:
+            allocation[cat] = allocation[cat] / total_pct * 100
+
+    # Compute amounts
+    for cat, pct in allocation.items():
+        allocation_amounts[cat] = income * pct / 100
+
+    # Savings plan
+    monthly_savings = allocation_amounts.get('Savings', 0) if 'Savings' in allocation else 0
+    savings_plan = {
+        'daily': monthly_savings / 30,
+        'weekly': monthly_savings / 4,
+        'monthly': monthly_savings,
+        'tip': 'Try to automate this amount to a separate account.'
+    }
+
+    # Simple advice
+    advice = []
+    if monthly_savings < income * 0.1:
+        advice.append({'type': 'warning', 'title': 'Low savings rate', 'body': 'Try to save at least 10% of your income.'})
+    else:
+        advice.append({'type': 'success', 'title': 'Good savings habit', 'body': 'You are saving a healthy percentage.'})
+    if wants_pct > 30:
+        advice.append({'type': 'info', 'title': 'Watch discretionary spending', 'body': 'Consider reducing wants to 20-30% of your budget.'})
+
+    financial_summary = f"Based on your {mindset} mindset, we allocated {savings_pct:.0f}% to savings, {needs_pct:.0f}% to needs, and {wants_pct:.0f}% to wants. Your monthly savings target is {fmt(monthly_savings)}."
+
+    return {
+        'allocation': allocation,
+        'allocation_amounts': allocation_amounts,
+        'savings_plan': savings_plan,
+        'financial_summary': financial_summary,
+        'advice': advice,
+        'monthly_income': income
+    }
+
+def fmt(amount):
+    return f"₱{amount:,.2f}"
+
+
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'change-this-secret-key-in-production')
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///smartspend.db')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
@@ -954,188 +1029,31 @@ Do NOT wrap in markdown."""
 # AI full setup (with smart fallback)
 # ----------------------------------------------------------------------
 @app.route('/api/ai/full_setup', methods=['POST'])
-@login_required
 def ai_full_setup():
-    user = get_current_user()
-    data = request.json or {}
-    monthly_income = data.get('monthly_income', user.monthly_budget_limit or 0)
-    mindset = data.get('mindset', user.spending_mindset)
-    social_status = data.get('social_status', user.social_status)
-    selected_categories = data.get('selected_categories', [])
-
-    if not selected_categories:
-        selected_categories = ['Food & Dining', 'Transport', 'Groceries', 'Health',
-                               'Entertainment', 'Debt repayment', 'Savings']
-
-    user.monthly_budget_limit = monthly_income
-    user.spending_mindset = mindset
-    user.social_status = social_status
-    db.session.commit()
-
-    # Get recent spending
-    recent_spending = defaultdict(float)
-    for t in Transaction.query.filter_by(user_id=user.id, tx_type='expense').order_by(Transaction.tx_date.desc()).limit(30).all():
-        recent_spending[t.category] += t.amount
-
-    categories_str = ', '.join(selected_categories)
-    prompt = f"""
-You are an expert financial planner AI for a Filipino user.
-Monthly income: ₱{monthly_income:,.2f}
-Spending mindset: {mindset}
-Social status: {social_status}
-Recent spending (30 days): {dict(recent_spending)}
-Selected categories: {categories_str}
-Rules:
-- Saver mindset: higher needs & savings.
-- Spender mindset: more wants.
-- Sum to exactly 100%.
-Return ONLY valid JSON with category names as keys and percentages as values.
-Example: {{"Food & Dining": 45.0, "Transport": 15.0, "Savings": 40.0}}
-"""
-    raw = route_ai_request(prompt, max_tokens=600)
-
-    allocation = {}
     try:
-        if raw.startswith('```'):
-            raw = raw.split('```')[1]
-            if raw.startswith('json'):
-                raw = raw[4:]
-        allocation = json.loads(raw.strip())
-        # Filter to only selected categories
-        allocation = {k: v for k, v in allocation.items() if k in selected_categories}
+        data = request.get_json()
+        monthly_income = data.get('monthly_income', 0)
+        mindset = data.get('mindset', 'Neutral')
+        
+        # ✅ FIX: properly extract selected_categories from request
+        selected_categories = data.get('selected_categories', [])
+        
+        # Fallback default categories if none provided
+        if not selected_categories:
+            selected_categories = [
+                'Food & Dining', 'Transport', 'Groceries', 'Health',
+                'Entertainment', 'Debt repayment', 'Savings'
+            ]
+        
+        # Now call your ML planning function – make sure it accepts selected_categories
+        result = your_ml_planning_function(monthly_income, mindset, selected_categories)
+        
+        return jsonify(result), 200
+        
     except Exception as e:
-        print(f"Parse error: {e}, using smart fallback")
-        allocation = {}
+        print(f"ML plan error: {e}")   # or use logging
+        return jsonify({'error': str(e)}), 500
 
-    # Smart fallback
-    if not allocation:
-        needs = ['Food & Dining', 'Transport', 'Groceries', 'Health', 'Debt repayment', 'Mortgage']
-        wants = ['Entertainment', 'Subscription', 'Hobbies']
-        
-        if mindset.lower() == 'saver':
-            need_weight = 70
-            want_weight = 10
-            savings_weight = 20
-        elif mindset.lower() == 'spender':
-            need_weight = 45
-            want_weight = 35
-            savings_weight = 20
-        else:  # Neutral
-            need_weight = 55
-            want_weight = 25
-            savings_weight = 20
-        
-        need_cats = [c for c in selected_categories if c in needs]
-        want_cats = [c for c in selected_categories if c in wants]
-        savings_cats = [c for c in selected_categories if c == 'Savings']
-        other_cats = [c for c in selected_categories if c not in needs and c not in wants and c != 'Savings']
-        
-        total_weight = len(need_cats) + len(want_cats) + len(savings_cats) + len(other_cats)
-        if total_weight == 0:
-            for cat in selected_categories:
-                allocation[cat] = round(100.0 / len(selected_categories), 1)
-        else:
-            for cat in selected_categories:
-                if cat in needs:
-                    base = need_weight / len(need_cats) if need_cats else 0
-                elif cat in wants:
-                    base = want_weight / len(want_cats) if want_cats else 0
-                elif cat == 'Savings':
-                    base = savings_weight / len(savings_cats) if savings_cats else 0
-                else:
-                    base = (100 - need_weight - want_weight - savings_weight) / len(other_cats) if other_cats else 0
-                allocation[cat] = round(base, 1)
-    
-    # Normalize to exactly 100%
-    total = sum(allocation.values())
-    if abs(total - 100) > 0.1:
-        factor = 100 / total
-        allocation = {k: round(v * factor, 1) for k, v in allocation.items()}
-    
-    # Fix rounding
-    total = sum(allocation.values())
-    if abs(total - 100) > 0.01:
-        diff = round(100 - total, 1)
-        if allocation:
-            max_cat = max(allocation, key=allocation.get)
-            allocation[max_cat] = round(allocation[max_cat] + diff, 1)
-
-    # Savings plan
-    savings_prompt = f"""
-User income: ₱{monthly_income:.2f}, expenses: ₱{sum(recent_spending.values()):.2f}, balance: ₱{get_monthly_summary(user.id)['balance']:.2f}.
-Mindset: {mindset}. Recommend daily, weekly, monthly savings.
-Return JSON: {{"daily": float, "weekly": float, "monthly": float, "tip": "string"}}.
-"""
-    try:
-        raw_savings = route_ai_request(savings_prompt, max_tokens=200)
-        if raw_savings.startswith('```'):
-            raw_savings = raw_savings.split('```')[1]
-            if raw_savings.startswith('json'):
-                raw_savings = raw_savings[4:]
-        savings_plan = json.loads(raw_savings.strip())
-    except Exception:
-        monthly_save = monthly_income * 0.2
-        savings_plan = {
-            "daily": round(monthly_save / 30, 2),
-            "weekly": round(monthly_save / 4, 2),
-            "monthly": round(monthly_save, 2),
-            "tip": "Automate your savings on payday."
-        }
-
-    # Advice
-    advice_prompt = f"""
-Allocation: {allocation}. Spending: {dict(recent_spending)}.
-Give 3 short financial advice items as JSON array:
-[{{"title":"...","body":"...","type":"info|warning|success"}}]
-"""
-    try:
-        raw_advice = route_ai_request(advice_prompt, max_tokens=300)
-        if raw_advice.startswith('```'):
-            raw_advice = raw_advice.split('```')[1]
-            if raw_advice.startswith('json'):
-                raw_advice = raw_advice[4:]
-        advice = json.loads(raw_advice.strip())
-        if not isinstance(advice, list):
-            advice = []
-    except Exception:
-        advice = [
-            {"title": "Stay Consistent", "body": "Track every expense to improve your score.", "type": "info"},
-            {"title": "Savings First", "body": "Transfer savings immediately after receiving income.", "type": "success"},
-            {"title": "Review Wants", "body": "Audit subscriptions and entertainment monthly.", "type": "warning"}
-        ]
-
-    # Financial summary
-    summary_prompt = f"Based on income ₱{monthly_income}, mindset {mindset}, and allocation {allocation}, give a one‑sentence financial health assessment."
-    try:
-        raw_summary = route_ai_request(summary_prompt, max_tokens=100)
-        financial_summary = raw_summary.strip()
-    except Exception:
-        financial_summary = "Your AI plan is ready. Start logging your expenses to get personalised insights."
-
-    # Save allocations & budgets
-    UserAllocation.query.filter_by(user_id=user.id).delete()
-    needs = {'Food & Dining', 'Transport', 'Groceries', 'Health', 'Debt repayment', 'Mortgage'}
-    savings_cats = {'Savings'}
-    
-    for cat, pct in allocation.items():
-        t = 'need' if cat in needs else ('savings' if cat in savings_cats else 'want')
-        db.session.add(UserAllocation(user_id=user.id, category_name=cat, type=t, percentage=pct))
-
-    Budget.query.filter_by(user_id=user.id).delete()
-    for cat, pct in allocation.items():
-        limit = round(monthly_income * pct / 100, 2)
-        db.session.add(Budget(user_id=user.id, category=cat, limit_amount=limit))
-
-    db.session.commit()
-
-    return jsonify({
-        'allocation': allocation,
-        'allocation_amounts': {cat: round(monthly_income * pct / 100, 2) for cat, pct in allocation.items()},
-        'savings_plan': savings_plan,
-        'advice': advice,
-        'financial_summary': financial_summary,
-        'monthly_income': monthly_income
-    }), 200
 
 # ----------------------------------------------------------------------
 # AI classification & chat
@@ -2685,7 +2603,7 @@ async function sendChat() {
     authOverlay.style.display = 'none';
     initApp();
   } catch(e) { authOverlay.style.display = 'flex'; }
-})();class ManualRateLimiter:
+})();
 </script>
 </body>
 </html>
