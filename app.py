@@ -1839,11 +1839,21 @@ table td { color:var(--text2); font-size:0.85rem; }
       </div>
       <div id="adminUsersPanel">
         <input type="text" id="adminSearchUser" placeholder="Search user..." class="form-input" style="margin-bottom:12px;">
-        <table><thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Role</th><th>Created</th></tr></thead><tbody id="adminUserTable"></tbody></table>
+        <table>
+          <thead>
+            <tr><th>ID</th><th>Name</th><th>Email</th><th>Role</th><th>Created</th></tr>
+          </thead>
+          <tbody id="adminUserTable"></tbody>
+        </table>
       </div>
       <div id="adminTransactionsPanel" style="display:none;">
         <select id="adminUserFilter" class="form-select" style="margin-bottom:12px;"><option value="">All Users</option></select>
-        <table><thead><tr><th>Date</th><th>User</th><th>Category</th><th>Type</th><th>Amount</th><th>Need/Want</th></tr></thead><tbody id="adminTxTable"></tbody></table>
+        <table>
+          <thead>
+            <tr><th>Date</th><th>User</th><th>Category</th><th>Type</th><th>Amount</th><th>Need/Want</th></tr>
+          </thead>
+          <tbody id="adminTxTable"></tbody>
+        </table>
       </div>
     </div>
   </div>
@@ -1894,6 +1904,7 @@ let futureExpensesApplied = false;
 let refreshTimeout = null;
 let dashboardLoading = false;
 let planAttempted = false;          // ← NEW: only try AI plan once
+let isAnalyzing = false;            // ← NEW: prevent concurrent ML calls
 
 const CAT_ICONS = {
   'Food & Dining':'🍜','Transport':'🚗','Groceries':'🛒','Entertainment':'🎬',
@@ -1930,13 +1941,24 @@ async function api(url, opts={}){
   return res.json();
 }
 
+// ── HELPER: get selected categories (with fallback) ──
+function getSelectedCategories() {
+  const selected = [];
+  document.querySelectorAll('.cat-checkbox:checked').forEach(chk => selected.push(chk.dataset.cat));
+  if (selected.length === 0) {
+    // fallback to sensible defaults
+    return ['Food & Dining','Transport','Groceries','Health','Entertainment','Debt repayment','Savings'];
+  }
+  return selected;
+}
+
 // ── DEBOUNCED REFRESH (only refreshes data, never retriggers plan) ──
 function debouncedRefresh() {
   if (refreshTimeout) clearTimeout(refreshTimeout);
   refreshTimeout = setTimeout(() => {
     loadDashboardData();   // ← calls a non‑plan triggering version
     refreshTimeout = null;
-  }, 800);  // slightly longer debounce
+  }, 800);
 }
 
 // ── CHECKLIST ──
@@ -2183,58 +2205,67 @@ async function loadDashboard() {
   }
 }
 
-// ── AUTO PLAN ──
+// ── AUTO PLAN (with lock and proper error handling) ──
 async function autoRunPlanAndUpdateDashboard() {
-  if (!currentUser || dashboardLoading) return;
+  if (!currentUser || dashboardLoading || isAnalyzing) return;
+  const totalIncome = currentUser.monthly_budget_limit;
+  if (totalIncome <= 0) return;
+  
+  isAnalyzing = true;
   dashboardLoading = true;
+  addFeedEvent('🤖', 'ML is analyzing your financial profile…');
+  
   try {
-    const summary = await api(`/api/summary/${currentUser.id}`);
-    const totalIncome = summary.income || 0;
-    document.getElementById('incomeInput').value = totalIncome;
-    if (totalIncome <= 0) { dashboardLoading = false; return; }
-    const selectedCategories = [];
-    document.querySelectorAll('.cat-checkbox:checked').forEach(chk => selectedCategories.push(chk.dataset.cat));
-    if (selectedCategories.length === 0) {
-      ['Food & Dining','Transport','Groceries','Health','Entertainment','Debt repayment','Savings']
-        .forEach(c => selectedCategories.push(c));
-    }
+    const selectedCategories = getSelectedCategories();
     const result = await api('/api/ai/full_setup', {
       method: 'POST',
-      body: JSON.stringify({ monthly_income: totalIncome, mindset: currentMindset, selected_categories })
+      body: JSON.stringify({ 
+        monthly_income: totalIncome, 
+        mindset: currentMindset, 
+        selected_categories: selectedCategories 
+      })
     });
+    if (!result.allocation) throw new Error('No allocation returned from ML');
     aiPlan = result;
-    if (result.allocation) {
-      addFeedEvent('✅', `AI categorised ${Object.keys(result.allocation).length} categories`);
-      addFeedEvent('💰', `Savings target: ${fmt(result.savings_plan.monthly)}/month`);
-      addFeedEvent('🧠', `Summary: "${result.financial_summary.substring(0,60)}…"`);
-      addFeedEvent('📋', `${result.advice.length} insights ready`);
-      renderAIPlan(result);
-    }
+    addFeedEvent('✅', `AI categorised ${Object.keys(result.allocation).length} categories`);
+    addFeedEvent('💰', `Savings target: ${fmt(result.savings_plan.monthly)}/month`);
+    addFeedEvent('🧠', `Summary: "${result.financial_summary.substring(0,60)}…"`);
+    addFeedEvent('📋', `${result.advice.length} insights ready`);
+    renderAIPlan(result);
   } catch(e) {
     console.error('Auto plan error:', e);
-    toast('Could not run AI plan – check your API keys', 'var(--red)');
+    let errMsg = e.message;
+    if (errMsg.includes('selected_categories is not defined')) {
+      errMsg = 'Backend error: selected_categories variable missing. Please check your server code.';
+    }
+    toast('ML analysis failed: ' + errMsg, 'var(--red)');
+    addFeedEvent('❌', 'ML error: ' + errMsg);
   } finally {
     dashboardLoading = false;
+    isAnalyzing = false;
     loadDashboardData();
   }
 }
 
-// ── ML PLAN (manual button) ──
+// ── MANUAL ML PLAN (button click) ──
 document.getElementById('analyzeBtn').addEventListener('click', async () => {
+  if (isAnalyzing) { toast('ML analysis already running...', 'var(--amber)'); return; }
   const income = parseFloat(document.getElementById('incomeInput').value);
   if(!income || income <= 0){ toast('Enter a valid monthly income first'); return; }
-  const selectedCategories = [];
-  document.querySelectorAll('.cat-checkbox:checked').forEach(chk => selectedCategories.push(chk.dataset.cat));
+  const selectedCategories = getSelectedCategories();
   if(!selectedCategories.length){ toast('Please select at least one category'); return; }
+  
   const btn = document.getElementById('analyzeBtn');
   const btnContent = document.getElementById('analyzeBtnContent');
   btn.disabled = true;
   btnContent.innerHTML = '<div class="spinner"></div> Analyzing…';
   addFeedEvent('🤖','ML is analyzing your financial profile…');
+  isAnalyzing = true;
+  
   try {
     const result = await api('/api/ai/full_setup', {
       method:'POST',
-      body: JSON.stringify({ monthly_income: income, mindset: currentMindset, selected_categories })
+      body: JSON.stringify({ monthly_income: income, mindset: currentMindset, selected_categories: selectedCategories })
     });
     if (!result.allocation) throw new Error('No allocation returned from ML');
     aiPlan = result;
@@ -2246,13 +2277,79 @@ document.getElementById('analyzeBtn').addEventListener('click', async () => {
     toast('ML plan complete! 🎉', 'var(--green)');
   } catch(e){
     console.error('ML plan error:', e);
-    toast('ML error: '+e.message);
-    addFeedEvent('❌','ML error: '+e.message);
+    let errMsg = e.message;
+    if (errMsg.includes('selected_categories is not defined')) {
+      errMsg = 'Backend error: selected_categories variable missing. Please check your server code.';
+    }
+    toast('ML error: '+errMsg);
+    addFeedEvent('❌','ML error: '+errMsg);
+  } finally {
+    isAnalyzing = false;
+    btn.disabled = false;
+    btnContent.innerHTML = '🔄 Re‑Analyze';
+    loadDashboardData();
   }
-  btn.disabled = false;
-  btnContent.innerHTML = '🔄 Re‑Analyze';
-  loadDashboardData();
 });
+
+function addFeedEvent(emoji, text) {
+  const feedDiv = document.getElementById('aiFeed');
+  const existing = feedDiv.querySelector('.empty-state');
+  if (existing) existing.remove();
+  feedDiv.innerHTML += `<div style="padding:8px 0; border-bottom:1px solid var(--border2); font-size:0.8rem;">${emoji} ${esc(text)}</div>`;
+  feedDiv.scrollTop = feedDiv.scrollHeight;
+}
+
+function renderStats(summary, score, longevity) {
+  document.getElementById('sBalance').innerHTML = fmt(longevity?.balance || 0);
+  document.getElementById('sExpense').innerHTML = fmt(summary.expense);
+  document.getElementById('sIncome').innerHTML = fmt(summary.income);
+  document.getElementById('sScore').innerHTML = score !== undefined ? Math.round(score) : '—';
+  document.getElementById('topScore').innerHTML = score !== undefined ? Math.round(score) : '—';
+  let label = '';
+  if (score >= 80) label = 'Excellent financial health';
+  else if (score >= 60) label = 'Good, but room to improve';
+  else if (score >= 40) label = 'Needs attention';
+  else label = 'Critical – adjust spending';
+  document.getElementById('scoreLabel').innerHTML = label;
+}
+
+function renderIncomeExpenseChart(income, expense) {
+  const ctx = document.getElementById('incomeExpenseChart');
+  if (!ctx) return;
+  if (incomeExpenseChart) incomeExpenseChart.destroy();
+  incomeExpenseChart = new Chart(ctx, {
+    type: 'bar',
+    data: { labels: ['Income', 'Expense'], datasets: [{ data: [income, expense], backgroundColor: ['#00E5A0', '#FF3B5C'], borderRadius: 8 }] },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } }
+  });
+}
+
+function renderTrendChart(monthly) {
+  const ctx = document.getElementById('trendChart');
+  if(!ctx || !monthly) return;
+  if(trendChart) trendChart.destroy();
+  const labels = Object.keys(monthly);
+  const incomeData = labels.map(m=>monthly[m].income);
+  const expenseData = labels.map(m=>monthly[m].expense);
+  trendChart = new Chart(ctx, {
+    type: 'line',
+    data: { labels, datasets: [
+      { label: 'Income', data: incomeData, borderColor: '#00E5A0', backgroundColor: 'rgba(0,229,160,0.1)', tension:0.3 },
+      { label: 'Expense', data: expenseData, borderColor: '#FF3B5C', backgroundColor: 'rgba(255,59,92,0.1)', tension:0.3 }
+    ] },
+    options: { responsive:true, maintainAspectRatio:false, plugins:{legend:{labels:{color:'#B0C8E0'}}} }
+  });
+}
+
+function renderForecast(weekly) {
+  const container = document.getElementById('forecastBars');
+  if(!weekly) { container.innerHTML = ''; return; }
+  const maxVal = Math.max(...Object.values(weekly), 1);
+  container.innerHTML = Object.entries(weekly).map(([week, val])=>{
+    const pct = (val / maxVal * 100).toFixed(0);
+    return `<div class="forecast-bar-row"><span class="forecast-week-label">${week}</span><div class="forecast-track"><div class="forecast-fill" style="width:${pct}%"></div></div><span class="forecast-val">${fmt(val)}</span></div>`;
+  }).join('');
+}
 
 function renderAIPlan(plan) {
   document.getElementById('financialSummaryText').textContent = plan.financial_summary;
@@ -2318,80 +2415,6 @@ async function saveBudget(category, safeId) {
 document.getElementById('resetBudgetsBtn').addEventListener('click', async () => {
   if (!currentUser) return;
   try { await api(`/api/budgets/reset_to_ai/${currentUser.id}`, { method:'POST' }); toast('Budgets reset to AI recommendations'); loadBudgets(); } catch(e) { toast(e.message); }
-});
-
-// ── FORECAST ──
-function renderForecast(weekly) {
-  const container = document.getElementById('forecastBars');
-  if(!weekly) { container.innerHTML = ''; return; }
-  const maxVal = Math.max(...Object.values(weekly), 1);
-  container.innerHTML = Object.entries(weekly).map(([week, val])=>{
-    const pct = (val / maxVal * 100).toFixed(0);
-    return `<div class="forecast-bar-row"><span class="forecast-week-label">${week}</span><div class="forecast-track"><div class="forecast-fill" style="width:${pct}%"></div></div><span class="forecast-val">${fmt(val)}</span></div>`;
-  }).join('');
-}
-
-// ── TREND CHART ──
-function renderTrendChart(monthly) {
-  const ctx = document.getElementById('trendChart');
-  if(!ctx || !monthly) return;
-  if(trendChart) trendChart.destroy();
-  const labels = Object.keys(monthly);
-  const incomeData = labels.map(m=>monthly[m].income);
-  const expenseData = labels.map(m=>monthly[m].expense);
-  trendChart = new Chart(ctx, {
-    type: 'line',
-    data: { labels, datasets: [
-      { label: 'Income', data: incomeData, borderColor: '#00E5A0', backgroundColor: 'rgba(0,229,160,0.1)', tension:0.3 },
-      { label: 'Expense', data: expenseData, borderColor: '#FF3B5C', backgroundColor: 'rgba(255,59,92,0.1)', tension:0.3 }
-    ] },
-    options: { responsive:true, maintainAspectRatio:false, plugins:{legend:{labels:{color:'#B0C8E0'}}} }
-  });
-}
-
-// ── OCR ──
-document.getElementById('incomeImage').addEventListener('change', async function(){
-  const file = this.files[0];
-  if(!file) return;
-  const formData = new FormData();
-  formData.append('image', file);
-  try {
-    const resp = await fetch('/api/ocr_income', { method:'POST', body: formData, credentials:'include' });
-    const data = await resp.json();
-    if(data.transactions) {
-      toast(`Extracted ${data.count} transactions`);
-      debouncedRefresh();
-    }
-  } catch(e) { toast('OCR failed: '+e.message); }
-});
-
-// ── FUTURE ──
-async function loadFutureExpenses() {
-  if(!currentUser) return;
-  try { const exps = await api('/api/future_expenses'); renderFutureList(exps); } catch(e) { toast(e.message); }
-}
-function renderFutureList(exps) {
-  const list = document.getElementById('futureList');
-  if(!exps.length) { list.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📌</div><div class="empty-state-text">No pinned expenses yet.</div></div>'; return; }
-  list.innerHTML = exps.map(e=>`
-    <div class="future-item">
-      <div class="future-info"><div class="future-desc">${esc(e.description)}</div><div class="future-meta">${esc(e.category)} · ${e.cycle} · ${e.date}</div></div>
-      <div class="future-amount">${fmt(e.amount)}</div>
-      <button class="btn-del" onclick="deleteFuture(${e.id})">🗑</button>
-    </div>`).join('');
-}
-document.getElementById('pinFutureBtn').addEventListener('click', async ()=>{
-  const desc = document.getElementById('futureDesc').value;
-  const amount = parseFloat(document.getElementById('futureAmt').value);
-  const category = document.getElementById('futureCat').value;
-  const cycle = document.getElementById('futureCycle').value;
-  const date = document.getElementById('futureDate').value;
-  if(!desc || !amount || !date) { toast('Please fill all fields'); return; }
-  try { await api('/api/future_expenses', { method:'POST', body: JSON.stringify({ description:desc, amount, category, cycle, date }) }); toast('Pinned'); document.getElementById('futureDesc').value=''; document.getElementById('futureAmt').value=''; loadFutureExpenses(); } catch(e) { toast(e.message); }
-});
-async function deleteFuture(id) { if(!confirm('Remove this future expense?')) return; try { await api(`/api/future_expenses/${id}`, { method:'DELETE' }); toast('Removed'); loadFutureExpenses(); } catch(e) { toast(e.message); } }
-document.getElementById('applyFutureBtn').addEventListener('click', async ()=>{
-  try { const result = await api('/api/apply_future_expenses', { method:'POST' }); toast(`Processed ${result.count} pending expenses`); loadFutureExpenses(); } catch(e) { toast(e.message); }
 });
 
 // ── INSIGHTS ──
@@ -2473,6 +2496,35 @@ async function deleteTransaction(id) {
   if(!confirm('Delete this transaction?')) return;
   try { await api(`/api/transactions/${id}`, { method:'DELETE' }); toast('Deleted'); if(document.getElementById('screen-history').classList.contains('active')) loadHistory(); } catch(e) { toast(e.message); }
 }
+
+// ── FUTURE EXPENSES ──
+async function loadFutureExpenses() {
+  if(!currentUser) return;
+  try { const exps = await api('/api/future_expenses'); renderFutureList(exps); } catch(e) { toast(e.message); }
+}
+function renderFutureList(exps) {
+  const list = document.getElementById('futureList');
+  if(!exps.length) { list.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📌</div><div class="empty-state-text">No pinned expenses yet.</div></div>'; return; }
+  list.innerHTML = exps.map(e=>`
+    <div class="future-item">
+      <div class="future-info"><div class="future-desc">${esc(e.description)}</div><div class="future-meta">${esc(e.category)} · ${e.cycle} · ${e.date}</div></div>
+      <div class="future-amount">${fmt(e.amount)}</div>
+      <button class="btn-del" onclick="deleteFuture(${e.id})">🗑</button>
+    </div>`).join('');
+}
+document.getElementById('pinFutureBtn').addEventListener('click', async ()=>{
+  const desc = document.getElementById('futureDesc').value;
+  const amount = parseFloat(document.getElementById('futureAmt').value);
+  const category = document.getElementById('futureCat').value;
+  const cycle = document.getElementById('futureCycle').value;
+  const date = document.getElementById('futureDate').value;
+  if(!desc || !amount || !date) { toast('Please fill all fields'); return; }
+  try { await api('/api/future_expenses', { method:'POST', body: JSON.stringify({ description:desc, amount, category, cycle, date }) }); toast('Pinned'); document.getElementById('futureDesc').value=''; document.getElementById('futureAmt').value=''; loadFutureExpenses(); } catch(e) { toast(e.message); }
+});
+async function deleteFuture(id) { if(!confirm('Remove this future expense?')) return; try { await api(`/api/future_expenses/${id}`, { method:'DELETE' }); toast('Removed'); loadFutureExpenses(); } catch(e) { toast(e.message); } }
+document.getElementById('applyFutureBtn').addEventListener('click', async ()=>{
+  try { const result = await api('/api/apply_future_expenses', { method:'POST' }); toast(`Processed ${result.count} pending expenses`); loadFutureExpenses(); } catch(e) { toast(e.message); }
+});
 
 // ── PROFILE ──
 document.getElementById('profileAvatar').addEventListener('input', function() {
